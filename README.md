@@ -65,11 +65,37 @@ That is the intended scientific reading: improvement direction contains a transf
 
 See [`docs/milestone-4-neural-transfer.md`](docs/milestone-4-neural-transfer.md) and [`experiments/milestone4_reference.json`](experiments/milestone4_reference.json).
 
-Install the ML extra and reproduce it with:
+### Milestone 5 - infer mechanics through interaction
+
+Milestone 5 removes the structured action descriptors used in Milestone 4. The learner sees only opaque action aliases, compact observable state, and the consequences of actions it actually tries. A fixed probe budget is used to construct empirical action representations, and those probe actions count toward environment-interaction cost.
+
+Reward mixtures are selected only on five development families: Plain, Battery, Cooldown, Heat, and Momentum. A new state-dependent Combo family is reserved for the frozen final evaluation.
+
+The development procedure selected a mixture of 75% optimum imitation and 25% pooled frontier-plus-optimum behavior. Pure transition delta was not selected.
+
+The frozen 20-replicate Combo result is:
+
+| Condition | Median total episodes | Exact-optimum success | Median environment interactions |
+| --- | ---: | ---: | ---: |
+| Uniform | 1113.5 | 11.9% | 12,323.5 |
+| Shuffled transition direction | 902.0 | 32.5% | 13,947.5 |
+| Pooled frontier + optimum | 822.0 | 46.3% | 8,252.5 |
+| **Development-selected mixture** | **509.0** | **76.3%** | **6,142.5** |
+| **Optimum imitation** | **435.5** | **80.6%** | **5,554.5** |
+| Frontier-to-optimum delta | 1186.0 | 13.8% | 32,582.0 |
+
+This is an important negative result for the simple delta hypothesis. The pure delta learner that looked useful in Milestone 4 fails badly when action effects are both inferred from experience and state-dependent. Direct optimum imitation is strongest on the untouched final family, and the development-selected mixture is second.
+
+The current interpretation is that action-frequency change is too lossy. In Combo, the value of an action depends on the current state and recent history, so future improvement learners need to model **when and why** an action becomes better rather than assigning one global score to it.
+
+See [`docs/milestone-5-interaction-inference.md`](docs/milestone-5-interaction-inference.md) and [`experiments/milestone5_reference.json`](experiments/milestone5_reference.json).
+
+Install the ML extra and reproduce the current experiments with:
 
 ```bash
 python -m pip install -e ".[dev,ml]"
 python -m levelup.experiments.milestone4
+python -m levelup.experiments.milestone5
 ```
 
-The strongest remaining simplification is that the neural model receives structured numeric action descriptors. Future milestones should force the agent to infer affordances from interaction or pixels, then move into emulator-backed tasks, real human performance ladders, and TAS data.
+The next methodological target is a state-conditioned, sequence-aware improvement learner. Emulator-backed games, real human performance ladders, TAS ingestion, and natural-language constraint learning remain future milestones.
