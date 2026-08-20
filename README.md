@@ -25,20 +25,43 @@ LevelUp is being built around a few non-negotiable principles:
 
 The full contract is in [`docs/benchmark-contract.md`](docs/benchmark-contract.md).
 
-## Current scope
+## Milestones
 
-Milestone 2 adds the first executable benchmark loop while intentionally avoiding learning algorithms or commercial games.
+### Milestone 2 - executable calibration
 
-The repository now includes:
+The first executable loop introduced deterministic replay, privileged verification, reference validation, and two tiny calibration worlds. `DetourGrid` and `Switchboard` prove that a faster rule-breaking run cannot outrank a slower valid run.
 
-- a minimal environment contract that separates agent-facing observations from privileged verification,
-- deterministic trajectory replay with state-hash checks,
-- reference validation against replayed benchmark truth,
-- two tiny calibration environments with exhaustively provable optima,
-- and tests showing that a faster rule-breaking completion is ineligible to outrank a slower valid completion.
+See [`docs/milestone-2-calibration.md`](docs/milestone-2-calibration.md).
 
-The calibration worlds are **DetourGrid**, where the shortest geometric route crosses a forbidden tile, and **Switchboard**, where a prohibited red switch solves the task in one action while the optimal valid solution takes two. These are instrument checks, not claims about human performance.
+### Milestone 3 - first optimality-transfer experiment
 
-See [`docs/milestone-2-calibration.md`](docs/milestone-2-calibration.md) for the rationale and exact success criteria.
+Milestone 3 adds the first held-out learning experiment without yet introducing neural networks or commercial games.
 
-Reinforcement learning, emulator integrations, human demonstrations, TAS ingestion, model APIs, dashboards, and leaderboard code remain intentionally out of scope for this milestone.
+`MacroTrack` generates synthetic but strictly improving trajectory ladders. The experiment trains tiny proposal priors on tasks with distances 6, 8, 9, 10, 11, and 12, then withholds all trajectories for distances 13 through 16.
+
+The key control compares two learners that see **exactly the same frontier and optimum training trajectories**:
+
+- a pooled imitation prior that discards which trajectory was better,
+- and a transition prior that explicitly learns what became more common as the frontier trajectory improved to the optimum.
+
+In the committed 20-replicate reference run, the median total candidate episodes needed to reach the exact optimum on all four held-out tasks were:
+
+| Condition | Median total episodes |
+| --- | ---: |
+| Uniform | 534.0 |
+| Frontier imitation | 80.0 |
+| Optimum imitation | 12.5 |
+| Pooled frontier + optimum | 19.5 |
+| Frontier-to-optimum delta | **9.0** |
+
+This is deliberately an **instrument-calibration result**, not evidence of general cross-game superhuman learning. The tasks share action semantics and the transition learner is a transparent count-based model. What Milestone 3 establishes is that LevelUp can represent exposure cleanly, hide the strongest held-out references, measure a discovery curve, and detect useful information in an improvement transition when that information really exists.
+
+See [`docs/milestone-3-transfer.md`](docs/milestone-3-transfer.md) and [`experiments/milestone3_reference.json`](experiments/milestone3_reference.json).
+
+Run the experiment with:
+
+```bash
+python -m levelup.experiments.milestone3
+```
+
+Reinforcement learning, neural policies, emulator integrations, human speedrun data, TAS ingestion, natural-language constraint learning, and office-task transfer remain future milestones.

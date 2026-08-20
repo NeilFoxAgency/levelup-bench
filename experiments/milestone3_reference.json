@@ -1,0 +1,107 @@
+{
+  "budgets": [1, 10, 100, 300],
+  "comparisons": {
+    "delta_sample_efficiency_vs_imitate_frontier": 8.88888888888889,
+    "delta_sample_efficiency_vs_imitate_optimum": 1.3888888888888888,
+    "delta_sample_efficiency_vs_pooled_frontier_optimum": 2.1666666666666665,
+    "delta_sample_efficiency_vs_uniform": 59.333333333333336
+  },
+  "conditions": {
+    "frontier_to_optimum_delta": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 12,
+        "held_out_task_ids": ["micro.macro_track.d13.v1", "micro.macro_track.d14.v1", "micro.macro_track.d15.v1", "micro.macro_track.d16.v1"],
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_ids": ["micro.macro_track.d6.v1", "micro.macro_track.d8.v1", "micro.macro_track.d9.v1", "micro.macro_track.d10.v1", "micro.macro_track.d11.v1", "micro.macro_track.d12.v1"]
+      },
+      "median_total_episodes_across_held_out_tasks": 9.0,
+      "prior_weights": {"dash": 0.05, "leap": 2.7333333333333334, "run": 0.05, "walk": 0.05},
+      "tasks": {
+        "13": {"median_episodes_to_optimum": 1.0, "optimum_rate_by_budget": {"1": 0.55, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "14": {"median_episodes_to_optimum": 2.0, "optimum_rate_by_budget": {"1": 0.25, "10": 0.95, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "15": {"median_episodes_to_optimum": 1.0, "optimum_rate_by_budget": {"1": 0.75, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "16": {"median_episodes_to_optimum": 2.0, "optimum_rate_by_budget": {"1": 0.35, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0}
+      }
+    },
+    "imitate_frontier": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier"],
+        "exposed_trajectory_count": 6,
+        "held_out_task_ids": ["micro.macro_track.d13.v1", "micro.macro_track.d14.v1", "micro.macro_track.d15.v1", "micro.macro_track.d16.v1"],
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_ids": ["micro.macro_track.d6.v1", "micro.macro_track.d8.v1", "micro.macro_track.d9.v1", "micro.macro_track.d10.v1", "micro.macro_track.d11.v1", "micro.macro_track.d12.v1"]
+      },
+      "median_total_episodes_across_held_out_tasks": 80.0,
+      "prior_weights": {"dash": 9.0, "leap": 12.0, "run": 8.0, "walk": 1.0},
+      "tasks": {
+        "13": {"median_episodes_to_optimum": 7.5, "optimum_rate_by_budget": {"1": 0.05, "10": 0.65, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "14": {"median_episodes_to_optimum": 11.5, "optimum_rate_by_budget": {"1": 0.05, "10": 0.45, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "15": {"median_episodes_to_optimum": 45.0, "optimum_rate_by_budget": {"1": 0.0, "10": 0.3, "100": 0.7, "300": 0.9}, "success_rate_at_budget": 0.9},
+        "16": {"median_episodes_to_optimum": 14.5, "optimum_rate_by_budget": {"1": 0.0, "10": 0.4, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0}
+      }
+    },
+    "imitate_optimum": {
+      "exposure": {
+        "exposed_stage_labels": ["optimum"],
+        "exposed_trajectory_count": 6,
+        "held_out_task_ids": ["micro.macro_track.d13.v1", "micro.macro_track.d14.v1", "micro.macro_track.d15.v1", "micro.macro_track.d16.v1"],
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_ids": ["micro.macro_track.d6.v1", "micro.macro_track.d8.v1", "micro.macro_track.d9.v1", "micro.macro_track.d10.v1", "micro.macro_track.d11.v1", "micro.macro_track.d12.v1"]
+      },
+      "median_total_episodes_across_held_out_tasks": 12.5,
+      "prior_weights": {"dash": 3.0, "leap": 18.0, "run": 2.0, "walk": 1.0},
+      "tasks": {
+        "13": {"median_episodes_to_optimum": 2.0, "optimum_rate_by_budget": {"1": 0.45, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "14": {"median_episodes_to_optimum": 2.5, "optimum_rate_by_budget": {"1": 0.35, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "15": {"median_episodes_to_optimum": 5.0, "optimum_rate_by_budget": {"1": 0.25, "10": 0.9, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "16": {"median_episodes_to_optimum": 2.5, "optimum_rate_by_budget": {"1": 0.2, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0}
+      }
+    },
+    "pooled_frontier_optimum": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 12,
+        "held_out_task_ids": ["micro.macro_track.d13.v1", "micro.macro_track.d14.v1", "micro.macro_track.d15.v1", "micro.macro_track.d16.v1"],
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_ids": ["micro.macro_track.d6.v1", "micro.macro_track.d8.v1", "micro.macro_track.d9.v1", "micro.macro_track.d10.v1", "micro.macro_track.d11.v1", "micro.macro_track.d12.v1"]
+      },
+      "median_total_episodes_across_held_out_tasks": 19.5,
+      "prior_weights": {"dash": 11.0, "leap": 29.0, "run": 9.0, "walk": 1.0},
+      "tasks": {
+        "13": {"median_episodes_to_optimum": 2.0, "optimum_rate_by_budget": {"1": 0.35, "10": 1.0, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "14": {"median_episodes_to_optimum": 3.5, "optimum_rate_by_budget": {"1": 0.15, "10": 0.9, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "15": {"median_episodes_to_optimum": 8.0, "optimum_rate_by_budget": {"1": 0.05, "10": 0.7, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "16": {"median_episodes_to_optimum": 4.5, "optimum_rate_by_budget": {"1": 0.15, "10": 0.95, "100": 1.0, "300": 1.0}, "success_rate_at_budget": 1.0}
+      }
+    },
+    "uniform": {
+      "exposure": {
+        "exposed_stage_labels": [],
+        "exposed_trajectory_count": 0,
+        "held_out_task_ids": ["micro.macro_track.d13.v1", "micro.macro_track.d14.v1", "micro.macro_track.d15.v1", "micro.macro_track.d16.v1"],
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_ids": []
+      },
+      "median_total_episodes_across_held_out_tasks": 534.0,
+      "prior_weights": {"dash": 1.0, "leap": 1.0, "run": 1.0, "walk": 1.0},
+      "tasks": {
+        "13": {"median_episodes_to_optimum": 43.0, "optimum_rate_by_budget": {"1": 0.05, "10": 0.15, "100": 0.8, "300": 1.0}, "success_rate_at_budget": 1.0},
+        "14": {"median_episodes_to_optimum": 69.0, "optimum_rate_by_budget": {"1": 0.0, "10": 0.05, "100": 0.75, "300": 0.95}, "success_rate_at_budget": 0.95},
+        "15": {"median_episodes_to_optimum": 301.0, "optimum_rate_by_budget": {"1": 0.0, "10": 0.05, "100": 0.05, "300": 0.3}, "success_rate_at_budget": 0.3},
+        "16": {"median_episodes_to_optimum": 184.0, "optimum_rate_by_budget": {"1": 0.0, "10": 0.05, "100": 0.35, "300": 0.7}, "success_rate_at_budget": 0.7}
+      }
+    }
+  },
+  "experiment": "milestone3_microtransfer_v1",
+  "held_out_distances": [13, 14, 15, 16],
+  "max_episodes": 300,
+  "note": "Synthetic in-family transfer sanity check. A positive effect here is not evidence of cross-game, human-to-TAS, or real-world optimality transfer.",
+  "replicates": 20,
+  "train_distances": [6, 8, 9, 10, 11, 12]
+}
