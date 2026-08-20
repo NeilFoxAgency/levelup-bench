@@ -28,6 +28,7 @@ Read, in this order:
 8. `docs/prior-art-and-reuse.md`
 9. `docs/speedrun-tas-roadmap.md`
 10. `docs/compute-and-reproducibility.md`
+11. `docs/future-research-agenda.md`
 
 If your task concerns an older milestone, also read that milestone's document under `docs/` and its reference artifact under `experiments/`.
 
