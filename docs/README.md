@@ -17,6 +17,7 @@ If you are joining the project for the first time, especially as a coding or res
 | [`prior-art-and-reuse.md`](prior-art-and-reuse.md) | Public benchmark and tooling repositories to inspect before reinventing infrastructure. |
 | [`speedrun-tas-roadmap.md`](speedrun-tas-roadmap.md) | How the synthetic work is intended to become real speedrun/TAS research, including data, categories, emulators, candidate selection, and record verification. |
 | [`compute-and-reproducibility.md`](compute-and-reproducibility.md) | Local Mac hardware, device portability, long-running sweeps, result storage, hashes, and reproducibility. |
+| [`future-research-agenda.md`](future-research-agenda.md) | Important later ideas that should survive the Milestone 6 focus: safe exploration, clarification, cognitive TAS, learned search priors, office digital twins, verifier gaming, continual learning, and scaling questions. |
 
 ## Milestone records
 
