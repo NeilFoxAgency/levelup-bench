@@ -4,9 +4,13 @@ on:
   push:
     branches:
       - milestone5-staging
+  pull_request:
+    branches:
+      - main
 
 jobs:
   reference:
+    if: github.head_ref == 'milestone5-staging' || github.ref == 'refs/heads/milestone5-staging'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
