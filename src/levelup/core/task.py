@@ -8,7 +8,7 @@ SCHEMA_VERSION = "0.1"
 
 
 class EnvironmentSpec(BaseModel):
-    """Identity of the environment implementation used by a task."""
+    """Identity and public configuration of the environment used by a task."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -16,6 +16,7 @@ class EnvironmentSpec(BaseModel):
     environment_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     seed: int | None = None
+    configuration: dict[str, JsonValue] = Field(default_factory=dict)
 
 
 class ConstraintSpec(BaseModel):
@@ -26,6 +27,7 @@ class ConstraintSpec(BaseModel):
     constraint_id: str = Field(min_length=1)
     description: str = Field(min_length=1)
     verifier_id: str = Field(min_length=1)
+    verifier_config: dict[str, JsonValue] = Field(default_factory=dict)
     hard: Literal[True] = True
 
 

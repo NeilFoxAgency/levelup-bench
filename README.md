@@ -27,6 +27,18 @@ The full contract is in [`docs/benchmark-contract.md`](docs/benchmark-contract.m
 
 ## Current scope
 
-The first foundation commit contains only the benchmark contract, versioned data schemas, and tests for those schemas. It intentionally does **not** include reinforcement learning, emulator integrations, games, dashboards, model APIs, or leaderboard code.
+Milestone 2 adds the first executable benchmark loop while intentionally avoiding learning algorithms or commercial games.
 
-The next milestone will add tiny deterministic open environments only after the benchmark semantics are stable.
+The repository now includes:
+
+- a minimal environment contract that separates agent-facing observations from privileged verification,
+- deterministic trajectory replay with state-hash checks,
+- reference validation against replayed benchmark truth,
+- two tiny calibration environments with exhaustively provable optima,
+- and tests showing that a faster rule-breaking completion is ineligible to outrank a slower valid completion.
+
+The calibration worlds are **DetourGrid**, where the shortest geometric route crosses a forbidden tile, and **Switchboard**, where a prohibited red switch solves the task in one action while the optimal valid solution takes two. These are instrument checks, not claims about human performance.
+
+See [`docs/milestone-2-calibration.md`](docs/milestone-2-calibration.md) for the rationale and exact success criteria.
+
+Reinforcement learning, emulator integrations, human demonstrations, TAS ingestion, model APIs, dashboards, and leaderboard code remain intentionally out of scope for this milestone.
