@@ -2,8 +2,35 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 .venv/
 dist/
 build/
 *.egg-info/
 .DS_Store
+
+# Local experiment outputs and scratch research
+runs/
+checkpoints/
+local_artifacts/
+scratch/
+tmp/
+wandb/
+tensorboard/
+mlruns/
+*.pt
+*.pth
+*.ckpt
+
+# Private or copyrighted game/emulator inputs
+roms/
+data/private/
+game_assets/private/
+emulator_states/
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
