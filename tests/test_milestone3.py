@@ -2,7 +2,7 @@ import pytest
 from pydantic import ValidationError
 
 from levelup.core.experiment import ExposureManifest, ImprovementLadder, ImprovementStage
-from levelup.envs.macrotrack import MacroTrack, STAGE_LABELS, macro_track_bundle, optimum_value
+from levelup.envs.macrotrack import STAGE_LABELS, MacroTrack, macro_track_bundle, optimum_value
 from levelup.evaluation import evaluate_trajectory
 from levelup.experiments.milestone3 import (
     HELD_OUT_DISTANCES,
