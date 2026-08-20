@@ -1,7 +1,8 @@
 """Milestone 5: learn action affordances through interaction before optimizing.
 
-Reward/model choices are selected only on development mechanic families. The final Overdrive
-family is evaluated after the method is frozen.
+Reward/model choices are selected only on development mechanic families. The final Combo family
+is evaluated after the method is frozen. An earlier Overdrive diagnostic is not treated as a
+pristine final result.
 """
 
 from __future__ import annotations
@@ -19,12 +20,11 @@ from levelup.core.experiment import ExposureManifest
 from levelup.core.trajectory import ActionRecord, Trajectory, TrajectoryStep
 from levelup.envs.adaptive_track import (
     DEVELOPMENT_FAMILIES,
-    FINAL_FAMILY,
     AdaptiveTrack,
     AdaptiveTrackBundle,
     collect_adaptive_bundles,
-    held_out_adaptive_tasks,
 )
+from levelup.envs.challenge_track import FINAL_CHALLENGE_FAMILY, held_out_combo_tasks
 from levelup.evaluation import evaluate_trajectory
 from levelup.learning.interaction import (
     PROBE_FEATURE_COUNT,
@@ -48,6 +48,7 @@ DEFAULT_MAX_EPISODES = 150
 DEFAULT_SEARCH_SEED = 1_900_000
 DEFAULT_TEMPERATURE = 0.9
 FINAL_GENERATOR_SEED = 2026
+FINAL_FAMILY = FINAL_CHALLENGE_FAMILY
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +100,7 @@ def build_probe_cache(
 
 
 def _sample_candidate(
-    environment: AdaptiveTrack,
+    environment: Any,
     weights: dict[str, float],
     rng: random.Random,
     trajectory_id: str,
@@ -137,7 +138,7 @@ def _sample_candidate(
 
 
 def search_for_optimum(
-    environment: AdaptiveTrack,
+    environment: Any,
     optimum_value: float,
     weights: dict[str, float],
     *,
@@ -191,7 +192,7 @@ def _simplex_grid() -> tuple[dict[str, float], ...]:
 
 
 def _evaluate_mix(
-    tasks: tuple[tuple[AdaptiveTrack, float], ...],
+    tasks: tuple[tuple[Any, float], ...],
     models: dict[str, InteractionScorer],
     mix: dict[str, float],
     *,
@@ -397,11 +398,7 @@ def run_experiment(
         model_epochs=cv_model_epochs,
     )
 
-    final_tasks = held_out_adaptive_tasks(
-        FINAL_FAMILY,
-        final_task_count,
-        FINAL_GENERATOR_SEED,
-    )
+    final_tasks = held_out_combo_tasks(final_task_count, FINAL_GENERATOR_SEED)
     final_ids = tuple(environment.task_spec.task_id for environment, _ in final_tasks)
     if any(bundle.environment.family == FINAL_FAMILY for bundle in all_development):
         raise RuntimeError("final family leaked into development data")
