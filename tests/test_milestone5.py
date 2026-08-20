@@ -4,12 +4,15 @@ torch = pytest.importorskip("torch")
 
 from levelup.envs.adaptive_track import (
     DEVELOPMENT_FAMILIES,
-    FINAL_FAMILY,
     collect_adaptive_bundles,
-    held_out_adaptive_tasks,
     make_adaptive_track,
 )
-from levelup.experiments.milestone5 import run_experiment
+from levelup.envs.challenge_track import (
+    FINAL_CHALLENGE_FAMILY,
+    held_out_combo_tasks,
+    make_combo_track,
+)
+from levelup.experiments.milestone5 import FINAL_FAMILY, run_experiment
 from levelup.learning.interaction import (
     PROBE_FEATURE_COUNT,
     InteractionScorer,
@@ -18,7 +21,7 @@ from levelup.learning.interaction import (
 
 
 def test_final_family_is_not_a_development_family() -> None:
-    assert FINAL_FAMILY == "overdrive"
+    assert FINAL_FAMILY == FINAL_CHALLENGE_FAMILY == "combo"
     assert FINAL_FAMILY not in DEVELOPMENT_FAMILIES
 
 
@@ -46,8 +49,28 @@ def test_probe_representation_is_deterministic_and_neural_width_matches() -> Non
     assert InteractionScorer().network[0].in_features == PROBE_FEATURE_COUNT
 
 
-def test_overdrive_tasks_have_strict_hidden_frontier_gap() -> None:
-    tasks = held_out_adaptive_tasks(FINAL_FAMILY, 2, 2026)
+def test_combo_observation_is_opaque_and_effect_is_state_dependent() -> None:
+    environment = make_combo_track(0, 2026)
+    initial = environment.reset()
+    for action in initial.observation["available_actions"]:
+        assert set(action) == {"alias"}
+
+    hidden_burst = next(
+        action for action in environment.actions if action.pressure_clear and not action.forbidden
+    )
+    assert hidden_burst.alias not in environment.available_aliases()
+
+    builder = next(
+        action
+        for action in environment.actions
+        if action.pressure_gain and not action.forbidden
+    )
+    environment.step(type("Record", (), {"name": builder.alias, "arguments": {}})())
+    assert hidden_burst.alias in environment.available_aliases()
+
+
+def test_combo_tasks_have_strict_hidden_frontier_gap() -> None:
+    tasks = held_out_combo_tasks(2, 2026)
     assert len(tasks) == 2
     assert all(environment.family == FINAL_FAMILY for environment, _ in tasks)
     assert all(optimum > 0 for _, optimum in tasks)
