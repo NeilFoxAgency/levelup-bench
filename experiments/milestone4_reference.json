@@ -1,0 +1,189 @@
+{
+  "budgets": [
+    1,
+    10,
+    50,
+    150
+  ],
+  "comparisons": {
+    "delta_sample_efficiency_vs_imitate_optimum": 0.5891472868217055,
+    "delta_sample_efficiency_vs_pooled_frontier_optimum": 1.0790697674418606,
+    "delta_sample_efficiency_vs_shuffled_transition_direction": 3.268217054263566,
+    "delta_sample_efficiency_vs_uniform": 3.1736434108527134
+  },
+  "conditions": {
+    "frontier_to_optimum_delta": {
+      "exposure": {
+        "condition_id": "frontier_to_optimum_delta",
+        "exposed_stage_labels": [
+          "frontier",
+          "optimum"
+        ],
+        "exposed_trajectory_count": 240,
+        "held_out_task_ids": [
+          "micro.mechanic_track.heat.s1337.i1.v1",
+          "micro.mechanic_track.heat.s1337.i5.v1",
+          "micro.mechanic_track.heat.s1337.i6.v1",
+          "micro.mechanic_track.heat.s1337.i7.v1",
+          "micro.mechanic_track.heat.s1337.i8.v1",
+          "micro.mechanic_track.heat.s1337.i9.v1",
+          "micro.mechanic_track.heat.s1337.i11.v1",
+          "micro.mechanic_track.heat.s1337.i12.v1"
+        ],
+        "manifest_sha256": "5ee4a5c90e6ded2b31d42f8748cd4101453f794fc8f50b5bef3e95bdd158d241",
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 120
+      },
+      "held_out_task_success_rate": 0.94375,
+      "mean_total_episodes_across_held_out_tasks": 321.8,
+      "median_total_episodes_across_held_out_tasks": 322.5,
+      "training_loss": 0.029034415259957314
+    },
+    "imitate_optimum": {
+      "exposure": {
+        "condition_id": "imitate_optimum",
+        "exposed_stage_labels": [
+          "optimum"
+        ],
+        "exposed_trajectory_count": 120,
+        "held_out_task_ids": [
+          "micro.mechanic_track.heat.s1337.i1.v1",
+          "micro.mechanic_track.heat.s1337.i5.v1",
+          "micro.mechanic_track.heat.s1337.i6.v1",
+          "micro.mechanic_track.heat.s1337.i7.v1",
+          "micro.mechanic_track.heat.s1337.i8.v1",
+          "micro.mechanic_track.heat.s1337.i9.v1",
+          "micro.mechanic_track.heat.s1337.i11.v1",
+          "micro.mechanic_track.heat.s1337.i12.v1"
+        ],
+        "manifest_sha256": "93f2280d5eb7c7a3e4c64111bd33737987c06139e6a3bdc75b061642d2246214",
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 120
+      },
+      "held_out_task_success_rate": 0.99375,
+      "mean_total_episodes_across_held_out_tasks": 206.5,
+      "median_total_episodes_across_held_out_tasks": 190.0,
+      "training_loss": 0.014446052722632885
+    },
+    "pooled_frontier_optimum": {
+      "exposure": {
+        "condition_id": "pooled_frontier_optimum",
+        "exposed_stage_labels": [
+          "frontier",
+          "optimum"
+        ],
+        "exposed_trajectory_count": 240,
+        "held_out_task_ids": [
+          "micro.mechanic_track.heat.s1337.i1.v1",
+          "micro.mechanic_track.heat.s1337.i5.v1",
+          "micro.mechanic_track.heat.s1337.i6.v1",
+          "micro.mechanic_track.heat.s1337.i7.v1",
+          "micro.mechanic_track.heat.s1337.i8.v1",
+          "micro.mechanic_track.heat.s1337.i9.v1",
+          "micro.mechanic_track.heat.s1337.i11.v1",
+          "micro.mechanic_track.heat.s1337.i12.v1"
+        ],
+        "manifest_sha256": "933e6c0f48a326636a45dc6e1cb87799b27890cd908222cafba9eb3c7d9a2c65",
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 120
+      },
+      "held_out_task_success_rate": 0.91875,
+      "mean_total_episodes_across_held_out_tasks": 377.85,
+      "median_total_episodes_across_held_out_tasks": 348.0,
+      "training_loss": 0.008983299136161804
+    },
+    "shuffled_transition_direction": {
+      "exposure": {
+        "condition_id": "shuffled_transition_direction",
+        "exposed_stage_labels": [
+          "frontier",
+          "optimum"
+        ],
+        "exposed_trajectory_count": 240,
+        "held_out_task_ids": [
+          "micro.mechanic_track.heat.s1337.i1.v1",
+          "micro.mechanic_track.heat.s1337.i5.v1",
+          "micro.mechanic_track.heat.s1337.i6.v1",
+          "micro.mechanic_track.heat.s1337.i7.v1",
+          "micro.mechanic_track.heat.s1337.i8.v1",
+          "micro.mechanic_track.heat.s1337.i9.v1",
+          "micro.mechanic_track.heat.s1337.i11.v1",
+          "micro.mechanic_track.heat.s1337.i12.v1"
+        ],
+        "manifest_sha256": "a0849379ad836caf7800a38c0ffd9907456b5dfea9fc352d0782c1bea869ac4e",
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 120
+      },
+      "held_out_task_success_rate": 0.19375,
+      "mean_total_episodes_across_held_out_tasks": 1023.6,
+      "median_total_episodes_across_held_out_tasks": 1054.0,
+      "training_loss": 0.2307344228029251
+    },
+    "uniform": {
+      "exposure": {
+        "condition_id": "uniform",
+        "exposed_stage_labels": [],
+        "exposed_trajectory_count": 0,
+        "held_out_task_ids": [
+          "micro.mechanic_track.heat.s1337.i1.v1",
+          "micro.mechanic_track.heat.s1337.i5.v1",
+          "micro.mechanic_track.heat.s1337.i6.v1",
+          "micro.mechanic_track.heat.s1337.i7.v1",
+          "micro.mechanic_track.heat.s1337.i8.v1",
+          "micro.mechanic_track.heat.s1337.i9.v1",
+          "micro.mechanic_track.heat.s1337.i11.v1",
+          "micro.mechanic_track.heat.s1337.i12.v1"
+        ],
+        "manifest_sha256": "6e80c20331f6b1c3bac4afd50af446b43ae38366aa18f1b37b3461079ce95828",
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 0
+      },
+      "held_out_task_success_rate": 0.28125,
+      "mean_total_episodes_across_held_out_tasks": 1017.75,
+      "median_total_episodes_across_held_out_tasks": 1023.5,
+      "training_loss": null
+    }
+  },
+  "experiment": "milestone4_neural_cross_mechanic_v1",
+  "held_out_family": "heat",
+  "held_out_task_count": 8,
+  "max_episodes": 150,
+  "model": {
+    "action_alias_input": false,
+    "epochs": 250,
+    "family_id_input": false,
+    "hidden_widths": [
+      32,
+      16
+    ],
+    "input_features": [
+      "progress",
+      "tick_cost",
+      "uses_resource",
+      "restores_resource",
+      "raises_pressure",
+      "clears_pressure",
+      "is_enabler",
+      "target_scale"
+    ],
+    "model_seed": 42
+  },
+  "note": "Synthetic cross-mechanic neural transfer experiment. Positive transfer here is not evidence of cross-game human-to-TAS transfer; the model still receives structured numeric action descriptors and structured constraint access.",
+  "paired_replicates": {
+    "delta_beats_pooled_count": 13,
+    "delta_beats_shuffled_count": 20,
+    "replicates": 20
+  },
+  "replicates": 20,
+  "train_families": [
+    "plain",
+    "battery",
+    "cooldown"
+  ],
+  "train_tasks_per_family": 40
+}

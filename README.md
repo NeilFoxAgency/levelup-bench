@@ -35,33 +35,41 @@ See [`docs/milestone-2-calibration.md`](docs/milestone-2-calibration.md).
 
 ### Milestone 3 - first optimality-transfer experiment
 
-Milestone 3 adds the first held-out learning experiment without yet introducing neural networks or commercial games.
+Milestone 3 added the first held-out learning experiment using a transparent count-based proposal prior. `MacroTrack` demonstrated that preserving the direction from a strong trajectory to an optimum can improve sample efficiency on withheld task instances when a transferable signal is deliberately present.
 
-`MacroTrack` generates synthetic but strictly improving trajectory ladders. The experiment trains tiny proposal priors on tasks with distances 6, 8, 9, 10, 11, and 12, then withholds all trajectories for distances 13 through 16.
-
-The key control compares two learners that see **exactly the same frontier and optimum training trajectories**:
-
-- a pooled imitation prior that discards which trajectory was better,
-- and a transition prior that explicitly learns what became more common as the frontier trajectory improved to the optimum.
-
-In the committed 20-replicate reference run, the median total candidate episodes needed to reach the exact optimum on all four held-out tasks were:
-
-| Condition | Median total episodes |
-| --- | ---: |
-| Uniform | 534.0 |
-| Frontier imitation | 80.0 |
-| Optimum imitation | 12.5 |
-| Pooled frontier + optimum | 19.5 |
-| Frontier-to-optimum delta | **9.0** |
-
-This is deliberately an **instrument-calibration result**, not evidence of general cross-game superhuman learning. The tasks share action semantics and the transition learner is a transparent count-based model. What Milestone 3 establishes is that LevelUp can represent exposure cleanly, hide the strongest held-out references, measure a discovery curve, and detect useful information in an improvement transition when that information really exists.
+The result is intentionally treated as instrument calibration rather than evidence of general cross-game learning.
 
 See [`docs/milestone-3-transfer.md`](docs/milestone-3-transfer.md) and [`experiments/milestone3_reference.json`](experiments/milestone3_reference.json).
 
-Run the experiment with:
+### Milestone 4 - neural cross-mechanic transfer
+
+Milestone 4 removes the stable action-name shortcut and replaces the hand-written proposal learner with a small neural network.
+
+Training uses three mechanic families: Plain, Battery, and Cooldown. The entire Heat mechanic family is held out. Every task receives new opaque action aliases, and the neural model receives neither those aliases nor the family identifier.
+
+The critical controls use the same exposed frontier and optimum trajectories while changing whether the learner preserves the direction of improvement.
+
+The committed 20-replicate reference run uses eight held-out Heat tasks and a 150-episode search budget per task:
+
+| Condition | Median total episodes | Held-out task success rate |
+| --- | ---: | ---: |
+| Uniform | 1023.5 | 28.1% |
+| Shuffled transition direction | 1054.0 | 19.4% |
+| Pooled frontier + optimum | 348.0 | 91.9% |
+| Frontier-to-optimum delta | **322.5** | **94.4%** |
+| Optimum imitation | **190.0** | **99.4%** |
+
+The directed transition model beats the shuffled-direction control in all 20 paired replicates and beats the same-data pooled control in 13 of 20. However, direct optimum imitation remains the strongest condition.
+
+That is the intended scientific reading: improvement direction contains a transferable neural signal in this synthetic cross-mechanic setting, but Milestone 4 does **not** show that transition learning is superior to simply imitating optimal demonstrations.
+
+See [`docs/milestone-4-neural-transfer.md`](docs/milestone-4-neural-transfer.md) and [`experiments/milestone4_reference.json`](experiments/milestone4_reference.json).
+
+Install the ML extra and reproduce it with:
 
 ```bash
-python -m levelup.experiments.milestone3
+python -m pip install -e ".[dev,ml]"
+python -m levelup.experiments.milestone4
 ```
 
-Reinforcement learning, neural policies, emulator integrations, human speedrun data, TAS ingestion, natural-language constraint learning, and office-task transfer remain future milestones.
+The strongest remaining simplification is that the neural model receives structured numeric action descriptors. Future milestones should force the agent to infer affordances from interaction or pixels, then move into emulator-backed tasks, real human performance ladders, and TAS data.
