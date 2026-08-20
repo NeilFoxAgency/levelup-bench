@@ -31,3 +31,13 @@ addopts = "-q"
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+
+[tool.ruff.lint]
+# Keep CI focused on correctness and import hygiene. More opinionated Ruff families can be
+# adopted deliberately later instead of changing frozen experiment code to satisfy new defaults.
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ruff.lint.per-file-ignores]
+# Historical Milestone 5 source retains this harmless type import. Avoid rewriting the frozen
+# experiment solely for lint while still applying F401 to new code.
+"src/levelup/experiments/milestone5.py" = ["F401"]
