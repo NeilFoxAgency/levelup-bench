@@ -1,0 +1,193 @@
+{
+  "comparisons": {
+    "delta_vs_imitate_optimum": {"left_wins": 0, "right_wins": 20, "ties": 0},
+    "delta_vs_pooled_frontier_optimum": {"left_wins": 2, "right_wins": 18, "ties": 0},
+    "delta_vs_robust_selected_mix": {"left_wins": 0, "right_wins": 20, "ties": 0},
+    "delta_vs_shuffled_transition_direction": {"left_wins": 0, "right_wins": 20, "ties": 0},
+    "delta_vs_uniform": {"left_wins": 9, "right_wins": 9, "ties": 2}
+  },
+  "conditions": {
+    "frontier_to_optimum_delta": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 300,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 150
+      },
+      "held_out_task_success_rate": 0.1375,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 1128.6,
+      "median_total_environment_interactions": 32582.0,
+      "median_total_episodes": 1186.0,
+      "mix": {"delta": 1.0}
+    },
+    "imitate_optimum": {
+      "exposure": {
+        "exposed_stage_labels": ["optimum"],
+        "exposed_trajectory_count": 150,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 150
+      },
+      "held_out_task_success_rate": 0.80625,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 451.1,
+      "median_total_environment_interactions": 5554.5,
+      "median_total_episodes": 435.5,
+      "mix": {"optimum": 1.0}
+    },
+    "pooled_frontier_optimum": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 300,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 150
+      },
+      "held_out_task_success_rate": 0.4625,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 842.05,
+      "median_total_environment_interactions": 8252.5,
+      "median_total_episodes": 822.0,
+      "mix": {"pooled": 1.0}
+    },
+    "robust_selected_mix": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 300,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 150
+      },
+      "held_out_task_success_rate": 0.7625,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 523.85,
+      "median_total_environment_interactions": 6142.5,
+      "median_total_episodes": 509.0,
+      "mix": {"delta": 0.0, "optimum": 0.75, "pooled": 0.25}
+    },
+    "shuffled_transition_direction": {
+      "exposure": {
+        "exposed_stage_labels": ["frontier", "optimum"],
+        "exposed_trajectory_count": 300,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 150
+      },
+      "held_out_task_success_rate": 0.325,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 914.7,
+      "median_total_environment_interactions": 13947.5,
+      "median_total_episodes": 902.0,
+      "mix": {"shuffled": 1.0}
+    },
+    "uniform": {
+      "exposure": {
+        "exposed_stage_labels": [],
+        "exposed_trajectory_count": 0,
+        "held_out_task_count": 8,
+        "metadata": {
+          "action_descriptors_visible": false,
+          "final_family_used_for_model_selection": false,
+          "interaction_probe_access": true,
+          "milestone": 5,
+          "probes_per_action": 6
+        },
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "train_task_count": 0
+      },
+      "held_out_task_success_rate": 0.11875,
+      "mean_probe_interactions_per_task": 110.225,
+      "mean_total_episodes": 1135.7,
+      "median_total_environment_interactions": 12323.5,
+      "median_total_episodes": 1113.5,
+      "mix": null
+    }
+  },
+  "development_families": ["plain", "battery", "cooldown", "heat", "momentum"],
+  "development_tasks_per_family": 30,
+  "experiment": "milestone5_interaction_inferred_transfer_v1",
+  "final_family": "combo",
+  "final_task_count": 8,
+  "github_actions_run_id": 32427935733,
+  "max_episodes": 150,
+  "method_selection": {
+    "criterion": "minimize worst leave-one-development-family median environment interactions; tie-break mean interactions, then mean success",
+    "final_family_consulted": false,
+    "selected_mix": {"delta": 0.0, "optimum": 0.75, "pooled": 0.25},
+    "top_candidates": [
+      {
+        "mean_family_median_interactions": 988.5,
+        "mean_success_rate": 0.875,
+        "mix": {"delta": 0.0, "optimum": 0.75, "pooled": 0.25},
+        "worst_family_median_interactions": 1845.0
+      },
+      {
+        "mean_family_median_interactions": 1205.7,
+        "mean_success_rate": 0.775,
+        "mix": {"delta": 0.0, "optimum": 0.5, "pooled": 0.5},
+        "worst_family_median_interactions": 1864.0
+      },
+      {
+        "mean_family_median_interactions": 1072.3,
+        "mean_success_rate": 0.875,
+        "mix": {"delta": 0.0, "optimum": 1.0, "pooled": 0.0},
+        "worst_family_median_interactions": 2117.5
+      }
+    ]
+  },
+  "model": {
+    "action_alias_input": false,
+    "action_descriptors_visible": false,
+    "family_id_input": false,
+    "hidden_widths": [48, 24],
+    "model_seed": 42
+  },
+  "note": "Synthetic interaction-inference experiment. Oracle action descriptors are hidden, but structured constraint access and compact state observations remain.",
+  "probe_feature_count": 49,
+  "probes_per_action": 6,
+  "raw_reference_sha256": "a98ea99dd13f55b3c4bed626a68b63803b65082420fec2aecc3d171b52f06aea",
+  "replicates": 20
+}
