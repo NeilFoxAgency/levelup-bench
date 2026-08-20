@@ -10,6 +10,23 @@ The core hypothesis is deliberately stronger than imitation learning:
 
 LevelUp also treats natural-language constraints as part of the task definition. A faster run that violates a hard constraint is invalid and cannot outrank a slower valid run.
 
+## Research-agent handoff
+
+If you are continuing the project in Codex or another research/coding agent, start with [`AGENTS.md`](AGENTS.md).
+
+The repository now contains durable research context so implementation work does not lose the long-horizon goal. The main research map is [`docs/README.md`](docs/README.md), including:
+
+- [`docs/research-vision.md`](docs/research-vision.md) - the full hypothesis, speedrun/TAS destination, constrained optimization, economic transfer, and cognitive-efficiency ideas,
+- [`docs/research-history.md`](docs/research-history.md) - what Milestones 1-5 actually established and what failed,
+- [`docs/research-methodology.md`](docs/research-methodology.md) - experimental-integrity rules and final-set discipline,
+- [`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md) - the immediate state-conditioned, sequence-aware research program,
+- [`docs/prior-art-and-reuse.md`](docs/prior-art-and-reuse.md) - public benchmark/tool repositories to inspect instead of reinventing mature infrastructure,
+- [`docs/speedrun-tas-roadmap.md`](docs/speedrun-tas-roadmap.md) - the path from synthetic worlds to exact speedrun/TAS trajectories,
+- [`docs/metrics-and-reporting.md`](docs/metrics-and-reporting.md) - gap closure, reliability, sample efficiency, and cognitive-cost conventions,
+- [`docs/compute-and-reproducibility.md`](docs/compute-and-reproducibility.md) - local compute and long-running experiment discipline.
+
+The current implementation is intentionally still synthetic. Do not mistake the immediate Milestone 6 task for the final research objective.
+
 ## Benchmark contract
 
 LevelUp is being built around a few non-negotiable principles:
@@ -90,12 +107,25 @@ The current interpretation is that action-frequency change is too lossy. In Comb
 
 See [`docs/milestone-5-interaction-inference.md`](docs/milestone-5-interaction-inference.md) and [`experiments/milestone5_reference.json`](experiments/milestone5_reference.json).
 
-Install the ML extra and reproduce the current experiments with:
+## Reproduce current experiments
+
+Install the ML and development dependencies:
 
 ```bash
 python -m pip install -e ".[dev,ml]"
+```
+
+Run the test suite:
+
+```bash
+pytest
+```
+
+Run the current neural milestones:
+
+```bash
 python -m levelup.experiments.milestone4
 python -m levelup.experiments.milestone5
 ```
 
-The next methodological target is a state-conditioned, sequence-aware improvement learner. Emulator-backed games, real human performance ladders, TAS ingestion, and natural-language constraint learning remain future milestones.
+The next methodological target is a state-conditioned, sequence-aware improvement learner. Emulator-backed games, real human performance ladders, TAS ingestion, natural-language constraint learning, and office-task transfer remain later milestones.
