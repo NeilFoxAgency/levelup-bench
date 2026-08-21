@@ -1135,6 +1135,12 @@ def test_multiple_shared_references_require_canonical_order() -> None:
             .model_copy(update={"shared_artifact": model, "shared_artifacts": (evidence,)})
             .model_dump(mode="json")
         )
+    with pytest.raises(ValidationError, match="only training artifacts"):
+        UnitPayload.model_validate(
+            _payload(planned)
+            .model_copy(update={"shared_artifact": evidence})
+            .model_dump(mode="json")
+        )
     view = SharedArtifactReference(
         kind="training_data_view",
         key_id="1" * 64,

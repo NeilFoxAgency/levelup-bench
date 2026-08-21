@@ -167,6 +167,8 @@ def _validate_unit_shared_references(
 ) -> None:
     if legacy is not None and references:
         raise ValueError("legacy shared_artifact cannot be combined with shared_artifacts")
+    if legacy is not None and legacy.kind != "training_artifact":
+        raise ValueError("legacy shared_artifact accepts only training artifacts")
     if len({item.kind for item in references}) != len(references):
         raise ValueError("a unit may have at most one shared artifact per kind")
     if references != tuple(sorted(references, key=lambda item: _SHARED_KIND_ORDER[item.kind])):
