@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from torch import nn
 
 from levelup.experiments.phase1_smoke import smoke_executor
 from levelup.experiments.runner import (
@@ -25,7 +26,9 @@ from levelup.experiments.runner.aggregate import IncompleteRunError
 from levelup.experiments.runner.config import DevicePolicy, canonical_json_bytes
 from levelup.experiments.runner.provenance import capture_system_provenance
 from levelup.experiments.runner.records import (
+    PlannedSharedArtifact,
     PlannedUnit,
+    SharedArtifactReference,
     SystemProvenance,
     UnitRecord,
 )
@@ -33,6 +36,12 @@ from levelup.experiments.runner.storage import (
     ArtifactValidationError,
     _atomic_write_json,
     plan_expected_units,
+)
+from levelup.experiments.runner.training_artifacts import (
+    TrainingArtifactKey,
+    TrainingReportMetadata,
+    load_training_cost,
+    write_training_artifact,
 )
 
 
@@ -128,6 +137,10 @@ def _config(*, conditions: int = 2, tasks: int = 2, replicates: int = 2) -> Expe
             "rule": "Lowest paired mean.",
         },
         "diagnostic_fields": ["test"],
+        "parameters": {
+            "fold_id": "fold-0",
+            "heldout_family_id": "family-0",
+        },
     }
     return ExperimentConfig.model_validate(raw)
 
@@ -185,6 +198,35 @@ def _payload(planned: PlannedUnit) -> UnitPayload:
     )
 
 
+def _training_key(*, condition_id: str = "B2") -> TrainingArtifactKey:
+    return TrainingArtifactKey(
+        screening_candidates_sha256="1" * 64,
+        protocol_sha256="2" * 64,
+        task_manifest_sha256="3" * 64,
+        expected_unit_plan_sha256="4" * 64,
+        exposure_sha256="5" * 64,
+        training_data_sha256="6" * 64,
+        provenance_sha256="7" * 64,
+        fold_id="fold-0",
+        heldout_family_id="family-0",
+        ordered_training_task_ids=("task-1", "task-2", "task-3"),
+        ordered_heldout_task_ids=("task-0",),
+        condition_id=condition_id,
+        learner_id="test-learner",
+        objective_id="listwise",
+        backbone_id="global_affordance_mlp_listwise_v1",
+        training_tuple_id="lr0p003-e120",
+        replicate=0,
+        model_seed=10,
+        data_order_seed=40,
+        probe_seeds=(20, 21, 22),
+        environment_seeds=(100, 101, 102),
+        probe_spec_sha256="8" * 64,
+        training_config_sha256="9" * 64,
+        capacity_spec_sha256="a" * 64,
+    )
+
+
 def _store(tmp_path: Path, config: ExperimentConfig | None = None) -> RunStore:
     store = RunStore(tmp_path, config or _config(), repository=tmp_path)
     store.initialize()
@@ -230,6 +272,31 @@ def test_run_identity_is_canonical_but_changes_with_scientific_inputs(tmp_path: 
     assert scientific_config_sha256(config) != scientific_config_sha256(
         ExperimentConfig.model_validate(changed)
     )
+
+
+def test_phase1_seed_derivation_remains_backward_compatible() -> None:
+    config = _config(conditions=1, tasks=1, replicates=2)
+    units = plan_expected_units(config).units
+    first, second = sorted(units, key=lambda item: item.seeds.model_seed)
+    stride = config.seed_policy.replicate_stride
+    assert second.seeds.model_seed - first.seeds.model_seed == 1
+    assert second.seeds.data_order_seed - first.seeds.data_order_seed == 1
+    assert second.seeds.probe_seed - first.seeds.probe_seed == stride
+    assert second.seeds.search_seed - first.seeds.search_seed == stride
+
+
+def test_phase2_seed_derivation_uses_replicate_stride_for_every_channel() -> None:
+    raw = _config(conditions=1, tasks=1, replicates=2).model_dump(mode="json")
+    raw["seed_policy"]["derivation_version"] = "phase2.v1"
+    config = ExperimentConfig.model_validate(raw)
+    first, second = sorted(
+        plan_expected_units(config).units, key=lambda item: item.seeds.model_seed
+    )
+    stride = config.seed_policy.replicate_stride
+    assert second.seeds.model_seed - first.seeds.model_seed == stride
+    assert second.seeds.data_order_seed - first.seeds.data_order_seed == stride
+    assert second.seeds.probe_seed - first.seeds.probe_seed == stride
+    assert second.seeds.search_seed - first.seeds.search_seed == stride
 
 
 def test_config_rejects_final_selection_overlap_and_empty_exposure() -> None:
@@ -774,3 +841,184 @@ def test_committed_phase1_smoke_config_executes_only_development_data(
     assert aggregate.complete
     assert aggregate.inventory.expected == 8
     assert all(record.key.phase == "development" for record in store.completed_records())
+
+
+def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -> None:
+    config = _config(conditions=2, tasks=1, replicates=2)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    consumers = tuple(
+        unit.unit_id for unit in base.expected.units if unit.key.replicate == 0
+    )
+    key = _training_key()
+    plan = PlannedSharedArtifact(
+        key_id=key.key_id,
+        owner_condition_id="condition-0",
+        owner_group_id="B2",
+        owner_family_id="family-0",
+        owner_fold_id="fold-0",
+        owner_replicate=0,
+        consumer_phase="development",
+        consumer_condition_ids=("condition-0", "condition-1"),
+        consumer_unit_ids=consumers,
+    )
+    store = RunStore(
+        tmp_path,
+        config,
+        repository=tmp_path,
+        shared_artifacts=(plan,),
+    )
+    store.initialize()
+    model = nn.Linear(2, 1)
+    manifest = write_training_artifact(
+        store.run_dir,
+        key=key,
+        model_id=key.backbone_id,
+        model=model,
+        accounting=ResourceAccounting(
+            training=PhaseAccounting(optimizer_steps=99)
+        ),
+        report=TrainingReportMetadata(
+            trainable_parameters=3,
+            optimizer_steps=99,
+            forward_passes=99,
+            training_examples=3,
+        ),
+    )
+    cost = load_training_cost(store.run_dir, key)
+
+    def executor(planned: PlannedUnit) -> UnitPayload:
+        payload = _payload(planned)
+        reference = (
+            SharedArtifactReference(
+                key_id=key.key_id,
+                artifact_id=manifest.artifact_id,
+                cost_id=cost.cost_id,
+            )
+            if planned.unit_id in consumers
+            else None
+        )
+        return payload.model_copy(
+            update={
+                "shared_artifact": reference,
+                "accounting": payload.accounting.model_copy(
+                    update={"training": PhaseAccounting()}
+                ),
+            }
+        )
+
+    ExperimentRunner(store).execute(executor)
+    aggregate = aggregate_run(store, strict=False)
+    assert aggregate.shared_inventory.model_dump() == {
+        "planned": 1,
+        "referenced": 1,
+        "complete": True,
+    }
+    assert aggregate.shared_accounting_by_owner_group["B2"].training.optimizer_steps == 99
+
+
+def test_no_shared_plan_preserves_legacy_aggregate_defaults(tmp_path: Path) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    ExperimentRunner(store).execute(_payload)
+    aggregate = aggregate_run(store, strict=True)
+    assert aggregate.shared_artifacts_sha256 is None
+    assert aggregate.shared_inventory.model_dump() == {
+        "planned": 0,
+        "referenced": 0,
+        "complete": True,
+    }
+    assert aggregate.shared_accounting_by_owner_group == {}
+
+
+def test_shared_plan_rejects_overlapping_consumers(tmp_path: Path) -> None:
+    config = _config(conditions=2, tasks=1, replicates=1)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    first, second = base.expected.units
+    shared = dict(
+        owner_condition_id=first.key.condition_id,
+        owner_family_id="family-0",
+        owner_fold_id="fold-0",
+        owner_replicate=0,
+        consumer_phase="development",
+        consumer_condition_ids=(first.key.condition_id,),
+        consumer_unit_ids=(first.unit_id,),
+    )
+    with pytest.raises(ValidationError, match="multiple shared artifacts"):
+        RunStore(
+            tmp_path,
+            config,
+            repository=tmp_path,
+            shared_artifacts=(
+                PlannedSharedArtifact(key_id="a" * 64, **shared),
+                PlannedSharedArtifact(
+                    key_id="b" * 64,
+                    **{
+                        **shared,
+                        "owner_condition_id": second.key.condition_id,
+                    },
+                ),
+            ),
+        )
+
+
+def test_shared_plan_rejects_unlisted_consumer_condition(tmp_path: Path) -> None:
+    config = _config(conditions=2, tasks=1, replicates=1)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    consumers = tuple(unit.unit_id for unit in base.expected.units)
+    with pytest.raises(ArtifactValidationError, match="consumer conditions"):
+        RunStore(
+            tmp_path,
+            config,
+            repository=tmp_path,
+            shared_artifacts=(
+                PlannedSharedArtifact(
+                    key_id="a" * 64,
+                    owner_condition_id="condition-0",
+                    owner_family_id="family-0",
+                    owner_fold_id="fold-0",
+                    owner_replicate=0,
+                    consumer_phase="development",
+                    consumer_condition_ids=("condition-0",),
+                    consumer_unit_ids=consumers,
+                ),
+            ),
+        )
+
+
+def test_shared_cost_loader_rejects_symlinked_cost_root(tmp_path: Path) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    consumer = base.expected.units[0]
+    key = _training_key()
+    plan = PlannedSharedArtifact(
+        key_id=key.key_id,
+        owner_condition_id="condition-0",
+        owner_group_id="B2",
+        owner_family_id="family-0",
+        owner_fold_id="fold-0",
+        owner_replicate=0,
+        consumer_phase="development",
+        consumer_condition_ids=("condition-0",),
+        consumer_unit_ids=(consumer.unit_id,),
+    )
+    store = RunStore(tmp_path / "run", config, repository=tmp_path, shared_artifacts=(plan,))
+    store.initialize()
+    external = tmp_path / "external"
+    model = nn.Linear(2, 1)
+    write_training_artifact(
+        external,
+        key=key,
+        model_id=key.backbone_id,
+        model=model,
+        accounting=ResourceAccounting(),
+        report=TrainingReportMetadata(
+            trainable_parameters=3,
+            optimizer_steps=0,
+            forward_passes=0,
+            training_examples=0,
+        ),
+    )
+    (store.run_dir / "training-artifact-costs").symlink_to(
+        external / "training-artifact-costs", target_is_directory=True
+    )
+    with pytest.raises(ArtifactValidationError, match="symlink"):
+        store.load_shared_cost(key.key_id)

@@ -23,7 +23,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import nn
 
 from levelup.experiments.runner.config import canonical_json_bytes
-from levelup.experiments.runner.records import ResourceAccounting
+from levelup.experiments.runner.records import (
+    ResourceAccounting,
+    TrainingArtifactCostRecord,
+    TrainingPreparationAccounting,
+)
 from levelup.experiments.runner.storage import ArtifactValidationError
 
 HASH_FIELD = Field(pattern=r"^[0-9a-f]{64}$")
@@ -171,31 +175,6 @@ class TrainingArtifactManifest(BaseModel):
         return _digest(body)
 
 
-class TrainingArtifactCostRecord(BaseModel):
-    """First-writer accounting for one immutable training artifact key."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    schema_version: Literal["runner.training-artifact-cost.v1"] = "runner.training-artifact-cost.v1"
-    cost_id: str = HASH_FIELD
-    key_id: str = HASH_FIELD
-    artifact_id: str = HASH_FIELD
-    key: TrainingArtifactKey
-    accounting: ResourceAccounting
-
-    @model_validator(mode="after")
-    def binding_is_exact(self) -> "TrainingArtifactCostRecord":
-        if self.key_id != self.key.key_id:
-            raise ValueError("cost key ID does not match key")
-        if self.cost_id != self.expected_cost_id:
-            raise ValueError("cost ID does not match canonical cost body")
-        return self
-
-    @property
-    def expected_cost_id(self) -> str:
-        return _digest(self.model_dump(mode="json", exclude={"cost_id"}))
-
-
 class TrainingArtifactKeyIndex(BaseModel):
     """Immutable key-to-artifact binding, claimed after artifact publication."""
 
@@ -339,6 +318,17 @@ def write_training_artifact(
     )
     if report.trainable_parameters != actual_parameters:
         raise ArtifactValidationError("training report parameter count does not match model")
+    if accounting.search != ResourceAccounting().search or accounting.evaluator != ResourceAccounting().evaluator:
+        raise ArtifactValidationError(
+            "training preparation cannot include search or evaluator accounting"
+        )
+    preparation_accounting = TrainingPreparationAccounting(
+        setup=accounting.setup,
+        training_probes=accounting.probes,
+        reference_replay=accounting.replay,
+        training=accounting.training,
+        serialization=accounting.serialization,
+    )
     tensors = _state_tensors(model)
     output = Path(output_root)
     if output.is_symlink():
@@ -430,11 +420,12 @@ def write_training_artifact(
         if winner.artifact_id != artifact_id:
             raise ArtifactValidationError("different artifact already won key index race")
     cost_body = {
-        "schema_version": "runner.training-artifact-cost.v1",
+        "schema_version": "runner.training-artifact-cost.v2",
         "key_id": key.key_id,
         "artifact_id": artifact_id,
+        "scope": "training_preparation",
         "key": key.model_dump(mode="json"),
-        "accounting": accounting.model_dump(mode="json"),
+        "accounting": preparation_accounting.model_dump(mode="json"),
     }
     cost = TrainingArtifactCostRecord.model_validate({"cost_id": _digest(cost_body), **cost_body})
     costs_root = output / "training-artifact-costs"
@@ -565,7 +556,7 @@ def load_training_cost(
         record = TrainingArtifactCostRecord.model_validate(raw)
     except (TypeError, ValueError):
         raise ArtifactValidationError("invalid training artifact cost record") from None
-    if record.key != expected_key or record.key_id != expected_key.key_id:
+    if record.key != expected_key.model_dump(mode="json") or record.key_id != expected_key.key_id:
         raise ArtifactValidationError("training artifact cost key mismatch")
     if not HEX64.fullmatch(record.artifact_id):
         raise ArtifactValidationError("invalid cost artifact ID")

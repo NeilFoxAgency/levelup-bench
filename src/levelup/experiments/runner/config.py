@@ -162,7 +162,7 @@ class SeedPolicy(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    derivation_version: Literal["phase1.v1"] = "phase1.v1"
+    derivation_version: Literal["phase1.v1", "phase2.v1"] = "phase1.v1"
     model_seed_base: int
     environment_seed_offset: int = 0
     probe_seed_base: int

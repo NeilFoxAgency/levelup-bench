@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    JsonValue,
     StrictBool,
     StrictFloat,
     StrictInt,
@@ -81,6 +82,69 @@ class ExpectedUnits(BaseModel):
         return self
 
 
+class PlannedSharedArtifact(BaseModel):
+    """One shared artifact and its exact atomic-unit consumers."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["training_artifact"] = "training_artifact"
+    key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    owner_condition_id: str = Field(min_length=1)
+    owner_group_id: str | None = Field(default=None, min_length=1)
+    owner_family_id: str = Field(min_length=1)
+    owner_fold_id: str = Field(min_length=1)
+    owner_replicate: int = Field(ge=0)
+    consumer_phase: SplitPhase
+    consumer_condition_ids: tuple[str, ...]
+    consumer_unit_ids: tuple[str, ...]
+
+    @model_validator(mode="after")
+    def consumers_are_unique(self) -> "PlannedSharedArtifact":
+        if not self.consumer_unit_ids or len(set(self.consumer_unit_ids)) != len(self.consumer_unit_ids):
+            raise ValueError("shared artifact consumers must be unique and non-empty")
+        if not self.consumer_condition_ids or len(set(self.consumer_condition_ids)) != len(
+            self.consumer_condition_ids
+        ):
+            raise ValueError("shared artifact consumer conditions must be unique and non-empty")
+        return self
+
+
+class ExpectedSharedArtifacts(BaseModel):
+    """Immutable shared-artifact plan bound to one run and config."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.expected-shared.v1"] = "runner.expected-shared.v1"
+    run_id: str = Field(min_length=1)
+    config_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifacts: tuple[PlannedSharedArtifact, ...] = ()
+
+    @model_validator(mode="after")
+    def keys_are_unique(self) -> "ExpectedSharedArtifacts":
+        keys = [item.key_id for item in self.artifacts]
+        if len(keys) != len(set(keys)):
+            raise ValueError("shared artifact key IDs must be unique")
+        consumers = [
+            unit_id
+            for artifact in self.artifacts
+            for unit_id in artifact.consumer_unit_ids
+        ]
+        if len(consumers) != len(set(consumers)):
+            raise ValueError("one unit cannot consume multiple shared artifacts")
+        return self
+
+
+class SharedArtifactReference(BaseModel):
+    """Unit-level reference to a validated shared artifact and its cost."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    cost_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    consumer_accounting_scope: Literal["heldout_task_only"] = "heldout_task_only"
+
+
 class PhaseAccounting(BaseModel):
     """Multidimensional resource accounting for one execution phase."""
 
@@ -109,6 +173,76 @@ class ResourceAccounting(BaseModel):
     replay: PhaseAccounting = Field(default_factory=PhaseAccounting)
     evaluator: PhaseAccounting = Field(default_factory=PhaseAccounting)
     serialization: PhaseAccounting = Field(default_factory=PhaseAccounting)
+
+
+class TrainingPreparationAccounting(BaseModel):
+    """One-time model preparation costs, separate from held-out task execution."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    setup: PhaseAccounting = Field(default_factory=PhaseAccounting)
+    training_probes: PhaseAccounting = Field(default_factory=PhaseAccounting)
+    reference_replay: PhaseAccounting = Field(default_factory=PhaseAccounting)
+    training: PhaseAccounting = Field(default_factory=PhaseAccounting)
+    serialization: PhaseAccounting = Field(default_factory=PhaseAccounting)
+
+    def as_resource_accounting(self) -> ResourceAccounting:
+        return ResourceAccounting(
+            setup=self.setup,
+            probes=self.training_probes,
+            training=self.training,
+            replay=self.reference_replay,
+            serialization=self.serialization,
+        )
+
+
+class TrainingArtifactCostRecord(BaseModel):
+    """Torch-free first-writer cost record for a shared artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal[
+        "runner.training-artifact-cost.v1", "runner.training-artifact-cost.v2"
+    ]
+    cost_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    artifact_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    scope: Literal["training_preparation"] | None = None
+    key: dict[str, JsonValue]
+    accounting: ResourceAccounting | TrainingPreparationAccounting
+
+    @property
+    def expected_cost_id(self) -> str:
+        body = self.model_dump(mode="json", exclude={"cost_id"})
+        if self.schema_version == "runner.training-artifact-cost.v1":
+            body.pop("scope", None)
+        return hashlib.sha256(
+            canonical_json_bytes(body)
+        ).hexdigest()
+
+    @model_validator(mode="after")
+    def digest_is_valid(self) -> "TrainingArtifactCostRecord":
+        if (
+            self.schema_version == "runner.training-artifact-cost.v1"
+            and (
+                self.scope is not None
+                or not isinstance(self.accounting, ResourceAccounting)
+            )
+        ) or (
+            self.schema_version == "runner.training-artifact-cost.v2"
+            and (
+                self.scope != "training_preparation"
+                or not isinstance(self.accounting, TrainingPreparationAccounting)
+            )
+        ):
+            raise ValueError("cost scope does not match schema version")
+        if self.key_id != hashlib.sha256(
+            canonical_json_bytes(self.key)
+        ).hexdigest():
+            raise ValueError("cost key ID does not match canonical key")
+        if self.cost_id != self.expected_cost_id:
+            raise ValueError("cost ID does not match canonical cost body")
+        return self
 
 
 class UnitOutcome(BaseModel):
@@ -160,6 +294,7 @@ class UnitPayload(BaseModel):
 
     outcome: UnitOutcome
     accounting: ResourceAccounting
+    shared_artifact: SharedArtifactReference | None = None
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")
@@ -193,6 +328,7 @@ class UnitRecord(BaseModel):
     elapsed_wall_seconds: float = Field(ge=0, allow_inf_nan=False)
     outcome: UnitOutcome
     accounting: ResourceAccounting
+    shared_artifact: SharedArtifactReference | None = None
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")
@@ -291,6 +427,16 @@ class Inventory(BaseModel):
     interrupted_attempts: int = Field(ge=0)
 
 
+class SharedArtifactInventory(BaseModel):
+    """Completion state for the frozen shared-artifact plan."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    planned: int = Field(default=0, ge=0)
+    referenced: int = Field(default=0, ge=0)
+    complete: bool = True
+
+
 class AggregateSlice(BaseModel):
     """Visible outcome vectors rather than a universal scalar."""
 
@@ -327,6 +473,15 @@ class AggregateArtifact(BaseModel):
     inventory: Inventory
     by_phase_condition: dict[SplitPhase, dict[str, AggregateSlice]]
     by_phase_family: dict[SplitPhase, dict[str, AggregateSlice]]
+    shared_artifacts_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+    shared_inventory: SharedArtifactInventory = Field(
+        default_factory=SharedArtifactInventory
+    )
+    shared_accounting_by_owner_group: dict[str, ResourceAccounting] = Field(
+        default_factory=dict
+    )
 
 
 def unit_id_for(key: UnitKey) -> str:

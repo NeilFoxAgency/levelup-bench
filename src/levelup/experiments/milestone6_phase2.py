@@ -273,6 +273,7 @@ def build_phase2_baseline_smoke_config() -> ExperimentConfig:
         conditions=conditions,
         replicates=int(smoke["replicates"]),
         seed_policy=SeedPolicy(
+            derivation_version="phase2.v1",
             model_seed_base=int(bases["model"]) + combo_fold_offset,
             probe_seed_base=int(bases["probe"]) + combo_fold_offset,
             search_seed_base=int(bases["search"]) + combo_fold_offset,
@@ -316,6 +317,8 @@ def build_phase2_baseline_smoke_config() -> ExperimentConfig:
         parameters={
             "not_scientific_result": True,
             "heldout_family": heldout_family,
+            "fold_id": f"lofo-{heldout_family}",
+            "heldout_family_id": heldout_family,
             "probe_action_cap": int(smoke["probe_actions_per_task"]),
             "probe_coverage_target_samples_per_alias": int(
                 smoke["probe_coverage_target_samples_per_alias"]
@@ -396,6 +399,11 @@ def _validate_smoke_parameters(
         raise RuntimeError("replicate count differs from the frozen smoke protocol")
     if config.split.final_tasks:
         raise RuntimeError("Phase 2 smoke cannot contain final tasks")
+    if (
+        config.parameters.get("fold_id") != "lofo-combo"
+        or config.parameters.get("heldout_family_id") != "combo"
+    ):
+        raise RuntimeError("fold identity differs from the frozen smoke protocol")
     if condition.execution_phases != ("validation",):
         raise RuntimeError("Phase 2 smoke condition must be validation-only")
     if condition.condition_id == "A0-no-probe-uniform":
@@ -422,6 +430,8 @@ def _validate_smoke_parameters(
         "replicate_stride": int(protocol["seed_policy"]["replicate_stride"]),
     }
     seed_values = config.seed_policy.model_dump(mode="json")
+    if seed_values["derivation_version"] != "phase2.v1":
+        raise RuntimeError("seed derivation differs from the frozen Phase 2 protocol")
     for name, expected in expected_bases.items():
         if seed_values[name] != expected:
             raise RuntimeError(f"{name} differs from the frozen seed protocol")

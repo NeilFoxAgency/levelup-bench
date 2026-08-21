@@ -23,9 +23,14 @@ from levelup.experiments.runner.provenance import apply_runtime_policy, capture_
 from levelup.experiments.runner.records import (
     AggregateArtifact,
     AttemptRecord,
+    ExpectedSharedArtifacts,
     ExpectedUnits,
+    PlannedSharedArtifact,
     PlannedUnit,
+    ResourceAccounting,
+    SharedArtifactReference,
     SystemProvenance,
+    TrainingArtifactCostRecord,
     UnitKey,
     UnitRecord,
     UnitSeeds,
@@ -143,13 +148,15 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
     config_hash = scientific_config_sha256(config)
     run_id = run_id_for(config)
     policy = config.seed_policy
+    model_replicate_step = policy.replicate_stride if policy.derivation_version == "phase2.v1" else 1
+    data_replicate_step = policy.replicate_stride if policy.derivation_version == "phase2.v1" else 1
     units: list[PlannedUnit] = []
     conditions = sorted(config.conditions, key=lambda condition: condition.condition_id)
     for phase, tasks in _tasks_by_phase(config):
         for task in sorted(tasks, key=lambda item: item.task_id):
             for replicate in range(config.replicates):
                 seeds = UnitSeeds(
-                    model_seed=policy.model_seed_base + replicate,
+                    model_seed=policy.model_seed_base + replicate * model_replicate_step,
                     environment_seed=(
                         task.environment_reset_seed + policy.environment_seed_offset
                     ),
@@ -163,7 +170,8 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
                         + replicate * policy.replicate_stride
                         + task.task_index
                     ),
-                    data_order_seed=policy.data_order_seed_base + replicate,
+                    data_order_seed=policy.data_order_seed_base
+                    + replicate * data_replicate_step,
                 )
                 for condition in conditions:
                     if phase not in condition.execution_phases:
@@ -203,6 +211,7 @@ class RunStore:
         config: ExperimentConfig,
         *,
         repository: str | Path,
+        shared_artifacts: tuple[PlannedSharedArtifact, ...] = (),
     ) -> None:
         self.config = config
         self.config_sha256 = scientific_config_sha256(config)
@@ -213,8 +222,68 @@ class RunStore:
         self.attempts_dir = self.run_dir / "attempts"
         self.aggregate_path = self.run_dir / "aggregate.json"
         self.expected = plan_expected_units(config)
+        self.expected_shared = ExpectedSharedArtifacts(
+            run_id=self.run_id,
+            config_sha256=self.config_sha256,
+            artifacts=shared_artifacts,
+        )
         self._expected_by_id = {unit.unit_id: unit for unit in self.expected.units}
+        self._validate_shared_plan()
         self._execution_ready = False
+
+    def _validate_shared_plan(self) -> None:
+        units = {unit.unit_id: unit for unit in self.expected.units}
+        conditions = {condition.condition_id for condition in self.config.conditions}
+        configured_fold = self.config.parameters.get("fold_id")
+        configured_family = self.config.parameters.get("heldout_family_id")
+        for artifact in self.expected_shared.artifacts:
+            if (
+                configured_fold != artifact.owner_fold_id
+                or configured_family != artifact.owner_family_id
+            ):
+                raise ArtifactValidationError(
+                    "shared artifact fold owner does not match scientific config"
+                )
+            if artifact.owner_condition_id not in conditions:
+                raise ArtifactValidationError("shared artifact owner condition is unknown")
+            consumers = [units.get(unit_id) for unit_id in artifact.consumer_unit_ids]
+            if any(unit is None for unit in consumers):
+                raise ArtifactValidationError("shared artifact references an unknown consumer unit")
+            if not any(
+                unit is not None
+                and unit.key.condition_id == artifact.owner_condition_id
+                for unit in consumers
+            ):
+                raise ArtifactValidationError(
+                    "shared artifact owner condition is not a declared consumer"
+                )
+            observed_phases = {
+                unit.key.phase for unit in consumers if unit is not None
+            }
+            observed_conditions = {
+                unit.key.condition_id for unit in consumers if unit is not None
+            }
+            if observed_phases != {artifact.consumer_phase}:
+                raise ArtifactValidationError(
+                    "shared artifact consumer phase does not match its frozen plan"
+                )
+            if observed_conditions != set(artifact.consumer_condition_ids):
+                raise ArtifactValidationError(
+                    "shared artifact consumer conditions do not match their frozen plan"
+                )
+            if artifact.owner_condition_id not in artifact.consumer_condition_ids:
+                raise ArtifactValidationError(
+                    "shared artifact owner condition is not authorized"
+                )
+            if any(
+                unit is not None
+                and (
+                    unit.key.replicate != artifact.owner_replicate
+                    or unit.key.family_id != artifact.owner_family_id
+                )
+                for unit in consumers
+            ):
+                raise ArtifactValidationError("shared artifact consumer owner mismatch")
 
     def initialize(
         self,
@@ -231,6 +300,7 @@ class RunStore:
         self.attempts_dir.mkdir(parents=True, exist_ok=True)
         config_path = self.run_dir / "config.json"
         expected_path = self.run_dir / "expected-units.json"
+        shared_path = self.run_dir / "expected-shared-artifacts.json"
         provenance_path = self.run_dir / "provenance.json"
 
         if config_path.exists():
@@ -246,6 +316,13 @@ class RunStore:
                 raise ArtifactValidationError("stored expected-unit plan does not match config")
         else:
             _atomic_write_json(expected_path, self.expected.model_dump(mode="json"))
+
+        if shared_path.exists():
+            stored_shared = _load_model(shared_path, ExpectedSharedArtifacts)
+            if stored_shared != self.expected_shared:
+                raise ArtifactValidationError("stored shared-artifact plan does not match config")
+        else:
+            _atomic_write_json(shared_path, self.expected_shared.model_dump(mode="json"))
 
         if provenance_path.exists():
             stored_provenance = _load_model(provenance_path, SystemProvenance)
@@ -288,6 +365,83 @@ class RunStore:
     def load_provenance(self) -> SystemProvenance:
         return _load_model(self.run_dir / "provenance.json", SystemProvenance)
 
+    def planned_shared(self, key_id: str) -> PlannedSharedArtifact:
+        matches = [item for item in self.expected_shared.artifacts if item.key_id == key_id]
+        if len(matches) != 1:
+            raise ArtifactValidationError("unknown shared-artifact key")
+        return matches[0]
+
+    def load_shared_cost(self, key_id: str) -> TrainingArtifactCostRecord:
+        self.planned_shared(key_id)
+        costs_root = self.run_dir / "training-artifact-costs"
+        path = costs_root / f"{key_id}.json"
+        if self.run_dir.is_symlink() or costs_root.is_symlink() or path.is_symlink():
+            raise ArtifactValidationError("refusing symlink shared-artifact cost path")
+        try:
+            path.resolve().relative_to(costs_root.resolve())
+        except ValueError:
+            raise ArtifactValidationError(
+                "shared-artifact cost path escapes its root"
+            ) from None
+        record = _load_model(path, TrainingArtifactCostRecord)
+        if record.key_id != key_id or record.expected_cost_id != record.cost_id:
+            raise ArtifactValidationError("shared-artifact cost identity mismatch")
+        return record
+
+    def validate_shared_reference(
+        self, unit: PlannedUnit, reference: SharedArtifactReference
+    ) -> None:
+        from levelup.experiments.runner.training_artifacts import (
+            TrainingArtifactKey,
+            load_training_cost,
+            load_training_key_index,
+            load_training_manifest,
+        )
+
+        planned = self.planned_shared(reference.key_id)
+        if unit.unit_id not in planned.consumer_unit_ids:
+            raise ArtifactValidationError("unit is not a declared shared-artifact consumer")
+        if (
+            unit.key.replicate != planned.owner_replicate
+            or unit.key.family_id != planned.owner_family_id
+        ):
+            raise ArtifactValidationError("shared-artifact owner/replicate mismatch")
+        cost = self.load_shared_cost(reference.key_id)
+        if (
+            cost.scope != "training_preparation"
+            or cost.artifact_id != reference.artifact_id
+            or cost.cost_id != reference.cost_id
+        ):
+            raise ArtifactValidationError("shared-artifact reference does not match cost record")
+        try:
+            training_key = TrainingArtifactKey.model_validate(cost.key)
+        except (TypeError, ValueError):
+            raise ArtifactValidationError(
+                "shared-artifact cost does not contain a valid training key"
+            ) from None
+        expected_group = planned.owner_group_id or planned.owner_condition_id
+        if (
+            training_key.key_id != reference.key_id
+            or training_key.condition_id != expected_group
+            or training_key.fold_id != planned.owner_fold_id
+            or training_key.replicate != planned.owner_replicate
+            or training_key.heldout_family_id != planned.owner_family_id
+        ):
+            raise ArtifactValidationError(
+                "shared-artifact training key does not match its frozen owner"
+            )
+        validated_cost = load_training_cost(self.run_dir, training_key)
+        index = load_training_key_index(self.run_dir, training_key)
+        manifest = load_training_manifest(self.run_dir, index.artifact_id)
+        if (
+            validated_cost != cost
+            or index.artifact_id != reference.artifact_id
+            or manifest.artifact_id != reference.artifact_id
+        ):
+            raise ArtifactValidationError(
+                "shared-artifact files do not match the unit reference"
+            )
+
     def _unit_path(self, unit_id: str) -> Path:
         self.planned_unit(unit_id)
         return self.units_dir / f"{unit_id}.json"
@@ -308,6 +462,12 @@ class RunStore:
         ):
             raise ArtifactValidationError(f"completed unit identity mismatch: {unit_id}")
         self._validate_outcome_metric(record)
+        if record.shared_artifact is not None:
+            if record.accounting.training != ResourceAccounting().training:
+                raise ArtifactValidationError(
+                    "shared-artifact consumer cannot duplicate task-local training accounting"
+                )
+            self.validate_shared_reference(expected, record.shared_artifact)
         return record
 
     def _validate_outcome_metric(self, record: UnitRecord) -> None:
@@ -344,6 +504,12 @@ class RunStore:
         ):
             raise ArtifactValidationError("completed record does not match expected unit")
         self._validate_outcome_metric(record)
+        if record.shared_artifact is not None:
+            if record.accounting.training != ResourceAccounting().training:
+                raise ArtifactValidationError(
+                    "shared-artifact consumer cannot duplicate task-local training accounting"
+                )
+            self.validate_shared_reference(expected, record.shared_artifact)
         existing = self.load_completed(record.unit_id)
         if existing is not None:
             if existing == record:

@@ -11,7 +11,9 @@ from levelup.experiments.runner.records import (
     AggregateSlice,
     AttemptRecord,
     Inventory,
+    PhaseAccounting,
     ResourceAccounting,
+    SharedArtifactInventory,
     SplitPhase,
     UnitRecord,
 )
@@ -127,6 +129,123 @@ def _attempt_inventory(attempts: tuple[AttemptRecord, ...]) -> tuple[int, int, i
     )
 
 
+def _add_phase(left: PhaseAccounting, right: PhaseAccounting) -> PhaseAccounting:
+    return PhaseAccounting(
+        calls=left.calls + right.calls,
+        episodes=left.episodes + right.episodes,
+        actions=left.actions + right.actions,
+        environment_steps=left.environment_steps + right.environment_steps,
+        resets=left.resets + right.resets,
+        forward_passes=left.forward_passes + right.forward_passes,
+        optimizer_steps=left.optimizer_steps + right.optimizer_steps,
+        nodes_expanded=left.nodes_expanded + right.nodes_expanded,
+        wall_seconds=left.wall_seconds + right.wall_seconds,
+    )
+
+
+def _add_cost(left: ResourceAccounting, right: ResourceAccounting) -> ResourceAccounting:
+    return ResourceAccounting(
+        setup=_add_phase(left.setup, right.setup),
+        probes=_add_phase(left.probes, right.probes),
+        training=_add_phase(left.training, right.training),
+        search=_add_phase(left.search, right.search),
+        replay=_add_phase(left.replay, right.replay),
+        evaluator=_add_phase(left.evaluator, right.evaluator),
+        serialization=_add_phase(left.serialization, right.serialization),
+    )
+
+
+def _shared_summary(
+    store: RunStore, records: tuple[UnitRecord, ...], *, strict: bool
+) -> tuple[
+    str | None,
+    SharedArtifactInventory,
+    dict[str, ResourceAccounting],
+    bool,
+]:
+    plans = {item.key_id: item for item in store.expected_shared.artifacts}
+    if not plans:
+        return None, SharedArtifactInventory(), {}, True
+    refs: dict[str, list[UnitRecord]] = defaultdict(list)
+    for record in records:
+        if record.shared_artifact is not None:
+            refs[record.shared_artifact.key_id].append(record)
+            store.validate_shared_reference(
+                store.planned_unit(record.unit_id), record.shared_artifact
+            )
+    for key_id, consumers in refs.items():
+        if key_id not in plans:
+            raise ArtifactValidationError("unit references unplanned shared artifact")
+        identities = {
+            (record.shared_artifact.artifact_id, record.shared_artifact.cost_id)
+            for record in consumers
+            if record.shared_artifact is not None
+        }
+        if len(identities) != 1:
+            raise ArtifactValidationError("shared artifact has conflicting references")
+    cost_owner: dict[str, str] = {}
+    artifact_owner: dict[str, str] = {}
+    for key_id, consumers in refs.items():
+        for record in consumers:
+            if record.shared_artifact is None:
+                continue
+            previous = cost_owner.setdefault(record.shared_artifact.cost_id, key_id)
+            if previous != key_id:
+                raise ArtifactValidationError("one shared cost is claimed by multiple keys")
+            previous_artifact = artifact_owner.setdefault(
+                record.shared_artifact.artifact_id, key_id
+            )
+            if previous_artifact != key_id:
+                raise ArtifactValidationError(
+                    "one shared artifact is claimed by multiple keys"
+                )
+    missing_consumers = [
+        item
+        for item in store.expected_shared.artifacts
+        if any(
+            unit_id not in {record.unit_id for record in refs.get(item.key_id, ())}
+            for unit_id in item.consumer_unit_ids
+        )
+    ]
+    if strict and missing_consumers:
+        raise IncompleteRunError("shared artifact consumers are incomplete")
+    by_condition: dict[str, ResourceAccounting] = {}
+    for key_id, consumers in refs.items():
+        if not consumers:
+            continue
+        cost = store.load_shared_cost(key_id)
+        owner = plans[key_id].owner_group_id or plans[key_id].owner_condition_id
+        shared_cost = (
+            cost.accounting.as_resource_accounting()
+            if hasattr(cost.accounting, "as_resource_accounting")
+            else cost.accounting
+        )
+        by_condition[owner] = _add_cost(
+            by_condition.get(owner, ResourceAccounting()), shared_cost
+        )
+    digest = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "plan": store.expected_shared.model_dump(mode="json"),
+                "refs": {
+                    key: sorted(
+                        (record.shared_artifact.artifact_id, record.shared_artifact.cost_id)
+                        for record in values
+                        if record.shared_artifact is not None
+                    )
+                    for key, values in sorted(refs.items())
+                },
+            }
+        )
+    ).hexdigest()
+    inventory = SharedArtifactInventory(
+        planned=len(plans),
+        referenced=len(refs),
+        complete=not missing_consumers,
+    )
+    return digest, inventory, by_condition, not missing_consumers
+
+
 def aggregate_run(
     store: RunStore,
     *,
@@ -144,6 +263,9 @@ def aggregate_run(
         raise ArtifactValidationError("expected-unit matrix failed paired seed audit")
     if strict and missing:
         raise IncompleteRunError(f"run has {len(missing)} incomplete units")
+    shared_hash, shared_inventory, shared_costs, shared_complete = _shared_summary(
+        store, records, strict=strict
+    )
 
     failed_units, interrupted_units, failed_attempts, interrupted_attempts = (
         _attempt_inventory(attempts)
@@ -189,7 +311,7 @@ def aggregate_run(
         run_started_at_utc=started_at,
         run_finished_at_utc=finished_at,
         observed_span_seconds=observed_span,
-        complete=not missing,
+        complete=not missing and shared_complete,
         paired_seed_audit_passed=paired,
         inventory=Inventory(
             expected=len(store.expected.units),
@@ -214,6 +336,9 @@ def aggregate_run(
             }
             for phase in phases
         },
+        shared_artifacts_sha256=shared_hash,
+        shared_inventory=shared_inventory,
+        shared_accounting_by_owner_group=shared_costs,
     )
     if write:
         store.write_aggregate(artifact)

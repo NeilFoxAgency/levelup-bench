@@ -104,6 +104,7 @@ class ExperimentRunner:
                     elapsed_wall_seconds=time.perf_counter() - started,
                     outcome=payload.outcome,
                     accounting=payload.accounting,
+                    shared_artifact=payload.shared_artifact,
                     diagnostics=payload.diagnostics,
                 )
                 stage = "unit-publication"

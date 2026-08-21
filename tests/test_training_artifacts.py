@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 import torch
 
+from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import PhaseAccounting, ResourceAccounting
 from levelup.experiments.runner.training_artifacts import (
     MODEL_IDS,
@@ -178,7 +179,9 @@ def test_same_key_different_wall_time_keeps_first_cost_record(tmp_path: Path) ->
         report=_report(),
     )
     assert first.artifact_id == second.artifact_id
-    assert load_training_cost(tmp_path, _key()).accounting == first_cost
+    loaded = load_training_cost(tmp_path, _key()).accounting
+    assert hasattr(loaded, "as_resource_accounting")
+    assert loaded.as_resource_accounting() == first_cost
 
 
 def test_tampered_cost_record_is_rejected(tmp_path: Path) -> None:
@@ -196,6 +199,48 @@ def test_tampered_cost_record_is_rejected(tmp_path: Path) -> None:
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(RuntimeError, match="cost"):
         load_training_cost(tmp_path, _key())
+
+
+def test_version_one_cost_record_remains_readable(tmp_path: Path) -> None:
+    write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    path = tmp_path / "training-artifact-costs" / f"{_key().key_id}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = "runner.training-artifact-cost.v1"
+    raw.pop("scope")
+    preparation = raw["accounting"]
+    raw["accounting"] = {
+        "setup": preparation["setup"],
+        "probes": preparation["training_probes"],
+        "training": preparation["training"],
+        "search": PhaseAccounting().model_dump(mode="json"),
+        "replay": preparation["reference_replay"],
+        "evaluator": PhaseAccounting().model_dump(mode="json"),
+        "serialization": preparation["serialization"],
+    }
+    raw["cost_id"] = hashlib.sha256(
+        canonical_json_bytes({key: value for key, value in raw.items() if key != "cost_id"})
+    ).hexdigest()
+    path.write_bytes(canonical_json_bytes(raw) + b"\n")
+    assert load_training_cost(tmp_path, _key()).schema_version.endswith("v1")
+
+
+def test_training_preparation_rejects_search_or_evaluator_cost(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="search or evaluator"):
+        write_training_artifact(
+            tmp_path,
+            key=_key(),
+            model_id="state_conditioned_mlp_listwise_v1",
+            model=StateConditionedScorer(),
+            accounting=ResourceAccounting(search=PhaseAccounting(actions=1)),
+            report=_report(),
+        )
 
 
 def test_tampered_tensor_is_rejected(tmp_path: Path) -> None:
