@@ -112,11 +112,13 @@ See [`docs/milestone-5-interaction-inference.md`](docs/milestone-5-interaction-i
 Phase 0 reproduced and profiled Milestone 5, confirmed its main negative result, and identified
 missing raw-unit and provenance infrastructure. Phase 1 now provides strict configuration,
 task-bound exposure manifests, deterministic seed planning, atomic per-unit records, interruption
-and resume behavior, multidimensional resource accounting, and pure aggregation. No Milestone 6
-learner or final-family result has been claimed yet.
+and resume behavior, multidimensional resource accounting, and pure aggregation. The known-family
+task pool, clean observation boundary, paired budget tiers, and robust Phase 9 selection rule are
+now frozen. No Milestone 6 learner result or new final-family result has been claimed yet.
 
 See [`docs/milestone-6-phase-0-report.md`](docs/milestone-6-phase-0-report.md),
-[`docs/milestone-6-phase-1-infrastructure.md`](docs/milestone-6-phase-1-infrastructure.md), and
+[`docs/milestone-6-phase-1-infrastructure.md`](docs/milestone-6-phase-1-infrastructure.md),
+[`docs/milestone-6-development-protocol.md`](docs/milestone-6-development-protocol.md), and
 [`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md).
 
 ## Reproduce current experiments

@@ -44,6 +44,7 @@ class TaskIdentity(BaseModel):
     task_id: str = Field(min_length=1)
     task_index: int = Field(ge=0)
     generator_seed: int
+    environment_reset_seed: int = 0
     trajectory_catalog: tuple[TrajectoryIdentity, ...] = ()
 
     @model_validator(mode="after")

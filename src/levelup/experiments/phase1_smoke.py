@@ -65,8 +65,8 @@ def smoke_executor(config: ExperimentConfig, planned: PlannedUnit) -> UnitPayloa
     stage = condition.parameters.get("stage")
     if stage not in ("frontier", "optimum"):
         raise RuntimeError("smoke condition stage must be frontier or optimum")
-    if planned.seeds.environment_seed != task.generator_seed:
-        raise RuntimeError("smoke environment seed must match the configured generator seed")
+    if planned.seeds.environment_seed != task.environment_reset_seed:
+        raise RuntimeError("smoke environment seed must match the configured reset seed")
 
     candidates = _bundles(
         task.family_id,

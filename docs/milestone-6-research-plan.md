@@ -125,11 +125,21 @@ No learned proposal prior.
 
 Purpose: measure raw task difficulty.
 
-### Baseline B - Milestone 5 global optimum imitation
+### Baseline B1 - clean global optimum-frequency imitation
 
-Reuse the strongest simple learned baseline from Milestone 5.
+Reimplement the strongest simple Milestone 5 baseline with optimum-only exposure and clean
+observation-discovered probing. Report the frozen historical implementation separately as a legacy
+continuity result because it read frontier data while constructing optimum targets and enumerated
+the hidden valid-action catalogue.
 
 Purpose: continuity with the previous result.
+
+### Baseline B2 - global listwise optimum imitation
+
+Use the same optimum decision examples, listwise objective, optimizer, update budget, and
+capacity band as the state-conditioned baseline, but omit current state from the model input.
+
+Purpose: isolate state conditioning without changing the objective at the same time.
 
 ### Baseline C - state-conditioned optimum imitation
 
@@ -151,9 +161,13 @@ Same model and state input, trained on both frontier and optimum state-action ex
 
 Purpose: same-data non-comparative control.
 
-### Baseline E - shuffled pair direction
+### Baseline E - destroyed improvement structure
 
-Same paired frontier and optimum data as the proposed method, but reverse or shuffle which member is labeled better on a controlled subset.
+Use the same frontier and optimum data as the proposed method with predeclared controls that destroy
+one structure cleanly: independently randomize the direction label for every pair, apply a seeded
+derangement to trajectory pairing, or pool the same examples without pair/stage metadata. Report
+the realized randomized-label agreement with truth; do not intentionally retain a correctly
+directed subset.
 
 Purpose: test whether the improvement direction carries information.
 
@@ -291,11 +305,13 @@ Recommended evaluation structure:
 - paired task instances,
 - and several difficulty levels.
 
-Primary development metric should emphasize adaptation efficiency, for example:
+Development reporting should emphasize adaptation efficiency, for example:
 
 `median total environment interactions to first exact optimum`
 
-with exact-optimum success at fixed budget as a co-primary or strong secondary metric.
+The frozen Milestone 6 selection protocol uses worst-family exact-optimum success at a fixed budget
+as primary and restricted interactions to exact optimum as its first tie-breaker. This resolves the
+choice before comparative development inspection while retaining both reliability and efficiency.
 
 Also report episodes separately because one episode can contain many transitions.
 
@@ -308,7 +324,7 @@ Before selecting a Milestone 6 method, test at least:
 1. sequence order intact versus shuffled,
 2. state input present versus removed,
 3. frontier/optimum pairing intact versus pooled,
-4. correct improvement direction versus shuffled/reversed,
+4. correct improvement direction versus independently randomized direction and randomized pairing,
 5. optimum imitation versus improvement-aware training,
 6. comparable parameter count,
 7. comparable training/exploration budget.
@@ -319,12 +335,12 @@ If the proposed method's gain vanishes under these controls, interpret that hone
 
 Choose a selection rule before final-family performance is inspected.
 
-Recommended robust rule:
+The frozen robust rule in `docs/milestone-6-development-protocol.md` is:
 
-1. maximize the minimum exact-optimum success rate across held-out development families at a fixed interaction budget,
-2. among methods within a small tolerance, minimize worst-family median total environment interactions,
-3. then minimize mean interactions,
-4. then prefer the simpler model.
+1. maximize the minimum exact-optimum success rate across held-out development families at 8,192 adaptation actions,
+2. among methods within five absolute percentage points, minimize worst-family median restricted interactions,
+3. then minimize the macro-average of family median restricted interactions,
+4. then prefer the simpler model and lower one-time training cost.
 
 The exact tolerance and budget should be written into the experiment config before final evaluation.
 
@@ -360,10 +376,10 @@ Do not create a final family by inspecting what the selected model likes and the
 At minimum include:
 
 - uniform,
-- Milestone 5 global optimum imitation,
+- clean global optimum-frequency and objective-matched listwise optimum imitation, plus the separately labeled legacy Milestone 5 continuity result,
 - state-conditioned optimum imitation,
 - state-conditioned pooled same-data control,
-- shuffled-direction control,
+- independently randomized-direction and randomized-pairing controls,
 - selected improvement-aware method.
 
 If compute permits, include the best alternative sequence objective selected during development as a preregistered secondary comparison.
@@ -374,7 +390,7 @@ Do not add or remove conditions after seeing final-family performance.
 
 ### Minimum scientifically useful result
 
-A state/sequence-aware method clearly beats the old global delta method and its shuffled control on development-family transfer.
+A state/sequence-aware method clearly beats the old global delta method and its independently randomized-direction and randomized-pairing controls on development-family transfer.
 
 This confirms the diagnosed representation failure was real.
 

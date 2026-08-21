@@ -310,6 +310,7 @@ def test_expected_matrix_is_complete_deterministic_and_seed_paired() -> None:
         groups.setdefault(group, set()).add(unit.seeds.model_dump_json())
     assert all(len(seeds) == 1 for seeds in groups.values())
     assert all(len(unit.exposure_manifest_sha256) == 64 for unit in first.units)
+    assert {unit.seeds.environment_seed for unit in first.units} == {0}
 
 
 def test_validity_requires_an_independent_evaluator() -> None:

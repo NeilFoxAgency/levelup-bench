@@ -61,6 +61,9 @@ The complete expected matrix is written before execution. Conditions for the sam
 task/replicate receive the same resolved seed bundle, so comparisons are paired by explicit keys
 rather than file order.
 
+Task generation and runtime reset seeds are distinct fields. The current deterministic synthetic
+environments are reconstructed from their generator seed/task index and reset with seed `0`.
+
 ## Exposure and final-data boundaries
 
 Each condition declares:

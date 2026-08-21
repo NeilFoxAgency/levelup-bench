@@ -1,0 +1,132 @@
+{
+  "schema_version": "milestone6.development_protocol.v1",
+  "status": "frozen-before-comparative-development-results",
+  "scope": "known-development-only",
+  "task_manifest": "configs/milestone6/development_tasks.json",
+  "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+  "folds": {
+    "kind": "leave-one-family-out",
+    "training_tasks_per_nonheld_family": 8,
+    "screening_heldout_tasks_per_family": 8,
+    "selection_heldout_tasks": "all_known",
+    "family_aggregation": "equal_weight_after_within_family_aggregation"
+  },
+  "seed_policy": {
+    "version": "milestone6.development.v1",
+    "screening_replicates": [0, 1, 2, 3, 4],
+    "selection_replicates": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    "family_offset_stride": 10000,
+    "replicate_stride": 100000,
+    "task_component": "manifest task_index",
+    "bases": {
+      "model": 6100000,
+      "probe": 6200000,
+      "search": 6300000,
+      "data_order": 6400000,
+      "randomized_direction": 6500000,
+      "randomized_pairing": 6600000
+    },
+    "formula": "base + family_order_index * 10000 + replicate * 100000 + task_index where a task component applies",
+    "condition_pairing": "all conditions use identical non-label seeds for a family/task/replicate"
+  },
+  "budgets": {
+    "implementation_smoke": {
+      "folds": 1,
+      "replicates": 1,
+      "heldout_tasks_per_family": 1,
+      "probe_actions_per_task": 16,
+      "probe_coverage_target_samples_per_alias": 2,
+      "candidate_episodes_per_task": 10,
+      "adaptation_actions_per_task": 256
+    },
+    "screening": {
+      "folds": 6,
+      "replicates": 5,
+      "heldout_tasks_per_family": 8,
+      "probe_actions_per_task": 64,
+      "probe_coverage_target_samples_per_alias": 8,
+      "candidate_episodes_per_task": 150,
+      "adaptation_actions_per_task": 2048
+    },
+    "selection": {
+      "folds": 6,
+      "replicates": 20,
+      "heldout_tasks_per_family": "all_known",
+      "probe_actions_per_task": 128,
+      "probe_coverage_target_samples_per_alias": 16,
+      "candidate_episodes_per_task": 150,
+      "adaptation_actions_per_task": 8192
+    },
+    "maximum_actions_per_candidate_episode": 64,
+    "learning_curve_action_checkpoints": [512, 1024, 2048, 4096, 8192],
+    "exact_optimum_affects_search_control_flow": false
+  },
+  "selection": {
+    "endpoint_adaptation_actions": 8192,
+    "primary_metric": "minimum_family_exact_optimum_success_rate",
+    "primary_direction": "maximize",
+    "success_tolerance_absolute_percentage_points": 5,
+    "tie_breakers": [
+      "minimum worst-family median restricted interactions to exact optimum with failures at 8193",
+      "minimum macro-average family median restricted interactions",
+      "simpler model",
+      "lower one-time training cost"
+    ],
+    "exact_optimum_is_reporting_only": true,
+    "selection_rule_changes_after_comparative_results": "forbidden"
+  },
+  "capacity_matching": {
+    "same_data_controls": "identical backbone, head, trainable parameter count, optimizer, updates, batches, inference and search budgets",
+    "cross_representation_parameter_tolerance_fraction": 0.1,
+    "strong_optimum_baseline": "run optimum imitation on the same selected backbone and capacity band as every improvement-aware contender",
+    "optimum_training_compute": "must not be lower than the matched improvement-aware contender",
+    "report": ["trainable_parameters", "optimizer_steps", "forward_passes", "training_wall_seconds"]
+  },
+  "baseline_ladder": [
+    "A0_no_probe_uniform",
+    "A1_paid_probe_uniform",
+    "B1_clean_global_optimum_frequency",
+    "B2_global_listwise_optimum",
+    "C_state_conditioned_listwise_optimum",
+    "D_state_conditioned_pooled",
+    "E1_independently_randomized_direction",
+    "E2_randomized_pairing",
+    "F_correctly_paired_improvement"
+  ],
+  "fixed_defaults": {
+    "device": "cpu",
+    "torch_threads": 1,
+    "processes": 1,
+    "optimizer": "adam",
+    "weight_decay": 0.0001,
+    "mlp_hidden_widths": [48, 24],
+    "probe_actions_per_attempt": 16,
+    "unknown_affordance_policy": "zero feature with eligible uniform fallback",
+    "evaluator_feedback_to_policy": "none"
+  },
+  "eligible_hyperparameters": {
+    "learning_rate": [0.003, 0.01],
+    "training_epochs": [120, 180],
+    "search_temperature": [0.6, 0.9, 1.2],
+    "history_length": [2, 4, 8],
+    "continuation_horizon_steps": [1, 4, 8, 16],
+    "alignment": ["exact_common_prefix", "landmark", "progress_relative", "nearest_observable_state", "monotonic_observable"],
+    "objective": ["optimum_imitation", "pooled", "paired_local_preference", "better_continuation"],
+    "backbone_order": ["global_affordance_mlp", "state_affordance_mlp", "transition_set_mlp", "gru_short_history"],
+    "transformer_eligible": false
+  },
+  "other_hyperparameters_after_comparative_results": "forbidden_except_committed_bug_fix_or_pre-result_protocol_amendment",
+  "destroyed_structure_controls": {
+    "pooled": "same transitions with pairing, order and better-stage labels absent",
+    "randomized_direction": "independent fair-coin better-side label for every pair using the frozen label seed; no intentionally correct subset",
+    "randomized_pairing": "seeded derangement of optimum partners within the training fold while preserving every individual trajectory and label marginal",
+    "shuffled_history": "same transition multiset and pair membership with within-sequence order permuted"
+  },
+  "alignment_contract": {
+    "unmatched_policy": "retain as unmatched; never force a nearest match",
+    "required_reporting": ["matched_count", "unmatched_count", "confidence_distribution", "gap_count", "alignment_compute"],
+    "randomized_pairing": "derange within compatible alignment strata; strata without a valid derangement are excluded identically from F and E2 and reported"
+  },
+  "future_adapter_resource_fields": ["environment_transitions", "emulator_frames", "timed_input_duration", "search_states", "rerecords", "evaluator_replay_frames"],
+  "final_family_access": "forbidden_until_phase9_method_freeze"
+}

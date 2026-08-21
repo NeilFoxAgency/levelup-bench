@@ -150,7 +150,9 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
             for replicate in range(config.replicates):
                 seeds = UnitSeeds(
                     model_seed=policy.model_seed_base + replicate,
-                    environment_seed=task.generator_seed + policy.environment_seed_offset,
+                    environment_seed=(
+                        task.environment_reset_seed + policy.environment_seed_offset
+                    ),
                     probe_seed=(
                         policy.probe_seed_base
                         + replicate * policy.replicate_stride
