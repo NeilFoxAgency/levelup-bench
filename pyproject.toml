@@ -41,3 +41,7 @@ select = ["E4", "E7", "E9", "F", "I"]
 # Historical Milestone 5 source retains this harmless type import. Avoid rewriting the frozen
 # experiment solely for lint while still applying F401 to new code.
 "src/levelup/experiments/milestone5.py" = ["F401"]
+# These tests intentionally call pytest.importorskip("torch") before importing LevelUp modules
+# that themselves import torch. Moving those imports would defeat the optional-dependency guard.
+"tests/test_milestone4.py" = ["E402"]
+"tests/test_milestone5.py" = ["E402"]
