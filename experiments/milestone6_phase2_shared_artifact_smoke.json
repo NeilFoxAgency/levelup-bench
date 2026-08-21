@@ -1,0 +1,157 @@
+{
+  "schema_version": "0.1",
+  "experiment": "milestone6_phase2_shared_artifact_smoke_v1",
+  "date_local": "2026-08-21",
+  "status": "shared_artifact_implementation_evidence_only_not_a_scientific_result",
+  "selection_use": "forbidden",
+  "comparative_outcomes_included": false,
+  "final_family_access": false,
+  "run": {
+    "command": "python -m levelup.experiments.milestone6_phase2_shared_smoke --output-root runs/milestone6/shared-artifact-canonical-61d5216",
+    "run_id": "milestone6-phase2-shared-artifact-smoke-81ea16f34b21",
+    "config_sha256": "81ea16f34b21fb82e9b1cc366c77059fe37a6529f218436993216ce8b71423e8",
+    "expected_units_sha256": "84b611b6c50d790ced8e22a313adcc347cf5164f3061fa6b7fc1fc4583639c88",
+    "provenance_sha256": "72a5d62d0e8f1435e87a03201ee11f9d17619a895fe83256c1b1c4c8aa5ce12c",
+    "completed_units_sha256": "ad3d41877e49b3a74b325e522e994383a8086a54d08436fb1ee43f8db40c62e2",
+    "shared_artifacts_sha256": "c86c62d5689a9d0e6a0f6e17553c84a61e696503923246a98323a0b603d1aa7d",
+    "raw_file_sha256": {
+      "config.json": "dd7c988176a405fd036f89b80a488edf697cb4140bdd36b971ca5bd7254dc8ee",
+      "expected-units.json": "58948a8d63b9912beb4dd70e923c5aea753128bb0e822d0d52859105529a2da9",
+      "expected-shared-artifacts.json": "23523c9509f757b4ebad8bbce2a30bb7a602dd7f8b4912c8934d1da110e2262a",
+      "provenance.json": "27f3e9c50420d26d181996533ea4def53275a7082bd18e03d7d2d437e6bb2899",
+      "aggregate.json": "8814b11ee93600d3f35bf3a882f618b3895f8d2d5074bce4e020b901c9d3cec1"
+    }
+  },
+  "provenance": {
+    "git_commit_sha": "61d52168172c0c0b18b42b3ec311a8deb9c198a1",
+    "git_dirty": false,
+    "device": "cpu",
+    "torch_threads": 1,
+    "torch_interop_threads": 1,
+    "processes": 1,
+    "python": "3.11.7",
+    "torch": "2.13.0",
+    "numpy": "2.4.6",
+    "pydantic": "2.13.4"
+  },
+  "integrity": {
+    "complete": true,
+    "expected_units": 7,
+    "completed_units": 7,
+    "missing_units": 0,
+    "failed_attempts": 0,
+    "interrupted_attempts": 0,
+    "paired_seed_audit_passed": true,
+    "shared_artifacts_planned": 7,
+    "shared_artifacts_referenced": 7,
+    "shared_artifacts_complete": true
+  },
+  "operator_observations_not_bound_to_raw_run": {
+    "second_invocation_completed": 0,
+    "second_invocation_skipped": 7,
+    "persisted_resume_event_log_available": false
+  },
+  "scope": {
+    "phase": "validation",
+    "development_training_tasks": 40,
+    "held_out_development_tasks": 1,
+    "held_out_family": "combo",
+    "replicates": 1,
+    "conditions": 7,
+    "condition_ids": [
+      "A0-no-probe-uniform",
+      "A1-paid-probe-uniform",
+      "B1-clean-global-optimum-frequency",
+      "B2-global-listwise-optimum--t0p6",
+      "B2-global-listwise-optimum--t0p9",
+      "B2-global-listwise-optimum--t1p2",
+      "C-state-conditioned-listwise-optimum"
+    ],
+    "final_tasks": 0,
+    "shared_evidence_count": 1,
+    "shared_view_count": 3,
+    "shared_model_count": 3,
+    "total_shared_artifacts": 7
+  },
+  "sharing_evidence": {
+    "B1_B2_C_same_evidence_identity": true,
+    "B1_B2_C_distinct_view_identity": true,
+    "B2_temperature_variants": {
+      "B2-global-listwise-optimum--t0p6": 0.6,
+      "B2-global-listwise-optimum--t0p9": 0.9,
+      "B2-global-listwise-optimum--t1p2": 1.2
+    },
+    "B2_variants_share_model_identity": true,
+    "temperature_excluded_from_model_identity": true,
+    "typed_lineage_validated": true,
+    "shared_costs_counted_once": true,
+    "consumer_training_accounting_zero": true
+  },
+  "shared_accounting": {
+    "cost_scopes": {
+      "training_data_evidence_preparation": 1,
+      "training_data_view_preparation": 3,
+      "training_preparation": 3
+    },
+    "model_training": {
+      "B1-clean-global-optimum-frequency": {
+        "optimizer_steps": 120,
+        "forward_passes": 120
+      },
+      "B2-global-listwise-optimum": {
+        "optimizer_steps": 120,
+        "forward_passes": 29520
+      },
+      "C-state-conditioned-listwise-optimum": {
+        "optimizer_steps": 120,
+        "forward_passes": 29520
+      }
+    },
+    "B1_B2_C_optimizer_steps_matched": true,
+    "B2_C_forward_passes_matched": true
+  },
+  "same_data_and_capacity_gates": {
+    "B2_C_same_example_count": true,
+    "B2_C_same_selected_labels_and_candidate_set_sizes": true,
+    "B2_affordance_rows_equal_C_affordance_feature_suffix": true,
+    "B2_C_optimizer_steps_and_forward_passes_equal": true,
+    "B2_C_parameter_count_relative_difference_below_10_percent": true,
+    "B1_optimizer_step_budget_matched_to_B2": true,
+    "B1_B2_forward_pass_counts_differ_by_objective": true
+  },
+  "boundary_evidence": {
+    "development_manifest_hash_bound": true,
+    "parent_protocol_hash_bound": true,
+    "final_tasks_rejected": true,
+    "final_family_access_locked": true,
+    "training_payload_excludes_performance_and_evaluator_fields": true,
+    "candidate_generation_receives_no_oracle": true,
+    "oracle_called_only_post_generation": true,
+    "oracle_substitution_preserves_candidate_hash": true,
+    "no_selection_metric_applied": true
+  },
+  "validation": {
+    "local_pytest_passed": 158,
+    "local_ruff_passed": true,
+    "automated_resume_test_asserts_no_evidence_rebuild_or_model_retraining": true,
+    "external_github_actions_evidence": {
+      "feature_branch_ci_run": 32449373463,
+      "main_ci_run": 32449509449
+    }
+  },
+  "interpretation": {
+    "establishes": [
+      "Development-only shared evidence, condition views, and trained models are content-addressed and lineage-bound.",
+      "Shared preparation costs are recorded once and consumer units report zero local training.",
+      "B2 search-temperature variants reuse one model artifact and one training cost.",
+      "A repeated invocation skips all completed validation units; automated tests separately verify preparation reuse.",
+      "Candidate generation is isolated from the exact-optimum reporting oracle."
+    ],
+    "does_not_establish": [
+      "Any comparative performance advantage.",
+      "Any method-selection or advancement decision.",
+      "Any conclusion about Milestone 6 final families or generalization.",
+      "Scientific adequacy of the representation ladder beyond implementation integrity."
+    ]
+  }
+}

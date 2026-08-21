@@ -20,6 +20,10 @@ These files are historical scientific records. Do not overwrite them because a l
 - `milestone6_phase2_implementation_smoke.json` binds the clean-tree Phase 2
   baseline smoke and its accounting/boundary checks. It is implementation
   evidence only and is forbidden as a method-selection input.
+- `milestone6_phase2_shared_artifact_smoke.json` binds the clean-tree Phase 2
+  shared-evidence, condition-view, model-lineage, cost-ownership, and resume
+  smoke. It contains no comparative outcomes and is forbidden as a
+  method-selection input.
 
 ## Artifact layers
 
