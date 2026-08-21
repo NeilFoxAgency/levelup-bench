@@ -15,6 +15,7 @@ If you are joining the project for the first time, especially as a coding or res
 | [`milestone-6-research-plan.md`](milestone-6-research-plan.md) | The immediate research program for state-conditioned and sequence-aware improvement learning. |
 | [`milestone-6-phase-0-report.md`](milestone-6-phase-0-report.md) | Phase 0 architecture audit, Milestone 5 reproduction, CPU/MPS profiling, scientific diagnosis, risks, and the gate into Phase 1. |
 | [`milestone-6-phase-1-infrastructure.md`](milestone-6-phase-1-infrastructure.md) | Phase 1 config, provenance, atomic unit storage, resume, aggregation, exposure boundaries, validation, and deliberate non-guarantees. |
+| [`milestone-6-phase-2-implementation-smoke.md`](milestone-6-phase-2-implementation-smoke.md) | Phase 2 A0/A1/B1/B2/C implementation smoke, clean exposure boundary, accounting, provenance, and the gate into shared-artifact screening. |
 | [`metrics-and-reporting.md`](metrics-and-reporting.md) | Performance, gap closure, sample efficiency, reliability, interaction cost, cognitive cost, and reporting conventions. |
 | [`prior-art-and-reuse.md`](prior-art-and-reuse.md) | Public benchmark and tooling repositories to inspect before reinventing infrastructure. |
 | [`speedrun-tas-roadmap.md`](speedrun-tas-roadmap.md) | How the synthetic work is intended to become real speedrun/TAS research, including data, categories, emulators, candidate selection, and record verification. |

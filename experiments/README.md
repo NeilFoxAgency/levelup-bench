@@ -17,6 +17,9 @@ These files are historical scientific records. Do not overwrite them because a l
 - `milestone6_phase0_profile.json` records the Phase 0 Milestone 5 reproduction,
   component profile, and matched CPU/MPS microbenchmark. It is a reproducibility
   and planning artifact, not a Milestone 6 final-evaluation reference.
+- `milestone6_phase2_implementation_smoke.json` binds the clean-tree Phase 2
+  baseline smoke and its accounting/boundary checks. It is implementation
+  evidence only and is forbidden as a method-selection input.
 
 ## Artifact layers
 

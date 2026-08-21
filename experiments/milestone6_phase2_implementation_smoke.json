@@ -1,0 +1,123 @@
+{
+  "schema_version": "0.1",
+  "experiment": "milestone6_phase2_baseline_implementation_smoke_v1",
+  "date_local": "2026-08-20",
+  "status": "implementation_evidence_only_not_a_scientific_result",
+  "selection_use": "forbidden",
+  "final_family_access": false,
+  "run": {
+    "command": "python -m levelup.experiments.milestone6_phase2",
+    "run_id": "milestone6-phase2-baseline-implementatio-9ebaccdeea84",
+    "config_sha256": "9ebaccdeea84c9d1d3f160dfdec91c2497ed44f7e2b31e7c076c987cfc893455",
+    "expected_units_sha256": "7add5833ef6b5d2f5c962457991964fff8d9ac1c1b50a4be4c81511ebff727bb",
+    "provenance_sha256": "039bec058361651ec44afd21f8cdb20785af3a810a9babb88644d2fd12afb960",
+    "completed_units_sha256": "b6bac2a55d560b08629b5dada405b7ddcb0f2ea12648654bf501a402872da8e7",
+    "raw_file_sha256": {
+      "config.json": "6101f97355dae28d30dbedc0f4216b6abf36b4361415a58e53f24f246260eaf7",
+      "expected-units.json": "6d0afcdd1f7b6fd568dede225c2babd2a0777d2dea677629e4730986fc8d6697",
+      "provenance.json": "c3926296592046ec2d3e4fcc3c40c1cbf922365464dbf46f1ae1dbe9a4bd3def",
+      "aggregate.json": "932d0cb04c4ad522f6992e95b968ea8ee60472ea78f9a420559a4cb59137cf0b"
+    }
+  },
+  "provenance": {
+    "git_commit_sha": "f9be429cef38780003a511177cde10caef0866d8",
+    "git_dirty": false,
+    "device": "cpu",
+    "torch_threads": 1,
+    "torch_interop_threads": 1,
+    "processes": 1,
+    "python": "3.11.7",
+    "torch": "2.13.0",
+    "numpy": "2.4.6",
+    "pydantic": "2.13.4"
+  },
+  "integrity": {
+    "complete": true,
+    "completed_units": 5,
+    "expected_units": 5,
+    "missing_units": 0,
+    "failed_attempts": 0,
+    "interrupted_attempts": 0,
+    "paired_seed_audit_passed": true
+  },
+  "operator_observations_not_bound_to_raw_run": {
+    "second_invocation_completed": 0,
+    "second_invocation_skipped": 5
+  },
+  "scope": {
+    "phase": "validation",
+    "development_training_tasks": 40,
+    "held_out_development_tasks": 1,
+    "held_out_family": "combo",
+    "replicates": 1,
+    "conditions": 5,
+    "final_tasks": 0,
+    "candidate_episodes_per_condition": 10,
+    "adaptation_action_cap": 256,
+    "maximum_actions_per_candidate_episode": 64
+  },
+  "accounting": [
+    {
+      "condition_id": "A0-no-probe-uniform",
+      "valid_units": 1,
+      "probe_actions": 0,
+      "search_actions": 120,
+      "replay_actions": 120,
+      "forward_passes": 0,
+      "optimizer_steps": 0
+    },
+    {
+      "condition_id": "A1-paid-probe-uniform",
+      "valid_units": 1,
+      "probe_actions": 16,
+      "search_actions": 120,
+      "replay_actions": 120,
+      "forward_passes": 0,
+      "optimizer_steps": 0
+    },
+    {
+      "condition_id": "B1-clean-global-optimum-frequency",
+      "valid_units": 1,
+      "probe_actions": 656,
+      "search_actions": 108,
+      "replay_actions": 600,
+      "forward_passes": 228,
+      "optimizer_steps": 120
+    },
+    {
+      "condition_id": "B2-global-listwise-optimum",
+      "valid_units": 1,
+      "probe_actions": 656,
+      "search_actions": 149,
+      "replay_actions": 641,
+      "forward_passes": 29669,
+      "optimizer_steps": 120
+    },
+    {
+      "condition_id": "C-state-conditioned-listwise-optimum",
+      "valid_units": 1,
+      "probe_actions": 656,
+      "search_actions": 106,
+      "replay_actions": 598,
+      "forward_passes": 29626,
+      "optimizer_steps": 120
+    }
+  ],
+  "boundary_evidence": {
+    "config_rejects_final_tasks": true,
+    "config_rejects_split_condition_exposure_seed_device_and_budget_drift": true,
+    "candidate_generation_receives_no_evaluator": true,
+    "exact_optimum_classification_is_post_hoc": true,
+    "component_wall_times_measured": true,
+    "resource_channels_non_overlapping": true,
+    "performance_values_used_for_selection": false
+  },
+  "validation": {
+    "local_pytest_passed": 107,
+    "local_ruff_passed": true
+  },
+  "external_github_actions_evidence": {
+    "feature_branch_ci_run": 32441894840,
+    "main_ci_run": 32442010554
+  }
+}
