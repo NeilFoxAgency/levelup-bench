@@ -51,6 +51,7 @@ from levelup.experiments.runner import (
     UnitPayload,
     aggregate_run,
     apply_runtime_policy,
+    within_parameter_tolerance,
 )
 from levelup.experiments.runner.config import (
     ConditionSpec,
@@ -170,12 +171,22 @@ def build_phase2_shared_smoke_config() -> ExperimentConfig:
         **base.parameters,
         "shared_artifact_training": True,
         "unit_local_training_repeated_and_counted": False,
+        "development_protocol_sha256": _sha256_bytes(DEVELOPMENT_PROTOCOL_PATH),
+        "screening_candidates_sha256": _sha256_bytes(SCREENING_CANDIDATES_PATH),
+        "development_task_manifest_sha256": _sha256_bytes(DEVELOPMENT_TASKS_PATH),
+        "selection_metric_id": "total_adaptation_actions_to_first_exact_optimum",
+        "selection_metric_schema_version": "restricted-interactions.v1",
+        "selection_metric_action_formula": "accounting.probes.actions + accounting.search.actions",
+        "selection_metric_oracle_policy": "fixed_batch_then_independent_replay_then_reporting_only_oracle",
+        "selection_metric_phase": "validation",
+        "selection_metric_failure_sentinel": int(base.parameters["adaptation_action_cap"])
+        + 1,
     }
     parameters.pop("search_temperature", None)
     return base.model_copy(
         update={
             "experiment_id": "milestone6-phase2-shared-artifact-smoke",
-            "method_revision": "development-shared-artifact-boundary-v1",
+            "method_revision": "development-shared-artifact-boundary-v2",
             "conditions": (
                 conditions["A0-no-probe-uniform"],
                 conditions["A1-paid-probe-uniform"],
@@ -195,6 +206,10 @@ def validate_phase2_shared_smoke_config(config: ExperimentConfig) -> None:
     protocol = load_development_protocol()
     canonical = build_phase2_baseline_smoke_config()
     screening = json.loads(SCREENING_CANDIDATES_PATH.read_text(encoding="utf-8"))
+    if protocol.get("schema_version") != "milestone6.development_protocol.v2":
+        raise RuntimeError("development protocol schema drifted")
+    if screening.get("schema_version") != "milestone6.phase2_screening_candidates.v2":
+        raise RuntimeError("screening candidate schema drifted")
     if screening.get("status") != "frozen-before-screening-results":
         raise RuntimeError("screening candidate protocol is not frozen")
     if screening.get("scope") != "known-development-only":
@@ -226,6 +241,62 @@ def validate_phase2_shared_smoke_config(config: ExperimentConfig) -> None:
         raise RuntimeError("shared-artifact marker is missing")
     if config.parameters.get("unit_local_training_repeated_and_counted") is not False:
         raise RuntimeError("unit-local training must be disabled")
+    if config.selection != canonical.selection:
+        raise RuntimeError("shared smoke selection declaration drifted")
+    if config.method_revision != "development-shared-artifact-boundary-v2":
+        raise RuntimeError("shared smoke method revision drifted")
+    if config.parameters.get("development_protocol_sha256") != _sha256_bytes(
+        DEVELOPMENT_PROTOCOL_PATH
+    ):
+        raise RuntimeError("shared smoke protocol identity drifted")
+    if config.parameters.get("screening_candidates_sha256") != _sha256_bytes(
+        SCREENING_CANDIDATES_PATH
+    ):
+        raise RuntimeError("shared smoke screening identity drifted")
+    if config.parameters.get("development_task_manifest_sha256") != _sha256_bytes(
+        DEVELOPMENT_TASKS_PATH
+    ):
+        raise RuntimeError("shared smoke task-manifest identity drifted")
+    if (
+        config.parameters.get("selection_metric_id")
+        != "total_adaptation_actions_to_first_exact_optimum"
+        or config.parameters.get("selection_metric_schema_version")
+        != "restricted-interactions.v1"
+        or config.parameters.get("selection_metric_action_formula")
+        != "accounting.probes.actions + accounting.search.actions"
+        or config.parameters.get("selection_metric_oracle_policy")
+        != "fixed_batch_then_independent_replay_then_reporting_only_oracle"
+        or config.parameters.get("selection_metric_phase") != "validation"
+        or config.parameters.get("selection_metric_failure_sentinel")
+        != int(config.parameters["adaptation_action_cap"]) + 1
+    ):
+        raise RuntimeError("shared smoke typed selection-metric identity drifted")
+    metric = screening.get("screening_advancement_rule", {})
+    if (
+        metric.get("restricted_interactions_metric_id")
+        != "total_adaptation_actions_to_first_exact_optimum"
+        or metric.get("executed_action_formula")
+        != "accounting.probes.actions + accounting.search.actions"
+        or metric.get("failure_censoring_value")
+        != int(metric.get("endpoint_adaptation_actions", 0)) + 1
+        or "first_optimum_adaptation_actions typed field"
+        not in str(metric.get("exact_hit_value", ""))
+    ):
+        raise RuntimeError("screening restricted-interaction metric drifted")
+    capacity = screening.get("capacity_matching", {})
+    if (
+        capacity.get("cross_representation_parameter_tolerance_fraction") != 0.1
+        or capacity.get("required_reporting")
+        != [
+            "trainable_parameters",
+            "optimizer_steps",
+            "forward_passes",
+            "training_wall_seconds",
+        ]
+        or "objective-matched optimum-imitation baseline"
+        not in str(capacity.get("optimum_imitation_compute_floor", ""))
+    ):
+        raise RuntimeError("screening capacity-matching contract drifted")
     expected_ids = {
         "A0-no-probe-uniform",
         "A1-paid-probe-uniform",
@@ -826,8 +897,11 @@ def prepare_shared_models(
         or not same_affordance_rows
     ):
         raise RuntimeError("B2/C matched listwise training budget drifted")
-    denominator = max(1, c_report.trainable_parameters)
-    if abs(b2.trainable_parameters - c_report.trainable_parameters) / denominator >= 0.1:
+    if not within_parameter_tolerance(
+        b2.trainable_parameters,
+        c_report.trainable_parameters,
+        tolerance=0.1,
+    ):
         raise RuntimeError("B2/C capacity matching tolerance failed")
     if reports[B1].optimizer_steps != b2.optimizer_steps:
         raise RuntimeError("optimum imitation received a smaller training budget")
@@ -987,10 +1061,12 @@ def phase2_shared_smoke_executor(
             performance_direction="minimize",
             first_valid_completion_episode=search.first_valid_episode,
             first_optimum_episode=exact.first_episode,
+            first_optimum_adaptation_actions=exact.first_adaptation_actions,
             censored=not exact.success,
             censoring_budget=(
                 None if exact.success else int(config.parameters["adaptation_action_cap"])
             ),
+            censoring_reason=None if exact.success else "fixed_endpoint",
         ),
         accounting=ResourceAccounting(
             setup=PhaseAccounting(calls=1, wall_seconds=setup_wall),

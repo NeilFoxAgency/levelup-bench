@@ -20,16 +20,30 @@ from levelup.experiments.runner.records import (
     UnitOutcome,
     UnitPayload,
 )
+from levelup.experiments.runner.selection_metric import (
+    ExpectedSelectionUnit,
+    SelectionAuthority,
+    SelectionMetricSpec,
+    build_selection_metric_spec,
+    load_selection_authority,
+    merge_selection_metric_specs,
+    restricted_interactions,
+    summarize_variant,
+    within_parameter_tolerance,
+)
 from levelup.experiments.runner.storage import RunStore
 
 __all__ = [
     "ExperimentConfig",
     "ExperimentRunner",
     "ExpectedSharedArtifacts",
+    "ExpectedSelectionUnit",
     "PhaseAccounting",
     "PlannedSharedArtifact",
     "ResourceAccounting",
     "SharedArtifactInventory",
+    "SelectionMetricSpec",
+    "SelectionAuthority",
     "RunStore",
     "UnitOutcome",
     "UnitPayload",
@@ -37,7 +51,13 @@ __all__ = [
     "TrainingArtifactCostRecord",
     "aggregate_run",
     "apply_runtime_policy",
+    "build_selection_metric_spec",
     "load_experiment_config",
+    "load_selection_authority",
+    "merge_selection_metric_specs",
     "run_id_for",
     "scientific_config_sha256",
+    "restricted_interactions",
+    "summarize_variant",
+    "within_parameter_tolerance",
 ]

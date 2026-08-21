@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -22,7 +23,7 @@ from levelup.experiments.runner import (
     run_id_for,
     scientific_config_sha256,
 )
-from levelup.experiments.runner.aggregate import IncompleteRunError
+from levelup.experiments.runner.aggregate import IncompleteRunError, _records_sha256
 from levelup.experiments.runner.config import DevicePolicy, canonical_json_bytes
 from levelup.experiments.runner.provenance import capture_system_provenance
 from levelup.experiments.runner.records import (
@@ -521,6 +522,46 @@ def test_validity_requires_an_independent_evaluator() -> None:
             performance_value=1.0,
             performance_direction="minimize",
         )
+
+
+@pytest.mark.parametrize(
+    "omitted_fields",
+    [
+        ("first_optimum_adaptation_actions",),
+        ("censoring_reason",),
+        ("first_optimum_adaptation_actions", "censoring_reason"),
+        (),
+    ],
+)
+def test_completed_unit_hash_preserves_legacy_and_explicit_null_fields(
+    tmp_path: Path,
+    omitted_fields: tuple[str, ...],
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    record = _record(store, store.expected.units[0])
+    legacy_raw = record.model_dump(mode="json")
+    for field in omitted_fields:
+        legacy_raw["outcome"].pop(field)
+    legacy = UnitRecord.model_validate(legacy_raw)
+    expected = hashlib.sha256(canonical_json_bytes(legacy_raw) + b"\n").hexdigest()
+
+    assert _records_sha256((legacy,)) == expected
+
+
+def test_completed_unit_hash_supports_mixed_legacy_and_new_records(tmp_path: Path) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=2, replicates=1))
+    raw_records = [
+        _record(store, planned).model_dump(mode="json") for planned in store.expected.units
+    ]
+    raw_records[0]["outcome"].pop("first_optimum_adaptation_actions")
+    raw_records[0]["outcome"].pop("censoring_reason")
+    records = tuple(UnitRecord.model_validate(raw) for raw in raw_records)
+    digest = hashlib.sha256()
+    for raw in sorted(raw_records, key=lambda item: item["unit_id"]):
+        digest.update(canonical_json_bytes(raw))
+        digest.update(b"\n")
+
+    assert _records_sha256(records) == digest.hexdigest()
 
 
 def test_initialize_snapshots_are_immutable_and_idempotent(

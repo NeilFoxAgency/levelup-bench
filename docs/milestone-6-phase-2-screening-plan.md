@@ -116,3 +116,17 @@ not replace the already frozen 8,192-action Phase 9 method-selection rule.
 Do not start this matrix until the safe content-addressed shared-artifact substrate, Phase 2 model
 integration, single-owner cost aggregation, corruption tests, and a non-comparative shared-artifact
 smoke have all passed locally and in GitHub Actions.
+
+The selection runtime must also use the typed `first_optimum_adaptation_actions` field and a metric
+spec built from the scientific config plus the canonical expected-unit plan. It must reject missing,
+extra, duplicate, mixed-run, mixed-phase, identity-drifted, evaluator-less, unit-local-training, or
+incomplete-lineage records before family aggregation. Legacy records may remain readable for
+historical aggregation, but the selection reducer must never fall back to diagnostic fields. Child
+fold specs may be combined only when their held-out family sets are disjoint and their endpoint,
+sentinel, action formula, oracle policy, and condition identity agree. A comparative summary is
+forbidden until their union is exactly the six-family frozen development universe.
+
+The runtime authority loader pins the exact reviewed SHA-256 digests of the development protocol,
+screening manifest, and development-task manifest in code, then revalidates their cross-links and
+development-only structure. Any further pre-result amendment therefore requires an explicit code
+change and fresh review; cross-file edits that merely update one another's hashes fail closed.

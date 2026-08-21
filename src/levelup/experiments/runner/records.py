@@ -287,8 +287,10 @@ class UnitOutcome(BaseModel):
     first_valid_completion_episode: int | None = Field(default=None, ge=1)
     first_threshold_episode: int | None = Field(default=None, ge=1)
     first_optimum_episode: int | None = Field(default=None, ge=1)
+    first_optimum_adaptation_actions: int | None = Field(default=None, ge=0)
     censored: bool = False
     censoring_budget: int | None = Field(default=None, ge=1)
+    censoring_reason: Literal["fixed_endpoint"] | None = None
 
     @model_validator(mode="after")
     def outcome_is_consistent(self) -> "UnitOutcome":
@@ -304,8 +306,12 @@ class UnitOutcome(BaseModel):
             raise ValueError("first threshold requires success")
         if self.first_optimum_episode is not None and not self.success:
             raise ValueError("first optimum requires success")
+        if self.first_optimum_adaptation_actions is not None and not self.success:
+            raise ValueError("first optimum adaptation actions require success")
         if self.censored != (self.censoring_budget is not None):
             raise ValueError("censored and censoring_budget must be set together")
+        if self.censoring_reason is not None and not self.censored:
+            raise ValueError("censoring reason requires a censored outcome")
         if self.censored and self.success:
             raise ValueError("a successful outcome cannot be censored")
         return self

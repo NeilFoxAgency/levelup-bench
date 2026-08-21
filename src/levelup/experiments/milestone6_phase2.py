@@ -8,8 +8,10 @@ import time
 from pathlib import Path
 from typing import Any
 
+from levelup.core.trajectory import ActionRecord, Trajectory, TrajectoryStep
 from levelup.envs.adaptive_track import adaptive_track_bundle, make_adaptive_track
 from levelup.envs.adaptive_track import optimal_path as adaptive_optimal_path
+from levelup.envs.challenge_track import frontier_path as combo_frontier_path
 from levelup.envs.challenge_track import make_combo_track
 from levelup.envs.challenge_track import optimal_path as combo_optimal_path
 from levelup.experiments.milestone6_baselines import (
@@ -88,29 +90,67 @@ def _manifest_tasks() -> tuple[dict[str, Any], ...]:
 def _training_identity(entry: dict[str, Any]) -> TaskIdentity:
     family = str(entry["family"])
     if family == "combo":
-        raise ValueError("Phase 2 smoke holds Combo out; Combo training is not requested")
-    bundle = adaptive_track_bundle(
-        family,
-        int(entry["task_index"]),
-        int(entry["generator_seed"]),
-    )
-    if bundle.environment.task_spec.task_id != entry["task_id"]:
-        raise RuntimeError("development manifest task reconstruction drift")
-    catalog = tuple(
-        TrajectoryIdentity(
-            stage_label=stage.label,
-            trajectory_id=stage.trajectory_id,
-            source="synthetic-reference",
-            provenance={
-                "content_sha256": trajectory_content_sha256(
-                    bundle.trajectories[stage.trajectory_id]
-                ),
-                "kind": "synthetic_policy",
-                "generated_from_hidden_oracle": stage.label == "optimum",
-            },
+        environment = make_combo_track(
+            int(entry["task_index"]),
+            int(entry["generator_seed"]),
         )
-        for stage in bundle.ladder.stages
-    )
+        frontier_cost, frontier_actions = combo_frontier_path(environment)
+        optimum_cost, optimum_actions = combo_optimal_path(environment)
+        if frontier_cost <= optimum_cost or frontier_actions == optimum_actions:
+            raise ValueError("generated Combo task has no strict frontier-to-optimum gap")
+        if environment.task_spec.task_id != entry["task_id"]:
+            raise RuntimeError("development manifest task reconstruction drift")
+        catalog_items: list[TrajectoryIdentity] = []
+        for label, actions in (
+            ("frontier", frontier_actions),
+            ("optimum", optimum_actions),
+        ):
+            trajectory_id = f"{environment.task_spec.task_id}.{label}"
+            trajectory = Trajectory(
+                trajectory_id=trajectory_id,
+                task_id=environment.task_spec.task_id,
+                source="reference",
+                steps=tuple(
+                    TrajectoryStep(index=index, action=ActionRecord(name=action))
+                    for index, action in enumerate(actions)
+                ),
+            )
+            catalog_items.append(
+                TrajectoryIdentity(
+                    stage_label=label,
+                    trajectory_id=trajectory_id,
+                    source="synthetic-reference",
+                    provenance={
+                        "content_sha256": trajectory_content_sha256(trajectory),
+                        "kind": "synthetic_policy",
+                        "generated_from_hidden_oracle": label == "optimum",
+                    },
+                )
+            )
+        catalog = tuple(catalog_items)
+    else:
+        bundle = adaptive_track_bundle(
+            family,
+            int(entry["task_index"]),
+            int(entry["generator_seed"]),
+        )
+        if bundle.environment.task_spec.task_id != entry["task_id"]:
+            raise RuntimeError("development manifest task reconstruction drift")
+        catalog = tuple(
+            TrajectoryIdentity(
+                stage_label=stage.label,
+                trajectory_id=stage.trajectory_id,
+                source="synthetic-reference",
+                provenance={
+                    "content_sha256": trajectory_content_sha256(
+                        bundle.trajectories[stage.trajectory_id]
+                    ),
+                    "kind": "synthetic_policy",
+                    "generated_from_hidden_oracle": stage.label == "optimum",
+                },
+            )
+            for stage in bundle.ladder.stages
+        )
     return TaskIdentity(
         family_id=family,
         task_id=str(entry["task_id"]),
@@ -787,8 +827,10 @@ def phase2_baseline_smoke_executor(
             performance_direction="minimize",
             first_valid_completion_episode=search.first_valid_episode,
             first_optimum_episode=exact.first_episode,
+            first_optimum_adaptation_actions=exact.first_adaptation_actions,
             censored=not success,
             censoring_budget=(None if success else int(config.parameters["adaptation_action_cap"])),
+            censoring_reason=None if success else "fixed_endpoint",
         ),
         accounting=ResourceAccounting(
             setup=PhaseAccounting(

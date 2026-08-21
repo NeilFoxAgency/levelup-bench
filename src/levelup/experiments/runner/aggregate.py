@@ -27,7 +27,13 @@ class IncompleteRunError(RuntimeError):
 def _records_sha256(records: tuple[UnitRecord, ...]) -> str:
     digest = hashlib.sha256()
     for record in sorted(records, key=lambda item: item.unit_id):
-        digest.update(canonical_json_bytes(record.model_dump(mode="json")))
+        legacy_missing = {
+            field
+            for field in ("first_optimum_adaptation_actions", "censoring_reason")
+            if field not in record.outcome.model_fields_set
+        }
+        exclude = {"outcome": legacy_missing} if legacy_missing else None
+        digest.update(canonical_json_bytes(record.model_dump(mode="json", exclude=exclude)))
         digest.update(b"\n")
     return digest.hexdigest()
 
