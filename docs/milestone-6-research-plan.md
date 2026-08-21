@@ -155,11 +155,23 @@ This baseline receives no frontier comparison.
 
 Purpose: distinguish the benefit of state conditioning itself from the benefit of learning an improvement transition.
 
-### Baseline D - state-conditioned pooled frontier plus optimum
+### Baseline D - state-conditioned pooled frontier plus optimum (multi-structure control)
 
 Same model and state input, trained on both frontier and optimum state-action examples without indicating which is better.
 
 Purpose: same-data non-comparative control.
+
+### Baseline D1 - state-conditioned unpaired same trajectories
+
+Use exactly the frontier and optimum trajectories, sequence order, stage labels, examples,
+capacity, optimizer, and budgets used by Baseline F, but remove only cross-trajectory frontier-to-
+optimum pair membership. This is the pairing-only control; it must not also pool examples or shuffle
+sequence order. The pooled Baseline D remains a separate multi-structure control that removes
+pairing, order, and better-stage labels together.
+
+Pair membership must also be learner-invisible: serialized D1 examples cannot contain trajectory-
+pair IDs, alignment-pair IDs, shared record keys, or any other metadata that can reconstruct which
+frontier and optimum trajectories were paired.
 
 ### Baseline E - destroyed improvement structure
 
@@ -172,6 +184,12 @@ directed subset.
 Purpose: test whether the improvement direction carries information.
 
 ## Phase 3 - represent decisions in context
+
+Phase 2 may support only the state-conditioning comparison B2 versus C. Claims about transition
+information beyond state, history beyond transitions, or explicit pairing remain forbidden until
+named same-data, capacity-, seed-, optimizer-, inference-, and search-matched comparisons are frozen.
+In particular, a transition-only condition must be compared with state-only, a history/sequence
+condition with transition-only, and F with the learner-invisible unpaired D1 control.
 
 The minimal useful training unit should be richer than an action identity.
 
@@ -323,7 +341,8 @@ Before selecting a Milestone 6 method, test at least:
 
 1. sequence order intact versus shuffled,
 2. state input present versus removed,
-3. frontier/optimum pairing intact versus pooled,
+3. frontier/optimum pairing intact versus the same-trajectory unpaired pairing-only control,
+   with the pooled multi-structure control reported separately,
 4. correct improvement direction versus independently randomized direction and randomized pairing,
 5. optimum imitation versus improvement-aware training,
 6. comparable parameter count,
@@ -379,6 +398,7 @@ At minimum include:
 - clean global optimum-frequency and objective-matched listwise optimum imitation, plus the separately labeled legacy Milestone 5 continuity result,
 - state-conditioned optimum imitation,
 - state-conditioned pooled same-data control,
+- same-trajectory unpaired pairing-only control,
 - independently randomized-direction and randomized-pairing controls,
 - selected improvement-aware method.
 

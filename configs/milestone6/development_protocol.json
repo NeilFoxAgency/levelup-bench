@@ -1,7 +1,14 @@
 {
-  "schema_version": "milestone6.development_protocol.v1",
+  "schema_version": "milestone6.development_protocol.v2",
   "status": "frozen-before-comparative-development-results",
   "scope": "known-development-only",
+  "freeze_record": {
+    "amended_at_local_date": "2026-08-21",
+    "amendment_timing": "before comparative development results",
+    "comparative_results_inspected_before_amendment": false,
+    "previous_sha256": "a0d6e5760591ce70f95df4a87b8166dc69defa5e3242ddadabe3393b3e82a488",
+    "reason": "operationalize restricted interactions, bind clean causal controls, and isolate explicit pairing"
+  },
   "task_manifest": "configs/milestone6/development_tasks.json",
   "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
   "folds": {
@@ -72,6 +79,24 @@
       "simpler model",
       "lower one-time training cost"
     ],
+    "restricted_interactions_metric": {
+      "metric_id": "total_adaptation_actions_to_first_exact_optimum",
+      "executed_action_formula": "accounting.probes.actions + accounting.search.actions",
+      "success_value": "post-hoc cumulative paid-probe plus candidate-generation actions through the first exact candidate in generation order",
+      "failure_value": "endpoint_adaptation_actions + 1 reporting sentinel, regardless of partial executed action count",
+      "excluded_channels": [
+        "training-data preparation",
+        "model training",
+        "candidate replay",
+        "exact-optimum evaluator calls",
+        "resets",
+        "forward passes",
+        "wall time"
+      ],
+      "oracle_timing": "generate the complete declared fixed batch, independently replay it, then query the exact optimum and classify the first exact candidate; the oracle never changes search control flow",
+      "family_aggregation": "compute success rate and median restricted interactions within each family first, then give families equal weight",
+      "typed_record_requirement": "successful units must carry first_optimum_adaptation_actions as a validated typed field before comparative screening"
+    },
     "exact_optimum_is_reporting_only": true,
     "selection_rule_changes_after_comparative_results": "forbidden"
   },
@@ -89,6 +114,7 @@
     "B2_global_listwise_optimum",
     "C_state_conditioned_listwise_optimum",
     "D_state_conditioned_pooled",
+    "D1_state_conditioned_unpaired_same_trajectories",
     "E1_independently_randomized_direction",
     "E2_randomized_pairing",
     "F_correctly_paired_improvement"
@@ -117,10 +143,70 @@
   },
   "other_hyperparameters_after_comparative_results": "forbidden_except_committed_bug_fix_or_pre-result_protocol_amendment",
   "destroyed_structure_controls": {
-    "pooled": "same transitions with pairing, order and better-stage labels absent",
+    "pooled": "multi-structure control: same transitions with cross-trajectory pairing, sequence order and better-stage labels absent",
+    "pairing_only_unpaired": "same frontier and optimum trajectories, sequence order, stage labels and example multiset as F; remove only cross-trajectory pair membership while keeping F capacity, optimizer, training, inference and search budgets",
     "randomized_direction": "independent fair-coin better-side label for every pair using the frozen label seed; no intentionally correct subset",
-    "randomized_pairing": "seeded derangement of optimum partners within the training fold while preserving every individual trajectory and label marginal",
+    "randomized_pairing": "seeded within-stratum derangement of optimum partners with no self-pairs, preserving every individual trajectory and label marginal; use the same identical exclusions as F and report them",
     "shuffled_history": "same transition multiset and pair membership with within-sequence order permuted"
+  },
+  "control_seed_identity_requirements": {
+    "all_controls": "bind the control identifier and every transformation parameter to the condition and training-data artifact identity",
+    "pairing_only_unpaired": {
+      "seed": "no additional randomization; inherit F's non-label seeds",
+      "trajectory_identity": "exactly the same frontier and optimum trajectories as F",
+      "sequence_order": "preserved",
+      "stage_labels": "preserved",
+      "examples": "same example identities, count and multiset as F",
+      "removed_structure": "cross-trajectory pair membership only",
+      "learner_visible_membership_metadata": "none; serialized learner examples must exclude trajectory-pair IDs, alignment-pair IDs, shared record keys, and any other field that can reconstruct pair membership",
+      "capacity_optimizer_budgets": "identical to F"
+    },
+    "randomized_direction": {
+      "seed": "seed_policy.bases.randomized_direction",
+      "randomization": "independent fair coin per pair",
+      "correct_subset": "none intentionally retained",
+      "identity_binding": "bind the seed and realized direction-map hash to the condition and training-data artifact identity"
+    },
+    "randomized_pairing": {
+      "seed": "seed_policy.bases.randomized_pairing",
+      "randomization": "seeded derangement within compatible alignment strata",
+      "self_pairs": false,
+      "exclusions": "identical compatible-strata exclusions to F and reported",
+      "identity_binding": "bind the seed, realized pairing-map hash and exclusions to the condition and training-data artifact identity"
+    },
+    "pooled": {
+      "kind": "multi-structure",
+      "removed_structures": ["cross_trajectory_pair_membership", "sequence_order", "better_stage_labels"],
+      "identity_binding": "bind pooled control kind to the condition and training-data artifact identity"
+    }
+  },
+  "representation_ladder_questions": [
+    "Does state conditioning help beyond global/action-only statistics?",
+    "Does transition information help beyond current state?",
+    "Does history/sequence help beyond transition information?",
+    "Does explicit frontier-to-optimum pairing help beyond the exact same trajectories without pair membership?"
+  ],
+  "representation_ladder_stage_contract": {
+    "state_conditioning": {
+      "status": "eligible_in_phase2_screening",
+      "matched_comparison": "B2_global_listwise_optimum versus C_state_conditioned_listwise_optimum",
+      "claim_scope": "state-conditioned current-observation features beyond global affordance features under matched data, objective, updates, seeds, and search budget"
+    },
+    "transition_information": {
+      "status": "deferred_until_named_phase3_matched_conditions_are_frozen",
+      "claims_before_gate": "forbidden",
+      "required_match": "same trajectories, examples, objective, capacity band, seeds, optimizer, updates, inference budget, and search budget; transition-only must be compared with state-only"
+    },
+    "history_sequence": {
+      "status": "deferred_until_named_phase3_phase6_matched_conditions_are_frozen",
+      "claims_before_gate": "forbidden",
+      "required_match": "same trajectories, transitions, examples, objective, capacity band, seeds, optimizer, updates, inference budget, and search budget; history/sequence must be compared with transition-only"
+    },
+    "explicit_pairing": {
+      "status": "deferred_until_D1_and_F_are_implemented_and_frozen",
+      "claims_before_gate": "forbidden",
+      "matched_comparison": "D1_state_conditioned_unpaired_same_trajectories versus F_correctly_paired_improvement"
+    }
   },
   "alignment_contract": {
     "unmatched_policy": "retain as unmatched; never force a nearest match",

@@ -1,10 +1,17 @@
 {
-  "schema_version": "milestone6.phase2_screening_candidates.v1",
+  "schema_version": "milestone6.phase2_screening_candidates.v2",
   "status": "frozen-before-screening-results",
   "scope": "known-development-only",
+  "freeze_record": {
+    "amended_at_local_date": "2026-08-21",
+    "amendment_timing": "before comparative development results",
+    "comparative_results_inspected_before_amendment": false,
+    "previous_sha256": "9e1ba94a80324fcbfdf4ffdb7cc36d58b2a7bbca2713f293aca164cfdcf0e03c",
+    "reason": "operationalize the interaction metric and bind capacity matching"
+  },
   "parent_protocol": {
     "path": "configs/milestone6/development_protocol.json",
-    "sha256": "a0d6e5760591ce70f95df4a87b8166dc69defa5e3242ddadabe3393b3e82a488"
+    "sha256": "7e6911c120db091e2b250f7a91520dd5f81a481cb4a19662eeae858c7da1c059"
   },
   "task_manifest": {
     "path": "configs/milestone6/development_tasks.json",
@@ -84,6 +91,18 @@
     "torch_threads": 1,
     "processes": 1
   },
+  "capacity_matching": {
+    "same_data_controls": "match architecture/backbone/head where applicable, optimizer, batches, update count, inference budget, and search budget",
+    "cross_representation_parameter_tolerance_fraction": 0.1,
+    "optimum_imitation_compute_floor": "the objective-matched optimum-imitation baseline must not receive fewer examples, batches, optimizer updates, or a lower declared training-compute budget than its matched improvement-aware contender; observed forward passes may differ by objective and must be reported",
+    "required_reporting": [
+      "trainable_parameters",
+      "optimizer_steps",
+      "forward_passes",
+      "training_wall_seconds"
+    ],
+    "input_width_exceptions": "state-conditioned models may add the declared current-observation feature width; the resulting trainable-parameter difference must remain within the cross-representation tolerance and be reported"
+  },
   "artifact_sharing": {
     "canonical_evidence_artifact_identity": "fold, replicate, ordered task and optimum-reference identities, probe policy and non-label seeds; condition and temperature excluded",
     "training_data_view_identity": "condition, canonical evidence artifact, representation schema and data-order seed",
@@ -109,6 +128,14 @@
   "screening_advancement_rule": {
     "scope": "select one numeric tuple independently within each of B1, B2 and C; retain A0 and A1",
     "endpoint_adaptation_actions": 2048,
+    "restricted_interactions_metric_id": "total_adaptation_actions_to_first_exact_optimum",
+    "executed_action_formula": "accounting.probes.actions + accounting.search.actions",
+    "restricted_interactions_definition": "for success, the post-hoc cumulative paid-probe plus candidate-generation actions through the first exact candidate in generation order; for failure, the endpoint-plus-one reporting sentinel regardless of partial executed actions",
+    "exact_optimum_search_control": "exact optimum is reporting-only; candidate generation always completes its declared fixed batch and independent evaluation before exact-optimum classification, and the oracle never stops or changes search",
+    "failure_censoring_value": 2049,
+    "exact_hit_value": "validated first_optimum_adaptation_actions typed field computed after fixed-batch generation and independent evaluation",
+    "excluded_interaction_channels": ["training-data preparation", "model training", "candidate replay", "exact-optimum evaluator calls", "resets", "forward passes", "wall time"],
+    "family_aggregation": "compute success rate and median restricted interactions within each family first, then give families equal weight",
     "steps": [
       "maximize the minimum family exact-optimum success rate",
       "retain tuples within five absolute percentage points of the best minimum-family success rate",

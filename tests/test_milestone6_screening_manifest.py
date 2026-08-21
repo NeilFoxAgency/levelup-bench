@@ -28,6 +28,14 @@ def test_phase2_screening_manifest_binds_frozen_inputs_and_stays_development_onl
     payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
     protocol = payload["parent_protocol"]
     tasks = payload["task_manifest"]
+    assert payload["schema_version"] == "milestone6.phase2_screening_candidates.v2"
+    assert payload["freeze_record"] == {
+        "amended_at_local_date": "2026-08-21",
+        "amendment_timing": "before comparative development results",
+        "comparative_results_inspected_before_amendment": False,
+        "previous_sha256": "9e1ba94a80324fcbfdf4ffdb7cc36d58b2a7bbca2713f293aca164cfdcf0e03c",
+        "reason": "operationalize the interaction metric and bind capacity matching",
+    }
     assert payload["status"] == "frozen-before-screening-results"
     assert payload["scope"] == "known-development-only"
     assert payload["final_family_access"] is False
@@ -81,6 +89,41 @@ def test_phase2_screening_candidate_grid_is_complete_unique_and_symmetric() -> N
         "C",
     ]
     assert all(item["candidate_tuple_ids"] == "all" for item in learned)
+
+
+def test_phase2_screening_freezes_interaction_metric_and_capacity_matching() -> None:
+    payload = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    rule = payload["screening_advancement_rule"]
+    assert rule["endpoint_adaptation_actions"] == 2048
+    assert rule["restricted_interactions_metric_id"] == (
+        "total_adaptation_actions_to_first_exact_optimum"
+    )
+    assert rule["executed_action_formula"] == (
+        "accounting.probes.actions + accounting.search.actions"
+    )
+    assert "endpoint-plus-one reporting sentinel" in rule[
+        "restricted_interactions_definition"
+    ]
+    assert rule["exact_optimum_search_control"].startswith("exact optimum is reporting-only")
+    assert rule["failure_censoring_value"] == 2049
+    assert "first_optimum_adaptation_actions typed field" in rule["exact_hit_value"]
+    assert "candidate replay" in rule["excluded_interaction_channels"]
+    assert "within each family first" in rule["family_aggregation"]
+
+    capacity = payload["capacity_matching"]
+    assert "architecture/backbone/head" in capacity["same_data_controls"]
+    assert capacity["cross_representation_parameter_tolerance_fraction"] == 0.1
+    assert "must not receive fewer examples" in capacity["optimum_imitation_compute_floor"]
+    assert "forward passes may differ by objective" in capacity[
+        "optimum_imitation_compute_floor"
+    ]
+    assert capacity["required_reporting"] == [
+        "trainable_parameters",
+        "optimizer_steps",
+        "forward_passes",
+        "training_wall_seconds",
+    ]
+    assert "feature width" in capacity["input_width_exceptions"]
 
 
 def test_phase2_screening_counts_and_artifact_sharing_are_frozen() -> None:

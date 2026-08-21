@@ -4,6 +4,9 @@
 
 **Status:** frozen before Phase 2 screening results; development families only
 
+**Pre-result amendment:** 2026-08-21; no comparative development results were inspected. The
+amendment operationalized restricted interactions, capacity matching, and clean control semantics.
+
 ## Purpose
 
 This document closes the remaining numeric-expansion and tie-breaking choices for A0/A1/B1/B2/C
@@ -26,6 +29,15 @@ B1, B2, and C each receive the complete predeclared numeric Cartesian grid:
 That is 12 explicit tuples per learned condition. The fixed optimizer, weight decay, hidden widths,
 probe scheduler, search budget, action caps, CPU policy, and process count remain inherited from
 the parent protocol and are repeated in the machine manifest to fail closed.
+
+Capacity matching is frozen as follows. Same-data controls match architecture/backbone/head where
+applicable, optimizer, batches, update count, inference budget, and search budget. Across
+representation changes, trainable parameter counts must remain within 10 percent. Optimum imitation
+must not receive fewer examples, batches, optimizer updates, or a lower declared training-compute
+budget than its matched improvement-aware contender. Every model records trainable parameters,
+optimizer steps, observed forward passes, and training wall time; observed forward passes may differ
+by objective. A state-conditioned input-width increase is an explicit, permitted exception only
+when it remains inside the 10-percent parameter tolerance and is reported.
 
 Temperature does not affect model training. Model artifacts are therefore keyed by condition,
 fold, replicate, training-data identity, model seed, learning rate, and epochs, and are reused
@@ -75,6 +87,16 @@ condition:
 4. minimize the macro-average of family medians;
 5. minimize one-time optimizer steps, then forward passes; and
 6. if still tied, choose the ascending numeric tuple `(learning rate, epochs, temperature)`.
+
+Here, executed adaptation actions are paid probe actions plus candidate/search actions. A successful
+task contributes the post-hoc cumulative total through its first exact candidate in generation
+order, recorded in a validated typed field. A task that has not reached exact optimum by the
+2,048-action endpoint contributes the reporting sentinel 2,049 even if its partial executed count is
+lower. Training-data preparation, model training, replay, evaluator calls, resets, forward passes,
+and wall time remain separate resource channels. Search always completes its declared fixed batch
+and independent replay before the reporting-only optimum query; exact-optimum classification cannot
+stop or alter search. Success and median interactions are computed within each family before equal
+family weighting.
 
 This screening rule cannot be altered after comparative screening results are available. It does
 not replace the already frozen 8,192-action Phase 9 method-selection rule.
