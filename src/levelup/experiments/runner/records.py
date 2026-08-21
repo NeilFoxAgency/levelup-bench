@@ -87,7 +87,9 @@ class PlannedSharedArtifact(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    kind: Literal["training_artifact"] = "training_artifact"
+    kind: Literal["training_artifact", "training_data_evidence", "training_data_view"] = (
+        "training_artifact"
+    )
     key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     owner_condition_id: str = Field(min_length=1)
     owner_group_id: str | None = Field(default=None, min_length=1)
@@ -100,7 +102,9 @@ class PlannedSharedArtifact(BaseModel):
 
     @model_validator(mode="after")
     def consumers_are_unique(self) -> "PlannedSharedArtifact":
-        if not self.consumer_unit_ids or len(set(self.consumer_unit_ids)) != len(self.consumer_unit_ids):
+        if not self.consumer_unit_ids or len(set(self.consumer_unit_ids)) != len(
+            self.consumer_unit_ids
+        ):
             raise ValueError("shared artifact consumers must be unique and non-empty")
         if not self.consumer_condition_ids or len(set(self.consumer_condition_ids)) != len(
             self.consumer_condition_ids
@@ -121,16 +125,18 @@ class ExpectedSharedArtifacts(BaseModel):
 
     @model_validator(mode="after")
     def keys_are_unique(self) -> "ExpectedSharedArtifacts":
-        keys = [item.key_id for item in self.artifacts]
+        keys = [(item.kind, item.key_id) for item in self.artifacts]
         if len(keys) != len(set(keys)):
-            raise ValueError("shared artifact key IDs must be unique")
-        consumers = [
-            unit_id
-            for artifact in self.artifacts
-            for unit_id in artifact.consumer_unit_ids
-        ]
-        if len(consumers) != len(set(consumers)):
-            raise ValueError("one unit cannot consume multiple shared artifacts")
+            raise ValueError("shared artifact kind/key pairs must be unique")
+        for kind in {item.kind for item in self.artifacts}:
+            consumers = [
+                unit_id
+                for artifact in self.artifacts
+                if artifact.kind == kind
+                for unit_id in artifact.consumer_unit_ids
+            ]
+            if len(consumers) != len(set(consumers)):
+                raise ValueError("one unit cannot consume multiple shared artifacts of one kind")
         return self
 
 
@@ -139,10 +145,37 @@ class SharedArtifactReference(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
+    kind: Literal["training_artifact", "training_data_evidence", "training_data_view"] = (
+        "training_artifact"
+    )
     key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     artifact_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     cost_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     consumer_accounting_scope: Literal["heldout_task_only"] = "heldout_task_only"
+
+
+_SHARED_KIND_ORDER = {
+    "training_data_evidence": 0,
+    "training_data_view": 1,
+    "training_artifact": 2,
+}
+
+
+def _validate_unit_shared_references(
+    legacy: SharedArtifactReference | None,
+    references: tuple[SharedArtifactReference, ...],
+) -> None:
+    if legacy is not None and references:
+        raise ValueError("legacy shared_artifact cannot be combined with shared_artifacts")
+    if len({item.kind for item in references}) != len(references):
+        raise ValueError("a unit may have at most one shared artifact per kind")
+    if references != tuple(sorted(references, key=lambda item: _SHARED_KIND_ORDER[item.kind])):
+        raise ValueError("shared artifacts must use canonical kind order")
+    kinds = {item.kind for item in references}
+    if "training_data_view" in kinds and "training_data_evidence" not in kinds:
+        raise ValueError("a training-data view requires its evidence reference")
+    if "training_artifact" in kinds and "training_data_view" not in kinds:
+        raise ValueError("a typed training artifact requires its training-data view")
 
 
 class PhaseAccounting(BaseModel):
@@ -201,9 +234,7 @@ class TrainingArtifactCostRecord(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    schema_version: Literal[
-        "runner.training-artifact-cost.v1", "runner.training-artifact-cost.v2"
-    ]
+    schema_version: Literal["runner.training-artifact-cost.v1", "runner.training-artifact-cost.v2"]
     cost_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     key_id: str = Field(pattern=r"^[0-9a-f]{64}$")
     artifact_id: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -216,18 +247,13 @@ class TrainingArtifactCostRecord(BaseModel):
         body = self.model_dump(mode="json", exclude={"cost_id"})
         if self.schema_version == "runner.training-artifact-cost.v1":
             body.pop("scope", None)
-        return hashlib.sha256(
-            canonical_json_bytes(body)
-        ).hexdigest()
+        return hashlib.sha256(canonical_json_bytes(body)).hexdigest()
 
     @model_validator(mode="after")
     def digest_is_valid(self) -> "TrainingArtifactCostRecord":
         if (
             self.schema_version == "runner.training-artifact-cost.v1"
-            and (
-                self.scope is not None
-                or not isinstance(self.accounting, ResourceAccounting)
-            )
+            and (self.scope is not None or not isinstance(self.accounting, ResourceAccounting))
         ) or (
             self.schema_version == "runner.training-artifact-cost.v2"
             and (
@@ -236,9 +262,7 @@ class TrainingArtifactCostRecord(BaseModel):
             )
         ):
             raise ValueError("cost scope does not match schema version")
-        if self.key_id != hashlib.sha256(
-            canonical_json_bytes(self.key)
-        ).hexdigest():
+        if self.key_id != hashlib.sha256(canonical_json_bytes(self.key)).hexdigest():
             raise ValueError("cost key ID does not match canonical key")
         if self.cost_id != self.expected_cost_id:
             raise ValueError("cost ID does not match canonical cost body")
@@ -272,9 +296,7 @@ class UnitOutcome(BaseModel):
             raise ValueError("success requires evaluator_ran, valid, and completed")
         if self.valid and self.completed and self.performance_value is None:
             raise ValueError("valid completed outcomes require a performance value")
-        if self.first_valid_completion_episode is not None and not (
-            self.valid and self.completed
-        ):
+        if self.first_valid_completion_episode is not None and not (self.valid and self.completed):
             raise ValueError("first valid completion requires a valid completed outcome")
         if self.first_threshold_episode is not None and not self.success:
             raise ValueError("first threshold requires success")
@@ -295,6 +317,7 @@ class UnitPayload(BaseModel):
     outcome: UnitOutcome
     accounting: ResourceAccounting
     shared_artifact: SharedArtifactReference | None = None
+    shared_artifacts: tuple[SharedArtifactReference, ...] = ()
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")
@@ -303,11 +326,15 @@ class UnitPayload(BaseModel):
         cls, diagnostics: dict[str, DiagnosticValue]
     ) -> dict[str, DiagnosticValue]:
         if any(
-            isinstance(value, float) and not math.isfinite(value)
-            for value in diagnostics.values()
+            isinstance(value, float) and not math.isfinite(value) for value in diagnostics.values()
         ):
             raise ValueError("diagnostic float values must be finite")
         return diagnostics
+
+    @model_validator(mode="after")
+    def shared_kinds_are_unique(self) -> "UnitPayload":
+        _validate_unit_shared_references(self.shared_artifact, self.shared_artifacts)
+        return self
 
 
 class UnitRecord(BaseModel):
@@ -329,6 +356,7 @@ class UnitRecord(BaseModel):
     outcome: UnitOutcome
     accounting: ResourceAccounting
     shared_artifact: SharedArtifactReference | None = None
+    shared_artifacts: tuple[SharedArtifactReference, ...] = ()
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")
@@ -337,11 +365,15 @@ class UnitRecord(BaseModel):
         cls, diagnostics: dict[str, DiagnosticValue]
     ) -> dict[str, DiagnosticValue]:
         if any(
-            isinstance(value, float) and not math.isfinite(value)
-            for value in diagnostics.values()
+            isinstance(value, float) and not math.isfinite(value) for value in diagnostics.values()
         ):
             raise ValueError("diagnostic float values must be finite")
         return diagnostics
+
+    @model_validator(mode="after")
+    def shared_kinds_are_unique(self) -> "UnitRecord":
+        _validate_unit_shared_references(self.shared_artifact, self.shared_artifacts)
+        return self
 
     @model_validator(mode="after")
     def timestamps_are_ordered(self) -> "UnitRecord":
@@ -473,15 +505,9 @@ class AggregateArtifact(BaseModel):
     inventory: Inventory
     by_phase_condition: dict[SplitPhase, dict[str, AggregateSlice]]
     by_phase_family: dict[SplitPhase, dict[str, AggregateSlice]]
-    shared_artifacts_sha256: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
-    shared_inventory: SharedArtifactInventory = Field(
-        default_factory=SharedArtifactInventory
-    )
-    shared_accounting_by_owner_group: dict[str, ResourceAccounting] = Field(
-        default_factory=dict
-    )
+    shared_artifacts_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    shared_inventory: SharedArtifactInventory = Field(default_factory=SharedArtifactInventory)
+    shared_accounting_by_owner_group: dict[str, ResourceAccounting] = Field(default_factory=dict)
 
 
 def unit_id_for(key: UnitKey) -> str:

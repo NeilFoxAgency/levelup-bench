@@ -26,10 +26,12 @@ from levelup.experiments.runner.aggregate import IncompleteRunError
 from levelup.experiments.runner.config import DevicePolicy, canonical_json_bytes
 from levelup.experiments.runner.provenance import capture_system_provenance
 from levelup.experiments.runner.records import (
+    ExpectedSharedArtifacts,
     PlannedSharedArtifact,
     PlannedUnit,
     SharedArtifactReference,
     SystemProvenance,
+    TrainingPreparationAccounting,
     UnitRecord,
 )
 from levelup.experiments.runner.storage import (
@@ -42,6 +44,14 @@ from levelup.experiments.runner.training_artifacts import (
     TrainingReportMetadata,
     load_training_cost,
     write_training_artifact,
+)
+from levelup.experiments.runner.training_data_artifacts import (
+    TrainingDataArtifactKey,
+    evidence_key_for,
+    load_training_data_evidence_cost,
+    load_training_data_view_cost,
+    sanitize_clean_optimum_samples,
+    write_training_data_artifact,
 )
 
 
@@ -227,6 +237,65 @@ def _training_key(*, condition_id: str = "B2") -> TrainingArtifactKey:
     )
 
 
+def _training_data_key(*, condition_id: str = "condition-0") -> TrainingDataArtifactKey:
+    return TrainingDataArtifactKey(
+        screening_candidates_sha256="1" * 64,
+        protocol_sha256="2" * 64,
+        task_manifest_sha256="3" * 64,
+        expected_unit_plan_sha256="4" * 64,
+        provenance_sha256="5" * 64,
+        reference_exposure_sha256="6" * 64,
+        representation_sha256="7" * 64,
+        probe_policy_sha256="8" * 64,
+        fold_id="fold-0",
+        heldout_family_id="family-0",
+        ordered_training_task_ids=("task-1",),
+        ordered_heldout_task_ids=("task-0",),
+        condition_id=condition_id,
+        objective_id="optimum_frequency",
+        replicate=0,
+        data_order_seed=40,
+        probe_seeds=(20,),
+        environment_seeds=(100,),
+    )
+
+
+def _canonical_training_data():
+    from levelup.experiments import milestone6_baselines as baselines
+    from levelup.learning.state_conditioned import (
+        AffordanceTable,
+        ObservableState,
+        ObservableTrace,
+        ObservedTransition,
+    )
+
+    before = ObservableState(0.0, 1.0, 0.0, 1.0, 0.0, ("wait",))
+    after = ObservableState(1.0, 0.0, 1.0, 1.0, 0.0, ())
+    source = baselines.CleanOptimumTrainingSample(
+        reference=baselines.ValidatedObservableTrace(
+            task_id="task-1",
+            stage_label="optimum",
+            trajectory_id="audit-only",
+            trace=ObservableTrace((ObservedTransition(before, "wait", after, True),)),
+            performance_value=1.0,
+            evaluator_calls=1,
+            evaluator_replay_actions=1,
+            observable_replay_actions=1,
+            resets=1,
+            evaluator_wall_seconds=0.0,
+            observable_replay_wall_seconds=0.0,
+        ),
+        probe=baselines.ProbeEvidence(
+            task_id="task-1",
+            affordances=AffordanceTable(features={"wait": (1.0,) * 49}, sample_counts={"wait": 1}),
+            transitions=(),
+            accounting=baselines.ProbeAccounting(1, 1, 1, ("wait",), 0.0),
+        ),
+        _construction_token=baselines._CANONICAL_CLEAN_SAMPLE_TOKEN,
+    )
+    return sanitize_clean_optimum_samples((source,))
+
+
 def _store(tmp_path: Path, config: ExperimentConfig | None = None) -> RunStore:
     store = RunStore(tmp_path, config or _config(), repository=tmp_path)
     store.initialize()
@@ -263,9 +332,10 @@ def test_run_identity_is_canonical_but_changes_with_scientific_inputs(tmp_path: 
 
     assert scientific_config_sha256(config) == scientific_config_sha256(reordered_config)
     assert run_id_for(config) == run_id_for(reordered_config)
-    assert RunStore(tmp_path / "one", config, repository=tmp_path).run_id == RunStore(
-        tmp_path / "two", config, repository=tmp_path
-    ).run_id
+    assert (
+        RunStore(tmp_path / "one", config, repository=tmp_path).run_id
+        == RunStore(tmp_path / "two", config, repository=tmp_path).run_id
+    )
 
     changed = config.model_dump(mode="json")
     changed["conditions"][0]["parameters"]["alpha"] = 999
@@ -330,9 +400,9 @@ def test_validation_selection_requires_validation_tasks() -> None:
 
 def test_exposure_must_match_a_development_trajectory_catalog() -> None:
     raw = _config().model_dump(mode="json")
-    raw["conditions"][0]["exposure"]["exposed_trajectories"][0][
-        "trajectory_id"
-    ] = "unknown-trajectory"
+    raw["conditions"][0]["exposure"]["exposed_trajectories"][0]["trajectory_id"] = (
+        "unknown-trajectory"
+    )
     with pytest.raises(ValidationError, match="development task catalog"):
         ExperimentConfig.model_validate(raw)
 
@@ -443,11 +513,7 @@ def test_initialize_snapshots_are_immutable_and_idempotent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     store = _store(tmp_path)
-    snapshots = {
-        path.name: path.read_bytes()
-        for path in store.run_dir.iterdir()
-        if path.is_file()
-    }
+    snapshots = {path.name: path.read_bytes() for path in store.run_dir.iterdir() if path.is_file()}
 
     monkeypatch.setattr(
         "levelup.experiments.runner.storage.capture_system_provenance",
@@ -458,9 +524,7 @@ def test_initialize_snapshots_are_immutable_and_idempotent(
     store.initialize()
 
     assert snapshots == {
-        path.name: path.read_bytes()
-        for path in store.run_dir.iterdir()
-        if path.is_file()
+        path.name: path.read_bytes() for path in store.run_dir.iterdir() if path.is_file()
     }
 
     changed = _provenance().model_copy(update={"git_commit_sha": "b" * 40})
@@ -529,17 +593,13 @@ def test_corrupt_unexpected_and_mismatched_results_are_rejected(tmp_path: Path) 
 
     undeclared_metric = record.model_copy(
         update={
-            "outcome": record.outcome.model_copy(
-                update={"performance_metric_id": "undeclared"}
-            )
+            "outcome": record.outcome.model_copy(update={"performance_metric_id": "undeclared"})
         }
     )
     with pytest.raises(ArtifactValidationError, match="undeclared performance metric"):
         store.write_completed(undeclared_metric)
 
-    secret_diagnostic = record.model_copy(
-        update={"diagnostics": {"test": "super-secret-token"}}
-    )
+    secret_diagnostic = record.model_copy(update={"diagnostics": {"test": "super-secret-token"}})
     with pytest.raises(ArtifactValidationError) as error:
         store.write_completed(secret_diagnostic)
     assert "super-secret-token" not in str(error.value)
@@ -652,9 +712,7 @@ def test_resume_is_idempotent_and_does_not_rewrite_completed_units(tmp_path: Pat
         "failed": 0,
         "interrupted": 0,
     }
-    assert unit_bytes == {
-        path.name: path.read_bytes() for path in store.units_dir.glob("*.json")
-    }
+    assert unit_bytes == {path.name: path.read_bytes() for path in store.units_dir.glob("*.json")}
 
 
 def test_aggregation_is_strict_deterministic_and_read_only(tmp_path: Path) -> None:
@@ -802,7 +860,9 @@ def test_read_only_initialization_cannot_execute_units(tmp_path: Path) -> None:
 
 def test_dirty_provenance_hash_includes_untracked_contents(tmp_path: Path) -> None:
     subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
-    subprocess.run(("git", "config", "user.email", "test@example.invalid"), cwd=tmp_path, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "test@example.invalid"), cwd=tmp_path, check=True
+    )
     subprocess.run(("git", "config", "user.name", "Runner Test"), cwd=tmp_path, check=True)
     tracked = tmp_path / "tracked.txt"
     tracked.write_text("tracked\n", encoding="utf-8")
@@ -829,9 +889,7 @@ def test_committed_phase1_smoke_config_executes_only_development_data(
     store = RunStore(tmp_path, config, repository=repository)
     store.initialize()
 
-    execution = ExperimentRunner(store).execute(
-        lambda planned: smoke_executor(config, planned)
-    )
+    execution = ExperimentRunner(store).execute(lambda planned: smoke_executor(config, planned))
     aggregate = aggregate_run(store, strict=True)
 
     assert not config.split.validation_tasks
@@ -846,9 +904,7 @@ def test_committed_phase1_smoke_config_executes_only_development_data(
 def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -> None:
     config = _config(conditions=2, tasks=1, replicates=2)
     base = RunStore(tmp_path / "base", config, repository=tmp_path)
-    consumers = tuple(
-        unit.unit_id for unit in base.expected.units if unit.key.replicate == 0
-    )
+    consumers = tuple(unit.unit_id for unit in base.expected.units if unit.key.replicate == 0)
     key = _training_key()
     plan = PlannedSharedArtifact(
         key_id=key.key_id,
@@ -874,9 +930,7 @@ def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -
         key=key,
         model_id=key.backbone_id,
         model=model,
-        accounting=ResourceAccounting(
-            training=PhaseAccounting(optimizer_steps=99)
-        ),
+        accounting=ResourceAccounting(training=PhaseAccounting(optimizer_steps=99)),
         report=TrainingReportMetadata(
             trainable_parameters=3,
             optimizer_steps=99,
@@ -900,9 +954,7 @@ def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -
         return payload.model_copy(
             update={
                 "shared_artifact": reference,
-                "accounting": payload.accounting.model_copy(
-                    update={"training": PhaseAccounting()}
-                ),
+                "accounting": payload.accounting.model_copy(update={"training": PhaseAccounting()}),
             }
         )
 
@@ -914,6 +966,264 @@ def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -
         "complete": True,
     }
     assert aggregate.shared_accounting_by_owner_group["B2"].training.optimizer_steps == 99
+
+
+def test_shared_references_allow_one_unit_per_kind() -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    planned = plan_expected_units(config).units[0]
+    refs = (
+        SharedArtifactReference(
+            kind="training_data_evidence",
+            key_id="a" * 64,
+            artifact_id="b" * 64,
+            cost_id="c" * 64,
+        ),
+        SharedArtifactReference(
+            kind="training_data_view",
+            key_id="d" * 64,
+            artifact_id="e" * 64,
+            cost_id="f" * 64,
+        ),
+        SharedArtifactReference(
+            kind="training_artifact",
+            key_id="1" * 64,
+            artifact_id="2" * 64,
+            cost_id="3" * 64,
+        ),
+    )
+    payload = _payload(planned).model_copy(update={"shared_artifacts": refs})
+    assert payload.shared_artifacts == refs
+    with pytest.raises(ValidationError, match="per kind"):
+        UnitPayload.model_validate(
+            payload.model_copy(update={"shared_artifacts": (refs[0], refs[0])}).model_dump(
+                mode="json"
+            )
+        )
+    plan = PlannedSharedArtifact(
+        kind="training_data_evidence",
+        key_id="a" * 64,
+        owner_condition_id="condition-0",
+        owner_family_id="family-0",
+        owner_fold_id="fold-0",
+        owner_replicate=0,
+        consumer_phase="development",
+        consumer_condition_ids=("condition-0",),
+        consumer_unit_ids=(planned.unit_id,),
+    )
+    expected = ExpectedSharedArtifacts(
+        run_id="run",
+        config_sha256="1" * 64,
+        artifacts=(
+            plan,
+            plan.model_copy(update={"kind": "training_data_view", "key_id": "d" * 64}),
+            plan.model_copy(update={"kind": "training_artifact", "key_id": "1" * 64}),
+        ),
+    )
+    assert len(expected.artifacts) == 3
+
+
+def test_typed_evidence_and_view_references_validate_and_aggregate_once(
+    tmp_path: Path,
+) -> None:
+    config = _config(conditions=1, tasks=2, replicates=1)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    consumer = next(unit for unit in base.expected.units if unit.key.family_id == "family-0")
+    key = _training_data_key()
+    evidence_key = evidence_key_for(key)
+    plans = (
+        PlannedSharedArtifact(
+            kind="training_data_evidence",
+            key_id=evidence_key.key_id,
+            owner_condition_id="condition-0",
+            owner_family_id="family-0",
+            owner_fold_id="fold-0",
+            owner_replicate=0,
+            consumer_phase="development",
+            consumer_condition_ids=("condition-0",),
+            consumer_unit_ids=(consumer.unit_id,),
+        ),
+        PlannedSharedArtifact(
+            kind="training_data_view",
+            key_id=key.key_id,
+            owner_condition_id="condition-0",
+            owner_family_id="family-0",
+            owner_fold_id="fold-0",
+            owner_replicate=0,
+            consumer_phase="development",
+            consumer_condition_ids=("condition-0",),
+            consumer_unit_ids=(consumer.unit_id,),
+        ),
+    )
+    store = RunStore(
+        tmp_path / "run",
+        config,
+        repository=tmp_path,
+        shared_artifacts=plans,
+    )
+    store.initialize()
+    manifest = write_training_data_artifact(
+        store.run_dir,
+        key,
+        _canonical_training_data(),
+        evidence_accounting=TrainingPreparationAccounting(training_probes=PhaseAccounting(calls=7)),
+        view_accounting=TrainingPreparationAccounting(serialization=PhaseAccounting(calls=2)),
+    )
+    evidence_cost = load_training_data_evidence_cost(store.run_dir, evidence_key)
+    view_cost = load_training_data_view_cost(store.run_dir, key)
+    references = (
+        SharedArtifactReference(
+            kind="training_data_evidence",
+            key_id=evidence_key.key_id,
+            artifact_id=manifest.evidence_id,
+            cost_id=evidence_cost.cost_id,
+        ),
+        SharedArtifactReference(
+            kind="training_data_view",
+            key_id=key.key_id,
+            artifact_id=manifest.artifact_id,
+            cost_id=view_cost.cost_id,
+        ),
+    )
+
+    def executor(planned: PlannedUnit) -> UnitPayload:
+        payload = _payload(planned)
+        if planned.unit_id != consumer.unit_id:
+            return payload
+        return payload.model_copy(
+            update={
+                "shared_artifacts": references,
+                "accounting": payload.accounting.model_copy(update={"training": PhaseAccounting()}),
+            }
+        )
+
+    ExperimentRunner(store).execute(executor)
+    aggregate = aggregate_run(store, strict=False)
+    shared = aggregate.shared_accounting_by_owner_group["condition-0"]
+    assert aggregate.shared_inventory.referenced == 2
+    assert shared.probes.calls == 7
+    assert shared.serialization.calls == 2
+
+    wrong = references[0].model_copy(update={"artifact_id": manifest.artifact_id})
+    with pytest.raises(ArtifactValidationError, match="cost record"):
+        store.validate_shared_reference(consumer, wrong)
+
+
+def test_multiple_shared_references_require_canonical_order() -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    planned = plan_expected_units(config).units[0]
+    evidence = SharedArtifactReference(
+        kind="training_data_evidence",
+        key_id="a" * 64,
+        artifact_id="b" * 64,
+        cost_id="c" * 64,
+    )
+    model = SharedArtifactReference(
+        kind="training_artifact",
+        key_id="d" * 64,
+        artifact_id="e" * 64,
+        cost_id="f" * 64,
+    )
+    with pytest.raises(ValidationError, match="canonical kind order"):
+        UnitPayload.model_validate(
+            _payload(planned)
+            .model_copy(update={"shared_artifacts": (model, evidence)})
+            .model_dump(mode="json")
+        )
+    with pytest.raises(ValidationError, match="cannot be combined"):
+        UnitPayload.model_validate(
+            _payload(planned)
+            .model_copy(update={"shared_artifact": model, "shared_artifacts": (evidence,)})
+            .model_dump(mode="json")
+        )
+    view = SharedArtifactReference(
+        kind="training_data_view",
+        key_id="1" * 64,
+        artifact_id="2" * 64,
+        cost_id="3" * 64,
+    )
+    with pytest.raises(ValidationError, match="requires its evidence"):
+        UnitPayload.model_validate(
+            _payload(planned)
+            .model_copy(update={"shared_artifacts": (view,)})
+            .model_dump(mode="json")
+        )
+    with pytest.raises(ValidationError, match="requires its training-data view"):
+        UnitPayload.model_validate(
+            _payload(planned)
+            .model_copy(update={"shared_artifacts": (evidence, model)})
+            .model_dump(mode="json")
+        )
+
+
+def test_reference_set_rejects_view_from_different_evidence(tmp_path: Path) -> None:
+    config = _config(conditions=1, tasks=2, replicates=1)
+    base = RunStore(tmp_path / "base", config, repository=tmp_path)
+    consumer = next(unit for unit in base.expected.units if unit.key.family_id == "family-0")
+    evidence_view_key = _training_data_key()
+    other_view_key = evidence_view_key.model_copy(update={"probe_policy_sha256": "f" * 64})
+    evidence_key = evidence_key_for(evidence_view_key)
+    store = RunStore(
+        tmp_path / "run",
+        config,
+        repository=tmp_path,
+        shared_artifacts=(
+            PlannedSharedArtifact(
+                kind="training_data_evidence",
+                key_id=evidence_key.key_id,
+                owner_condition_id="condition-0",
+                owner_family_id="family-0",
+                owner_fold_id="fold-0",
+                owner_replicate=0,
+                consumer_phase="development",
+                consumer_condition_ids=("condition-0",),
+                consumer_unit_ids=(consumer.unit_id,),
+            ),
+            PlannedSharedArtifact(
+                kind="training_data_view",
+                key_id=other_view_key.key_id,
+                owner_condition_id="condition-0",
+                owner_family_id="family-0",
+                owner_fold_id="fold-0",
+                owner_replicate=0,
+                consumer_phase="development",
+                consumer_condition_ids=("condition-0",),
+                consumer_unit_ids=(consumer.unit_id,),
+            ),
+        ),
+    )
+    store.initialize()
+    evidence_manifest = write_training_data_artifact(
+        store.run_dir,
+        evidence_view_key,
+        _canonical_training_data(),
+        evidence_accounting=TrainingPreparationAccounting(),
+        view_accounting=TrainingPreparationAccounting(),
+    )
+    other_manifest = write_training_data_artifact(
+        store.run_dir,
+        other_view_key,
+        _canonical_training_data(),
+        evidence_accounting=TrainingPreparationAccounting(),
+        view_accounting=TrainingPreparationAccounting(),
+    )
+    evidence_cost = load_training_data_evidence_cost(store.run_dir, evidence_key)
+    other_view_cost = load_training_data_view_cost(store.run_dir, other_view_key)
+    references = (
+        SharedArtifactReference(
+            kind="training_data_evidence",
+            key_id=evidence_key.key_id,
+            artifact_id=evidence_manifest.evidence_id,
+            cost_id=evidence_cost.cost_id,
+        ),
+        SharedArtifactReference(
+            kind="training_data_view",
+            key_id=other_view_key.key_id,
+            artifact_id=other_manifest.artifact_id,
+            cost_id=other_view_cost.cost_id,
+        ),
+    )
+    with pytest.raises(ArtifactValidationError, match="does not derive"):
+        store.validate_shared_reference_set(consumer, references)
 
 
 def test_no_shared_plan_preserves_legacy_aggregate_defaults(tmp_path: Path) -> None:

@@ -23,6 +23,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.records import (
+    PhaseAccounting,
+    TrainingPreparationAccounting,
+)
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 AFFORDANCE_FEATURE_COUNT = 49
@@ -115,11 +119,9 @@ class TrainingDataEvidenceKey(BaseModel):
     def task_ids_and_seeds_are_valid(self) -> "TrainingDataEvidenceKey":
         if not self.ordered_training_task_ids or not self.ordered_heldout_task_ids:
             raise ValueError("evidence requires ordered training and held-out tasks")
-        if len(set(self.ordered_training_task_ids)) != len(
-            self.ordered_training_task_ids
-        ) or len(set(self.ordered_heldout_task_ids)) != len(
-            self.ordered_heldout_task_ids
-        ):
+        if len(set(self.ordered_training_task_ids)) != len(self.ordered_training_task_ids) or len(
+            set(self.ordered_heldout_task_ids)
+        ) != len(self.ordered_heldout_task_ids):
             raise ValueError("evidence task identities must be unique")
         if set(self.ordered_training_task_ids) & set(self.ordered_heldout_task_ids):
             raise ValueError("evidence training and held-out tasks must be disjoint")
@@ -170,7 +172,9 @@ class ObservableStateRecord(BaseModel):
 
     @model_validator(mode="after")
     def aliases_are_safe(self) -> "ObservableStateRecord":
-        if any(not alias or any(ord(char) < 32 for char in alias) for alias in self.available_aliases):
+        if any(
+            not alias or any(ord(char) < 32 for char in alias) for alias in self.available_aliases
+        ):
             raise ValueError("observable aliases must be nonempty and control-character free")
         if len(set(self.available_aliases)) != len(self.available_aliases):
             raise ValueError("observable aliases must be unique")
@@ -238,15 +242,9 @@ class AffordanceTableRecord(BaseModel):
             raise ValueError("affordance rows have the wrong feature width")
         if any(count < 1 for count in self.sample_counts.values()):
             raise ValueError("affordance sample counts must be positive")
-        if any(
-            not alias or any(ord(char) < 32 for char in alias)
-            for alias in self.features
-        ):
+        if any(not alias or any(ord(char) < 32 for char in alias) for alias in self.features):
             raise ValueError("affordance aliases must be nonempty and control-character free")
-        if any(
-            any(not math.isfinite(value) for value in row)
-            for row in self.features.values()
-        ):
+        if any(any(not math.isfinite(value) for value in row) for row in self.features.values()):
             raise ValueError("affordance values must be finite")
         return self
 
@@ -314,9 +312,7 @@ def sanitize_clean_optimum_samples(samples: Sequence[Any]) -> SanitizedTrainingD
         optimum_only_training_samples,
     )
 
-    if not samples or any(
-        not isinstance(sample, CleanOptimumTrainingSample) for sample in samples
-    ):
+    if not samples or any(not isinstance(sample, CleanOptimumTrainingSample) for sample in samples):
         raise ValueError("training-data sanitization requires canonical clean samples")
     optimum_only_training_samples(tuple(samples))
 
@@ -354,7 +350,9 @@ def sanitize_clean_optimum_samples(samples: Sequence[Any]) -> SanitizedTrainingD
                     )
                 ),
                 affordances=AffordanceTableRecord(
-                    features={key: tuple(values) for key, values in probe.affordances.features.items()},
+                    features={
+                        key: tuple(values) for key, values in probe.affordances.features.items()
+                    },
                     sample_counts=dict(probe.affordances.sample_counts),
                 ),
             )
@@ -418,6 +416,68 @@ class TrainingDataEvidenceManifest(BaseModel):
         return self
 
 
+class TrainingDataEvidenceCostRecord(BaseModel):
+    """First-writer cost of building condition-independent observable evidence."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-data-evidence-cost.v1"] = (
+        "runner.training-data-evidence-cost.v1"
+    )
+    cost_id: str = HASH
+    key_id: str = HASH
+    artifact_id: str = HASH
+    scope: Literal["training_data_evidence_preparation"] = "training_data_evidence_preparation"
+    key: TrainingDataEvidenceKey
+    accounting: TrainingPreparationAccounting
+
+    @model_validator(mode="after")
+    def identity_and_scope_are_valid(self) -> "TrainingDataEvidenceCostRecord":
+        if self.key_id != self.key.key_id:
+            raise ValueError("training-data evidence cost key mismatch")
+        if self.accounting.training != PhaseAccounting():
+            raise ValueError("training-data evidence cost cannot contain optimizer training")
+        expected = hashlib.sha256(
+            canonical_json_bytes(self.model_dump(mode="json", exclude={"cost_id"}))
+        ).hexdigest()
+        if self.cost_id != expected:
+            raise ValueError("training-data evidence cost identity mismatch")
+        return self
+
+
+class TrainingDataViewCostRecord(BaseModel):
+    """First-writer cost of materializing one condition-bound evidence view."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-data-view-cost.v1"] = (
+        "runner.training-data-view-cost.v1"
+    )
+    cost_id: str = HASH
+    key_id: str = HASH
+    artifact_id: str = HASH
+    scope: Literal["training_data_view_preparation"] = "training_data_view_preparation"
+    key: TrainingDataArtifactKey
+    accounting: TrainingPreparationAccounting
+
+    @model_validator(mode="after")
+    def identity_and_scope_are_valid(self) -> "TrainingDataViewCostRecord":
+        if self.key_id != self.key.key_id:
+            raise ValueError("training-data view cost key mismatch")
+        if (
+            self.accounting.training_probes != PhaseAccounting()
+            or self.accounting.reference_replay != PhaseAccounting()
+            or self.accounting.training != PhaseAccounting()
+        ):
+            raise ValueError("training-data view cost may contain only setup and serialization")
+        expected = hashlib.sha256(
+            canonical_json_bytes(self.model_dump(mode="json", exclude={"cost_id"}))
+        ).hexdigest()
+        if self.cost_id != expected:
+            raise ValueError("training-data view cost identity mismatch")
+        return self
+
+
 class TrainingDataKeyIndex(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -439,7 +499,9 @@ def _read_json(path: Path) -> Any:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise TrainingDataArtifactError(f"invalid training-data artifact file: {path.name}") from exc
+        raise TrainingDataArtifactError(
+            f"invalid training-data artifact file: {path.name}"
+        ) from exc
 
 
 def _validate_model(model_type: type[BaseModel], raw: Any, label: str) -> BaseModel:
@@ -473,6 +535,36 @@ def _atomic_json(path: Path, value: Any) -> None:
     finally:
         if os.path.exists(temp_name):
             os.unlink(temp_name)
+
+
+def _claim_json(path: Path, value: BaseModel) -> bool:
+    """Publish a small immutable record without replacing an existing winner."""
+
+    if path.is_symlink() or path.parent.is_symlink():
+        raise TrainingDataArtifactError("refusing symlink training-data publication path")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(canonical_json_bytes(value.model_dump(mode="json")))
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_name, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
+
+
+def _cost_record(
+    record_type: type[TrainingDataEvidenceCostRecord] | type[TrainingDataViewCostRecord],
+    body: dict[str, Any],
+) -> TrainingDataEvidenceCostRecord | TrainingDataViewCostRecord:
+    cost_id = hashlib.sha256(canonical_json_bytes(body)).hexdigest()
+    return record_type.model_validate({"cost_id": cost_id, **body})
 
 
 def _validate_loaded(root: Path, artifact_id: str) -> TrainingDataArtifactManifest:
@@ -539,6 +631,9 @@ def write_training_data_artifact(
     root: str | Path,
     key: TrainingDataArtifactKey,
     data: SanitizedTrainingData,
+    *,
+    evidence_accounting: TrainingPreparationAccounting,
+    view_accounting: TrainingPreparationAccounting,
 ) -> TrainingDataArtifactManifest:
     """Publish one immutable sanitized dataset; repeated identical writes are idempotent."""
 
@@ -556,7 +651,15 @@ def write_training_data_artifact(
     artifact_root = root_path / "training-data-artifacts"
     evidence_root = root_path / "training-data-evidence"
     index_root = root_path / "training-data-artifact-keys"
-    for directory in (artifact_root, evidence_root, index_root):
+    evidence_cost_root = root_path / "training-data-evidence-costs"
+    view_cost_root = root_path / "training-data-view-costs"
+    for directory in (
+        artifact_root,
+        evidence_root,
+        index_root,
+        evidence_cost_root,
+        view_cost_root,
+    ):
         if directory.exists() and directory.is_symlink():
             raise TrainingDataArtifactError("training-data artifact root cannot be a symlink")
         directory.mkdir(exist_ok=True)
@@ -578,9 +681,17 @@ def write_training_data_artifact(
         "sample_task_ids": sample_task_ids,
     }
     evidence_id = hashlib.sha256(canonical_json_bytes(evidence_body)).hexdigest()
-    evidence_manifest = TrainingDataEvidenceManifest(
-        evidence_id=evidence_id, **evidence_body
-    )
+    evidence_manifest = TrainingDataEvidenceManifest(evidence_id=evidence_id, **evidence_body)
+    evidence_cost_body = {
+        "schema_version": "runner.training-data-evidence-cost.v1",
+        "key_id": evidence_key.key_id,
+        "artifact_id": evidence_id,
+        "scope": "training_data_evidence_preparation",
+        "key": evidence_key.model_dump(mode="json"),
+        "accounting": evidence_accounting.model_dump(mode="json"),
+    }
+    evidence_cost = _cost_record(TrainingDataEvidenceCostRecord, evidence_cost_body)
+    assert isinstance(evidence_cost, TrainingDataEvidenceCostRecord)
     evidence_dir = evidence_root / evidence_id
     if evidence_dir.exists():
         loaded_evidence, loaded_payload = _load_evidence(root_path, evidence_id)
@@ -595,6 +706,11 @@ def write_training_data_artifact(
         finally:
             if staging.exists():
                 shutil.rmtree(staging)
+    evidence_cost_path = evidence_cost_root / f"{evidence_key.key_id}.json"
+    if not _claim_json(evidence_cost_path, evidence_cost):
+        existing_evidence_cost = load_training_data_evidence_cost(root_path, evidence_key)
+        if existing_evidence_cost != evidence_cost:
+            raise TrainingDataArtifactError("training-data evidence cost conflict")
     manifest_body = {
         "schema_version": "runner.training-data-manifest.v1",
         "evidence_id": evidence_id,
@@ -606,6 +722,16 @@ def write_training_data_artifact(
     }
     artifact_id = hashlib.sha256(canonical_json_bytes(manifest_body)).hexdigest()
     manifest = TrainingDataArtifactManifest(artifact_id=artifact_id, **manifest_body)
+    view_cost_body = {
+        "schema_version": "runner.training-data-view-cost.v1",
+        "key_id": key.key_id,
+        "artifact_id": artifact_id,
+        "scope": "training_data_view_preparation",
+        "key": key.model_dump(mode="json"),
+        "accounting": view_accounting.model_dump(mode="json"),
+    }
+    view_cost = _cost_record(TrainingDataViewCostRecord, view_cost_body)
+    assert isinstance(view_cost, TrainingDataViewCostRecord)
     artifact_dir = artifact_root / artifact_id
     if artifact_dir.exists():
         existing = _validate_loaded(root_path, artifact_id)
@@ -652,7 +778,82 @@ def write_training_data_artifact(
         finally:
             if temp.exists():
                 temp.unlink()
+    view_cost_path = view_cost_root / f"{key.key_id}.json"
+    if not _claim_json(view_cost_path, view_cost):
+        existing_view_cost = load_training_data_view_cost(root_path, key)
+        if existing_view_cost != view_cost:
+            raise TrainingDataArtifactError("training-data view cost conflict")
     return manifest
+
+
+def load_training_data_evidence(
+    root: str | Path,
+    evidence_id: str,
+    *,
+    expected_key: TrainingDataEvidenceKey,
+) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
+    """Load one condition-independent evidence artifact under its frozen key."""
+
+    manifest, payload = _load_evidence(Path(root), evidence_id)
+    if manifest.key != expected_key or manifest.evidence_key_id != expected_key.key_id:
+        raise TrainingDataArtifactError("training-data evidence key mismatch")
+    return manifest, payload
+
+
+def load_training_data_evidence_cost(
+    root: str | Path,
+    expected_key: TrainingDataEvidenceKey | str,
+) -> TrainingDataEvidenceCostRecord:
+    root_path = Path(root)
+    key_id = (
+        expected_key.key_id if isinstance(expected_key, TrainingDataEvidenceKey) else expected_key
+    )
+    if not HEX64.fullmatch(key_id):
+        raise TrainingDataArtifactError("invalid training-data evidence cost key")
+    costs_root = _safe_child(root_path, root_path / "training-data-evidence-costs")
+    path = _safe_child(costs_root, costs_root / f"{key_id}.json")
+    record = _validate_model(
+        TrainingDataEvidenceCostRecord,
+        _read_json(path),
+        "training-data evidence cost",
+    )
+    assert isinstance(record, TrainingDataEvidenceCostRecord)
+    if record.key_id != key_id or (
+        isinstance(expected_key, TrainingDataEvidenceKey) and record.key != expected_key
+    ):
+        raise TrainingDataArtifactError("training-data evidence cost key mismatch")
+    load_training_data_evidence(root_path, record.artifact_id, expected_key=record.key)
+    return record
+
+
+def load_training_data_view_cost(
+    root: str | Path,
+    expected_key: TrainingDataArtifactKey | str,
+) -> TrainingDataViewCostRecord:
+    root_path = Path(root)
+    key_id = (
+        expected_key.key_id if isinstance(expected_key, TrainingDataArtifactKey) else expected_key
+    )
+    if not HEX64.fullmatch(key_id):
+        raise TrainingDataArtifactError("invalid training-data view cost key")
+    costs_root = _safe_child(root_path, root_path / "training-data-view-costs")
+    path = _safe_child(costs_root, costs_root / f"{key_id}.json")
+    record = _validate_model(
+        TrainingDataViewCostRecord,
+        _read_json(path),
+        "training-data view cost",
+    )
+    assert isinstance(record, TrainingDataViewCostRecord)
+    if record.key_id != key_id or (
+        isinstance(expected_key, TrainingDataArtifactKey) and record.key != expected_key
+    ):
+        raise TrainingDataArtifactError("training-data view cost key mismatch")
+    manifest, _ = load_training_data_artifact(
+        root_path, record.artifact_id, expected_key=record.key
+    )
+    if manifest.artifact_id != record.artifact_id:
+        raise TrainingDataArtifactError("training-data view cost artifact mismatch")
+    return record
 
 
 def load_training_data_artifact(
@@ -665,7 +866,10 @@ def load_training_data_artifact(
     if root_path.is_symlink():
         raise TrainingDataArtifactError("training-data artifact root cannot be a symlink")
     if expected_key is not None:
-        index_path = _safe_child(root_path / "training-data-artifact-keys", root_path / "training-data-artifact-keys" / f"{expected_key.key_id}.json")
+        index_path = _safe_child(
+            root_path / "training-data-artifact-keys",
+            root_path / "training-data-artifact-keys" / f"{expected_key.key_id}.json",
+        )
         index = _validate_model(
             TrainingDataKeyIndex,
             _read_json(index_path),

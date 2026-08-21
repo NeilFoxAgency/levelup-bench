@@ -105,6 +105,7 @@ class ExperimentRunner:
                     outcome=payload.outcome,
                     accounting=payload.accounting,
                     shared_artifact=payload.shared_artifact,
+                    shared_artifacts=payload.shared_artifacts,
                     diagnostics=payload.diagnostics,
                 )
                 stage = "unit-publication"

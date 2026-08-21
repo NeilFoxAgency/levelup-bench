@@ -33,9 +33,7 @@ def _records_sha256(records: tuple[UnitRecord, ...]) -> str:
 
 
 def _expected_sha256(store: RunStore) -> str:
-    return hashlib.sha256(
-        canonical_json_bytes(store.expected.model_dump(mode="json"))
-    ).hexdigest()
+    return hashlib.sha256(canonical_json_bytes(store.expected.model_dump(mode="json"))).hexdigest()
 
 
 def _provenance_sha256(store: RunStore) -> str:
@@ -163,77 +161,92 @@ def _shared_summary(
     dict[str, ResourceAccounting],
     bool,
 ]:
-    plans = {item.key_id: item for item in store.expected_shared.artifacts}
+    plans = {(item.kind, item.key_id): item for item in store.expected_shared.artifacts}
     if not plans:
         return None, SharedArtifactInventory(), {}, True
-    refs: dict[str, list[UnitRecord]] = defaultdict(list)
+    refs: dict[tuple[str, str], list[UnitRecord]] = defaultdict(list)
     for record in records:
-        if record.shared_artifact is not None:
-            refs[record.shared_artifact.key_id].append(record)
-            store.validate_shared_reference(
-                store.planned_unit(record.unit_id), record.shared_artifact
-            )
-    for key_id, consumers in refs.items():
-        if key_id not in plans:
+        all_refs = (
+            (record.shared_artifact,) if record.shared_artifact is not None else ()
+        ) + record.shared_artifacts
+        for reference in all_refs:
+            refs[(reference.kind, reference.key_id)].append(record)
+            store.validate_shared_reference(store.planned_unit(record.unit_id), reference)
+    for (kind, key_id), consumers in refs.items():
+        if (kind, key_id) not in plans:
             raise ArtifactValidationError("unit references unplanned shared artifact")
         identities = {
-            (record.shared_artifact.artifact_id, record.shared_artifact.cost_id)
+            (reference.artifact_id, reference.cost_id)
             for record in consumers
-            if record.shared_artifact is not None
+            for reference in (
+                ((record.shared_artifact,) if record.shared_artifact is not None else ())
+                + record.shared_artifacts
+            )
+            if reference.kind == kind and reference.key_id == key_id
         }
         if len(identities) != 1:
             raise ArtifactValidationError("shared artifact has conflicting references")
-    cost_owner: dict[str, str] = {}
-    artifact_owner: dict[str, str] = {}
-    for key_id, consumers in refs.items():
+    cost_owner: dict[str, tuple[str, str]] = {}
+    artifact_owner: dict[str, tuple[str, str]] = {}
+    for (kind, key_id), consumers in refs.items():
         for record in consumers:
-            if record.shared_artifact is None:
-                continue
-            previous = cost_owner.setdefault(record.shared_artifact.cost_id, key_id)
-            if previous != key_id:
-                raise ArtifactValidationError("one shared cost is claimed by multiple keys")
-            previous_artifact = artifact_owner.setdefault(
-                record.shared_artifact.artifact_id, key_id
-            )
-            if previous_artifact != key_id:
-                raise ArtifactValidationError(
-                    "one shared artifact is claimed by multiple keys"
-                )
+            all_refs = (
+                (record.shared_artifact,) if record.shared_artifact is not None else ()
+            ) + record.shared_artifacts
+            for reference in all_refs:
+                if reference.kind != kind or reference.key_id != key_id:
+                    continue
+                previous = cost_owner.setdefault(reference.cost_id, (kind, key_id))
+                if previous != (kind, key_id):
+                    raise ArtifactValidationError(
+                        "one shared cost is claimed by multiple kinds or keys"
+                    )
+                previous_artifact = artifact_owner.setdefault(reference.artifact_id, (kind, key_id))
+                if previous_artifact != (kind, key_id):
+                    raise ArtifactValidationError(
+                        "one shared artifact is claimed by multiple kinds or keys"
+                    )
     missing_consumers = [
         item
         for item in store.expected_shared.artifacts
         if any(
-            unit_id not in {record.unit_id for record in refs.get(item.key_id, ())}
+            unit_id not in {record.unit_id for record in refs.get((item.kind, item.key_id), ())}
             for unit_id in item.consumer_unit_ids
         )
     ]
     if strict and missing_consumers:
         raise IncompleteRunError("shared artifact consumers are incomplete")
     by_condition: dict[str, ResourceAccounting] = {}
-    for key_id, consumers in refs.items():
+    for (kind, key_id), consumers in refs.items():
         if not consumers:
             continue
-        cost = store.load_shared_cost(key_id)
-        owner = plans[key_id].owner_group_id or plans[key_id].owner_condition_id
+        cost = store.load_shared_cost(key_id, kind)
+        owner = plans[(kind, key_id)].owner_group_id or plans[(kind, key_id)].owner_condition_id
         shared_cost = (
             cost.accounting.as_resource_accounting()
             if hasattr(cost.accounting, "as_resource_accounting")
             else cost.accounting
         )
-        by_condition[owner] = _add_cost(
-            by_condition.get(owner, ResourceAccounting()), shared_cost
-        )
+        by_condition[owner] = _add_cost(by_condition.get(owner, ResourceAccounting()), shared_cost)
     digest = hashlib.sha256(
         canonical_json_bytes(
             {
                 "plan": store.expected_shared.model_dump(mode="json"),
                 "refs": {
-                    key: sorted(
-                        (record.shared_artifact.artifact_id, record.shared_artifact.cost_id)
+                    f"{kind}:{key}": sorted(
+                        (reference.artifact_id, reference.cost_id)
                         for record in values
-                        if record.shared_artifact is not None
+                        for reference in (
+                            (
+                                (record.shared_artifact,)
+                                if record.shared_artifact is not None
+                                else ()
+                            )
+                            + record.shared_artifacts
+                        )
+                        if reference.kind == kind and reference.key_id == key
                     )
-                    for key, values in sorted(refs.items())
+                    for (kind, key), values in sorted(refs.items())
                 },
             }
         )
@@ -267,8 +280,8 @@ def aggregate_run(
         store, records, strict=strict
     )
 
-    failed_units, interrupted_units, failed_attempts, interrupted_attempts = (
-        _attempt_inventory(attempts)
+    failed_units, interrupted_units, failed_attempts, interrupted_attempts = _attempt_inventory(
+        attempts
     )
     by_phase_condition: dict[tuple[SplitPhase, str], list[UnitRecord]] = defaultdict(list)
     by_phase_family: dict[tuple[SplitPhase, str], list[UnitRecord]] = defaultdict(list)

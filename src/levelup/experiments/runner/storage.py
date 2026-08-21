@@ -37,6 +37,13 @@ from levelup.experiments.runner.records import (
     unit_id_for,
 )
 
+
+def _shared_refs(record: UnitRecord) -> tuple[SharedArtifactReference, ...]:
+    return (
+        (record.shared_artifact,) if record.shared_artifact is not None else ()
+    ) + record.shared_artifacts
+
+
 ModelT = TypeVar("ModelT", bound=BaseModel)
 
 
@@ -132,8 +139,7 @@ def _validate_provenance_policy(
         or provenance.actual_torch_threads != policy.torch_threads
         or provenance.requested_torch_interop_threads != policy.torch_interop_threads
         or provenance.actual_torch_interop_threads != policy.torch_interop_threads
-        or provenance.deterministic_algorithms_requested
-        != policy.deterministic_algorithms
+        or provenance.deterministic_algorithms_requested != policy.deterministic_algorithms
         or provenance.deterministic_algorithms_actual != policy.deterministic_algorithms
         or provenance.processes != policy.processes
     ):
@@ -148,7 +154,9 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
     config_hash = scientific_config_sha256(config)
     run_id = run_id_for(config)
     policy = config.seed_policy
-    model_replicate_step = policy.replicate_stride if policy.derivation_version == "phase2.v1" else 1
+    model_replicate_step = (
+        policy.replicate_stride if policy.derivation_version == "phase2.v1" else 1
+    )
     data_replicate_step = policy.replicate_stride if policy.derivation_version == "phase2.v1" else 1
     units: list[PlannedUnit] = []
     conditions = sorted(config.conditions, key=lambda condition: condition.condition_id)
@@ -157,9 +165,7 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
             for replicate in range(config.replicates):
                 seeds = UnitSeeds(
                     model_seed=policy.model_seed_base + replicate * model_replicate_step,
-                    environment_seed=(
-                        task.environment_reset_seed + policy.environment_seed_offset
-                    ),
+                    environment_seed=(task.environment_reset_seed + policy.environment_seed_offset),
                     probe_seed=(
                         policy.probe_seed_base
                         + replicate * policy.replicate_stride
@@ -170,8 +176,7 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
                         + replicate * policy.replicate_stride
                         + task.task_index
                     ),
-                    data_order_seed=policy.data_order_seed_base
-                    + replicate * data_replicate_step,
+                    data_order_seed=policy.data_order_seed_base + replicate * data_replicate_step,
                 )
                 for condition in conditions:
                     if phase not in condition.execution_phases:
@@ -250,19 +255,14 @@ class RunStore:
             if any(unit is None for unit in consumers):
                 raise ArtifactValidationError("shared artifact references an unknown consumer unit")
             if not any(
-                unit is not None
-                and unit.key.condition_id == artifact.owner_condition_id
+                unit is not None and unit.key.condition_id == artifact.owner_condition_id
                 for unit in consumers
             ):
                 raise ArtifactValidationError(
                     "shared artifact owner condition is not a declared consumer"
                 )
-            observed_phases = {
-                unit.key.phase for unit in consumers if unit is not None
-            }
-            observed_conditions = {
-                unit.key.condition_id for unit in consumers if unit is not None
-            }
+            observed_phases = {unit.key.phase for unit in consumers if unit is not None}
+            observed_conditions = {unit.key.condition_id for unit in consumers if unit is not None}
             if observed_phases != {artifact.consumer_phase}:
                 raise ArtifactValidationError(
                     "shared artifact consumer phase does not match its frozen plan"
@@ -272,9 +272,7 @@ class RunStore:
                     "shared artifact consumer conditions do not match their frozen plan"
                 )
             if artifact.owner_condition_id not in artifact.consumer_condition_ids:
-                raise ArtifactValidationError(
-                    "shared artifact owner condition is not authorized"
-                )
+                raise ArtifactValidationError("shared artifact owner condition is not authorized")
             if any(
                 unit is not None
                 and (
@@ -292,9 +290,7 @@ class RunStore:
     ) -> None:
         """Create immutable config/unit plans and first-run provenance."""
 
-        resolved_device = (
-            apply_runtime_policy(self.config.device_policy) if for_execution else None
-        )
+        resolved_device = apply_runtime_policy(self.config.device_policy) if for_execution else None
 
         self.units_dir.mkdir(parents=True, exist_ok=True)
         self.attempts_dir.mkdir(parents=True, exist_ok=True)
@@ -365,14 +361,38 @@ class RunStore:
     def load_provenance(self) -> SystemProvenance:
         return _load_model(self.run_dir / "provenance.json", SystemProvenance)
 
-    def planned_shared(self, key_id: str) -> PlannedSharedArtifact:
-        matches = [item for item in self.expected_shared.artifacts if item.key_id == key_id]
+    def planned_shared(self, key_id: str, kind: str = "training_artifact") -> PlannedSharedArtifact:
+        matches = [
+            item
+            for item in self.expected_shared.artifacts
+            if item.key_id == key_id and item.kind == kind
+        ]
         if len(matches) != 1:
             raise ArtifactValidationError("unknown shared-artifact key")
         return matches[0]
 
-    def load_shared_cost(self, key_id: str) -> TrainingArtifactCostRecord:
-        self.planned_shared(key_id)
+    def load_shared_cost(self, key_id: str, kind: str = "training_artifact") -> Any:
+        self.planned_shared(key_id, kind)
+        if kind == "training_data_evidence":
+            from levelup.experiments.runner.training_data_artifacts import (
+                load_training_data_evidence_cost,
+            )
+
+            try:
+                return load_training_data_evidence_cost(self.run_dir, key_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ArtifactValidationError("invalid shared training-data evidence cost") from exc
+        if kind == "training_data_view":
+            from levelup.experiments.runner.training_data_artifacts import (
+                load_training_data_view_cost,
+            )
+
+            try:
+                return load_training_data_view_cost(self.run_dir, key_id)
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ArtifactValidationError("invalid shared training-data view cost") from exc
+        if kind != "training_artifact":
+            raise ArtifactValidationError("unknown shared-artifact kind")
         costs_root = self.run_dir / "training-artifact-costs"
         path = costs_root / f"{key_id}.json"
         if self.run_dir.is_symlink() or costs_root.is_symlink() or path.is_symlink():
@@ -380,9 +400,7 @@ class RunStore:
         try:
             path.resolve().relative_to(costs_root.resolve())
         except ValueError:
-            raise ArtifactValidationError(
-                "shared-artifact cost path escapes its root"
-            ) from None
+            raise ArtifactValidationError("shared-artifact cost path escapes its root") from None
         record = _load_model(path, TrainingArtifactCostRecord)
         if record.key_id != key_id or record.expected_cost_id != record.cost_id:
             raise ArtifactValidationError("shared-artifact cost identity mismatch")
@@ -398,7 +416,7 @@ class RunStore:
             load_training_manifest,
         )
 
-        planned = self.planned_shared(reference.key_id)
+        planned = self.planned_shared(reference.key_id, reference.kind)
         if unit.unit_id not in planned.consumer_unit_ids:
             raise ArtifactValidationError("unit is not a declared shared-artifact consumer")
         if (
@@ -406,20 +424,79 @@ class RunStore:
             or unit.key.family_id != planned.owner_family_id
         ):
             raise ArtifactValidationError("shared-artifact owner/replicate mismatch")
-        cost = self.load_shared_cost(reference.key_id)
-        if (
-            cost.scope != "training_preparation"
-            or cost.artifact_id != reference.artifact_id
-            or cost.cost_id != reference.cost_id
-        ):
+        cost = self.load_shared_cost(reference.key_id, reference.kind)
+        if cost.artifact_id != reference.artifact_id or cost.cost_id != reference.cost_id:
             raise ArtifactValidationError("shared-artifact reference does not match cost record")
+        expected_group = planned.owner_group_id or planned.owner_condition_id
+        if reference.kind == "training_data_evidence":
+            try:
+                from levelup.experiments.runner.training_data_artifacts import (
+                    TrainingDataEvidenceKey,
+                    load_training_data_evidence,
+                    load_training_data_evidence_cost,
+                )
+
+                evidence_key = TrainingDataEvidenceKey.model_validate(cost.key)
+                if (
+                    cost.scope != "training_data_evidence_preparation"
+                    or evidence_key.key_id != reference.key_id
+                    or evidence_key.fold_id != planned.owner_fold_id
+                    or evidence_key.replicate != planned.owner_replicate
+                    or evidence_key.heldout_family_id != planned.owner_family_id
+                ):
+                    raise ArtifactValidationError(
+                        "shared evidence key does not match its frozen owner"
+                    )
+                validated_cost = load_training_data_evidence_cost(self.run_dir, evidence_key)
+                manifest, _ = load_training_data_evidence(
+                    self.run_dir, reference.artifact_id, expected_key=evidence_key
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ArtifactValidationError("shared training-data evidence is invalid") from exc
+            if validated_cost != cost or manifest.evidence_id != reference.artifact_id:
+                raise ArtifactValidationError(
+                    "shared training-data evidence files do not match the unit reference"
+                )
+            return
+        if reference.kind == "training_data_view":
+            try:
+                from levelup.experiments.runner.training_data_artifacts import (
+                    TrainingDataArtifactKey,
+                    load_training_data_artifact,
+                    load_training_data_view_cost,
+                )
+
+                data_key = TrainingDataArtifactKey.model_validate(cost.key)
+                if (
+                    cost.scope != "training_data_view_preparation"
+                    or data_key.key_id != reference.key_id
+                    or data_key.condition_id != planned.owner_condition_id
+                    or data_key.fold_id != planned.owner_fold_id
+                    or data_key.replicate != planned.owner_replicate
+                    or data_key.heldout_family_id != planned.owner_family_id
+                ):
+                    raise ArtifactValidationError(
+                        "shared training-data view key does not match its frozen owner"
+                    )
+                validated_cost = load_training_data_view_cost(self.run_dir, data_key)
+                manifest, _ = load_training_data_artifact(
+                    self.run_dir, reference.artifact_id, expected_key=data_key
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ArtifactValidationError("shared training-data view is invalid") from exc
+            if validated_cost != cost or manifest.artifact_id != reference.artifact_id:
+                raise ArtifactValidationError(
+                    "shared training-data view files do not match the unit reference"
+                )
+            return
+        if cost.scope != "training_preparation":
+            raise ArtifactValidationError("shared model cost has the wrong scope")
         try:
             training_key = TrainingArtifactKey.model_validate(cost.key)
         except (TypeError, ValueError):
             raise ArtifactValidationError(
                 "shared-artifact cost does not contain a valid training key"
             ) from None
-        expected_group = planned.owner_group_id or planned.owner_condition_id
         if (
             training_key.key_id != reference.key_id
             or training_key.condition_id != expected_group
@@ -438,9 +515,62 @@ class RunStore:
             or index.artifact_id != reference.artifact_id
             or manifest.artifact_id != reference.artifact_id
         ):
-            raise ArtifactValidationError(
-                "shared-artifact files do not match the unit reference"
-            )
+            raise ArtifactValidationError("shared-artifact files do not match the unit reference")
+
+    def validate_shared_reference_set(
+        self,
+        unit: PlannedUnit,
+        references: tuple[SharedArtifactReference, ...],
+    ) -> None:
+        """Validate cross-kind provenance after validating each typed reference."""
+
+        for reference in references:
+            self.validate_shared_reference(unit, reference)
+        by_kind = {reference.kind: reference for reference in references}
+        evidence = by_kind.get("training_data_evidence")
+        view = by_kind.get("training_data_view")
+        model = by_kind.get("training_artifact")
+        if evidence is not None and view is not None:
+            try:
+                from levelup.experiments.runner.training_data_artifacts import (
+                    evidence_key_for,
+                    load_training_data_artifact,
+                    load_training_data_evidence_cost,
+                    load_training_data_view_cost,
+                )
+
+                evidence_cost = load_training_data_evidence_cost(
+                    self.run_dir, evidence.key_id
+                )
+                view_cost = load_training_data_view_cost(self.run_dir, view.key_id)
+                view_manifest, _ = load_training_data_artifact(
+                    self.run_dir, view.artifact_id, expected_key=view_cost.key
+                )
+            except (OSError, RuntimeError, ValueError) as exc:
+                raise ArtifactValidationError(
+                    "shared training-data lineage is invalid"
+                ) from exc
+            if (
+                evidence_key_for(view_cost.key) != evidence_cost.key
+                or view_manifest.evidence_id != evidence.artifact_id
+            ):
+                raise ArtifactValidationError(
+                    "shared training-data view does not derive from the referenced evidence"
+                )
+        if view is not None and model is not None:
+            from levelup.experiments.runner.training_artifacts import TrainingArtifactKey
+
+            model_cost = self.load_shared_cost(model.key_id, model.kind)
+            try:
+                model_key = TrainingArtifactKey.model_validate(model_cost.key)
+            except (AttributeError, TypeError, ValueError):
+                raise ArtifactValidationError(
+                    "shared model cost does not contain a valid training key"
+                ) from None
+            if model_key.training_data_sha256 != view.artifact_id:
+                raise ArtifactValidationError(
+                    "shared model is not bound to the referenced training-data view"
+                )
 
     def _unit_path(self, unit_id: str) -> Path:
         self.planned_unit(unit_id)
@@ -462,32 +592,30 @@ class RunStore:
         ):
             raise ArtifactValidationError(f"completed unit identity mismatch: {unit_id}")
         self._validate_outcome_metric(record)
-        if record.shared_artifact is not None:
+        refs = _shared_refs(record)
+        if refs:
+            # Other phases are deliberately task-local held-out costs. Shared
+            # evidence records distinguish training_probes/reference_replay,
+            # while a learned consumer must never repeat optimizer training.
             if record.accounting.training != ResourceAccounting().training:
                 raise ArtifactValidationError(
                     "shared-artifact consumer cannot duplicate task-local training accounting"
                 )
-            self.validate_shared_reference(expected, record.shared_artifact)
+            self.validate_shared_reference_set(expected, refs)
         return record
 
     def _validate_outcome_metric(self, record: UnitRecord) -> None:
-        metrics = {
-            metric.metric_id: metric.direction for metric in self.config.metrics
-        }
+        metrics = {metric.metric_id: metric.direction for metric in self.config.metrics}
         metric_id = record.outcome.performance_metric_id
         if metric_id not in metrics:
             raise ArtifactValidationError(
                 f"completed unit uses undeclared performance metric: {metric_id}"
             )
         if metrics[metric_id] != record.outcome.performance_direction:
-            raise ArtifactValidationError(
-                f"completed unit metric direction mismatch: {metric_id}"
-            )
+            raise ArtifactValidationError(f"completed unit metric direction mismatch: {metric_id}")
         unknown_diagnostics = set(record.diagnostics) - set(self.config.diagnostic_fields)
         if unknown_diagnostics:
-            raise ArtifactValidationError(
-                "completed unit uses undeclared diagnostic fields"
-            )
+            raise ArtifactValidationError("completed unit uses undeclared diagnostic fields")
 
     def write_completed(self, record: UnitRecord) -> bool:
         """Write once; identical repeats are idempotent and conflicts are rejected."""
@@ -504,12 +632,16 @@ class RunStore:
         ):
             raise ArtifactValidationError("completed record does not match expected unit")
         self._validate_outcome_metric(record)
-        if record.shared_artifact is not None:
+        refs = _shared_refs(record)
+        if refs:
+            # Held-out probes, replay, search, setup, and serialization remain
+            # visible here; only optimizer training belongs exclusively to the
+            # shared preparation record.
             if record.accounting.training != ResourceAccounting().training:
                 raise ArtifactValidationError(
                     "shared-artifact consumer cannot duplicate task-local training accounting"
                 )
-            self.validate_shared_reference(expected, record.shared_artifact)
+            self.validate_shared_reference_set(expected, refs)
         existing = self.load_completed(record.unit_id)
         if existing is not None:
             if existing == record:
@@ -557,9 +689,7 @@ class RunStore:
             or record.seeds != expected.seeds
         ):
             raise ArtifactValidationError("attempt record does not match expected unit")
-        path = self.attempts_dir / (
-            f"{record.unit_id}.attempt-{record.attempt:04d}.json"
-        )
+        path = self.attempts_dir / (f"{record.unit_id}.attempt-{record.attempt:04d}.json")
         if path.exists():
             raise ConflictingResultError(f"attempt already exists: {path.name}")
         _atomic_write_json(path, record.model_dump(mode="json"))

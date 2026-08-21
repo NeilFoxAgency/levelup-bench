@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from levelup.experiments.runner.records import PhaseAccounting, TrainingPreparationAccounting
 from levelup.experiments.runner.training_data_artifacts import (
     AffordanceTableRecord,
     ObservableStateRecord,
@@ -16,8 +17,11 @@ from levelup.experiments.runner.training_data_artifacts import (
     TrainingDataArtifactError,
     TrainingDataArtifactKey,
     TrainingDataSample,
+    evidence_key_for,
     learner_samples,
     load_training_data_artifact,
+    load_training_data_evidence_cost,
+    load_training_data_view_cost,
     sanitize_clean_optimum_samples,
     write_training_data_artifact,
 )
@@ -102,9 +106,7 @@ def _canonical_data(task_id: str = "task-a") -> SanitizedTrainingData:
         ),
         probe=baselines.ProbeEvidence(
             task_id=task_id,
-            affordances=AffordanceTable(
-                features={"wait": (1.0,) * 49}, sample_counts={"wait": 1}
-            ),
+            affordances=AffordanceTable(features={"wait": (1.0,) * 49}, sample_counts={"wait": 1}),
             transitions=(),
             accounting=baselines.ProbeAccounting(1, 1, 1, ("wait",), 1.0),
         ),
@@ -113,15 +115,35 @@ def _canonical_data(task_id: str = "task-a") -> SanitizedTrainingData:
     return sanitize_clean_optimum_samples((source,))
 
 
-def test_condition_views_share_content_evidence_without_sharing_view_identity(tmp_path: Path) -> None:
+def _write(root: Path, key: TrainingDataArtifactKey, data: SanitizedTrainingData):
+    return write_training_data_artifact(
+        root,
+        key,
+        data,
+        evidence_accounting=TrainingPreparationAccounting(),
+        view_accounting=TrainingPreparationAccounting(),
+    )
+
+
+def test_condition_views_share_content_evidence_without_sharing_view_identity(
+    tmp_path: Path,
+) -> None:
     data = _canonical_data()
-    first = write_training_data_artifact(tmp_path, _key("B1"), data)
-    second = write_training_data_artifact(tmp_path, _key("B2"), data)
+    first = _write(tmp_path, _key("B1"), data)
+    second = _write(tmp_path, _key("B2"), data)
     assert first.evidence_id == second.evidence_id
     assert first.artifact_id != second.artifact_id
     _, payload = load_training_data_artifact(tmp_path, expected_key=_key("B2"))
     assert payload.samples[0].task_id == "task-a"
     assert len(list((tmp_path / "training-data-evidence").iterdir())) == 1
+    assert (
+        load_training_data_evidence_cost(tmp_path, evidence_key_for(_key("B1"))).cost_id
+        == load_training_data_evidence_cost(tmp_path, evidence_key_for(_key("B2"))).cost_id
+    )
+    assert (
+        load_training_data_view_cost(tmp_path, _key("B1")).cost_id
+        != load_training_data_view_cost(tmp_path, _key("B2")).cost_id
+    )
     trace, affordances = learner_samples(payload)[0]
     assert trace.transitions[0].before.features() == (0.0, 1.0, 0.0, 1.0, 0.0)
     assert affordances.for_alias("wait") == (1.0,) * 49
@@ -131,14 +153,14 @@ def test_evidence_identity_binds_generation_metadata_not_only_payload(tmp_path: 
     first_key = _key("B1")
     changed_key = first_key.model_copy(update={"probe_policy_sha256": _hash("changed-probe")})
     data = _canonical_data()
-    first = write_training_data_artifact(tmp_path, first_key, data)
-    changed = write_training_data_artifact(tmp_path, changed_key, data)
+    first = _write(tmp_path, first_key, data)
+    changed = _write(tmp_path, changed_key, data)
     assert first.evidence_id != changed.evidence_id
     assert first.payload_sha256 == changed.payload_sha256
 
 
 def test_tampered_evidence_is_rejected(tmp_path: Path) -> None:
-    manifest = write_training_data_artifact(tmp_path, _key(), _canonical_data())
+    manifest = _write(tmp_path, _key(), _canonical_data())
     payload = tmp_path / "training-data-evidence" / manifest.evidence_id / "samples.json"
     payload.write_text(payload.read_text().replace("wait", "tampered"), encoding="utf-8")
     with pytest.raises(TrainingDataArtifactError, match="integrity"):
@@ -146,10 +168,8 @@ def test_tampered_evidence_is_rejected(tmp_path: Path) -> None:
 
 
 def test_tampered_view_and_evidence_metadata_are_rejected(tmp_path: Path) -> None:
-    manifest = write_training_data_artifact(tmp_path, _key(), _canonical_data())
-    view_path = (
-        tmp_path / "training-data-artifacts" / manifest.artifact_id / "manifest.json"
-    )
+    manifest = _write(tmp_path, _key(), _canonical_data())
+    view_path = tmp_path / "training-data-artifacts" / manifest.artifact_id / "manifest.json"
     raw_view = json.loads(view_path.read_text(encoding="utf-8"))
     raw_view["payload_bytes"] += 1
     view_path.write_text(json.dumps(raw_view), encoding="utf-8")
@@ -157,10 +177,8 @@ def test_tampered_view_and_evidence_metadata_are_rejected(tmp_path: Path) -> Non
         load_training_data_artifact(tmp_path, manifest.artifact_id)
 
     other = tmp_path / "other"
-    manifest = write_training_data_artifact(other, _key(), _canonical_data())
-    evidence_path = (
-        other / "training-data-evidence" / manifest.evidence_id / "manifest.json"
-    )
+    manifest = _write(other, _key(), _canonical_data())
+    evidence_path = other / "training-data-evidence" / manifest.evidence_id / "manifest.json"
     raw_evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
     raw_evidence["sample_task_ids"] = ["heldout-task"]
     evidence_path.write_text(json.dumps(raw_evidence), encoding="utf-8")
@@ -184,7 +202,7 @@ def test_unknown_learner_fields_are_rejected() -> None:
 
 
 def test_symlinked_evidence_root_is_rejected(tmp_path: Path) -> None:
-    manifest = write_training_data_artifact(tmp_path, _key(), _canonical_data())
+    manifest = _write(tmp_path, _key(), _canonical_data())
     real = tmp_path / "training-data-evidence"
     moved = tmp_path / "evidence-real"
     real.rename(moved)
@@ -194,7 +212,7 @@ def test_symlinked_evidence_root_is_rejected(tmp_path: Path) -> None:
 
 
 def test_symlinked_manifest_leaf_is_rejected(tmp_path: Path) -> None:
-    manifest = write_training_data_artifact(tmp_path, _key(), _canonical_data())
+    manifest = _write(tmp_path, _key(), _canonical_data())
     path = tmp_path / "training-data-evidence" / manifest.evidence_id / "manifest.json"
     moved = tmp_path / "external-manifest.json"
     path.rename(moved)
@@ -205,7 +223,7 @@ def test_symlinked_manifest_leaf_is_rejected(tmp_path: Path) -> None:
 
 def test_payload_must_exactly_match_ordered_training_fold(tmp_path: Path) -> None:
     with pytest.raises(TrainingDataArtifactError, match="ordered training fold"):
-        write_training_data_artifact(tmp_path, _key(), _canonical_data("task-b"))
+        _write(tmp_path, _key(), _canonical_data("task-b"))
 
 
 def test_affordance_width_and_finiteness_are_enforced() -> None:
@@ -236,4 +254,48 @@ def test_sanitizer_rejects_forged_noncanonical_samples() -> None:
 
 def test_writer_rejects_hand_constructed_schema_valid_samples(tmp_path: Path) -> None:
     with pytest.raises(TrainingDataArtifactError, match="canonical sanitized batch"):
-        write_training_data_artifact(tmp_path, _key(), (_sample(),))  # type: ignore[arg-type]
+        write_training_data_artifact(
+            tmp_path,
+            _key(),
+            (_sample(),),  # type: ignore[arg-type]
+            evidence_accounting=TrainingPreparationAccounting(),
+            view_accounting=TrainingPreparationAccounting(),
+        )
+
+
+def test_evidence_and_view_cost_scopes_are_separate_and_first_writer_wins(
+    tmp_path: Path,
+) -> None:
+    key = _key()
+    evidence_accounting = TrainingPreparationAccounting(
+        training_probes=PhaseAccounting(calls=3),
+        reference_replay=PhaseAccounting(actions=4),
+    )
+    view_accounting = TrainingPreparationAccounting(
+        setup=PhaseAccounting(calls=1),
+        serialization=PhaseAccounting(calls=2),
+    )
+    write_training_data_artifact(
+        tmp_path,
+        key,
+        _canonical_data(),
+        evidence_accounting=evidence_accounting,
+        view_accounting=view_accounting,
+    )
+    evidence_cost = load_training_data_evidence_cost(tmp_path, evidence_key_for(key))
+    view_cost = load_training_data_view_cost(tmp_path, key)
+    assert evidence_cost.scope == "training_data_evidence_preparation"
+    assert evidence_cost.accounting == evidence_accounting
+    assert view_cost.scope == "training_data_view_preparation"
+    assert view_cost.accounting == view_accounting
+
+    with pytest.raises(TrainingDataArtifactError, match="evidence cost conflict"):
+        write_training_data_artifact(
+            tmp_path,
+            key,
+            _canonical_data(),
+            evidence_accounting=evidence_accounting.model_copy(
+                update={"training_probes": PhaseAccounting(calls=99)}
+            ),
+            view_accounting=view_accounting,
+        )
