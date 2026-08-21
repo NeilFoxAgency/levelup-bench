@@ -320,6 +320,9 @@ class UnitPayload(BaseModel):
     accounting: ResourceAccounting
     shared_artifact: SharedArtifactReference | None = None
     shared_artifacts: tuple[SharedArtifactReference, ...] = ()
+    candidate_generation_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")
@@ -359,6 +362,9 @@ class UnitRecord(BaseModel):
     accounting: ResourceAccounting
     shared_artifact: SharedArtifactReference | None = None
     shared_artifacts: tuple[SharedArtifactReference, ...] = ()
+    candidate_generation_sha256: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
     diagnostics: dict[str, DiagnosticValue] = Field(default_factory=dict)
 
     @field_validator("diagnostics")

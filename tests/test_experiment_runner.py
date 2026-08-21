@@ -37,7 +37,9 @@ from levelup.experiments.runner.records import (
 from levelup.experiments.runner.storage import (
     ArtifactValidationError,
     _atomic_write_json,
+    expected_units_sha256,
     plan_expected_units,
+    provenance_identity_sha256,
 )
 from levelup.experiments.runner.training_artifacts import (
     TrainingArtifactKey,
@@ -208,15 +210,21 @@ def _payload(planned: PlannedUnit) -> UnitPayload:
     )
 
 
-def _training_key(*, condition_id: str = "B2") -> TrainingArtifactKey:
+def _training_key(
+    *,
+    condition_id: str = "B2",
+    expected_unit_plan_sha256: str = "4" * 64,
+    exposure_sha256: str = "5" * 64,
+    provenance_sha256: str = "7" * 64,
+) -> TrainingArtifactKey:
     return TrainingArtifactKey(
         screening_candidates_sha256="1" * 64,
         protocol_sha256="2" * 64,
         task_manifest_sha256="3" * 64,
-        expected_unit_plan_sha256="4" * 64,
-        exposure_sha256="5" * 64,
+        expected_unit_plan_sha256=expected_unit_plan_sha256,
+        exposure_sha256=exposure_sha256,
         training_data_sha256="6" * 64,
-        provenance_sha256="7" * 64,
+        provenance_sha256=provenance_sha256,
         fold_id="fold-0",
         heldout_family_id="family-0",
         ordered_training_task_ids=("task-1", "task-2", "task-3"),
@@ -237,14 +245,20 @@ def _training_key(*, condition_id: str = "B2") -> TrainingArtifactKey:
     )
 
 
-def _training_data_key(*, condition_id: str = "condition-0") -> TrainingDataArtifactKey:
+def _training_data_key(
+    *,
+    condition_id: str = "condition-0",
+    expected_unit_plan_sha256: str = "4" * 64,
+    provenance_sha256: str = "5" * 64,
+    reference_exposure_sha256: str = "6" * 64,
+) -> TrainingDataArtifactKey:
     return TrainingDataArtifactKey(
         screening_candidates_sha256="1" * 64,
         protocol_sha256="2" * 64,
         task_manifest_sha256="3" * 64,
-        expected_unit_plan_sha256="4" * 64,
-        provenance_sha256="5" * 64,
-        reference_exposure_sha256="6" * 64,
+        expected_unit_plan_sha256=expected_unit_plan_sha256,
+        provenance_sha256=provenance_sha256,
+        reference_exposure_sha256=reference_exposure_sha256,
         representation_sha256="7" * 64,
         probe_policy_sha256="8" * 64,
         fold_id="fold-0",
@@ -902,10 +916,16 @@ def test_committed_phase1_smoke_config_executes_only_development_data(
 
 
 def test_shared_cost_is_aggregated_once_for_multiple_consumers(tmp_path: Path) -> None:
-    config = _config(conditions=2, tasks=1, replicates=2)
+    raw = _config(conditions=2, tasks=1, replicates=2).model_dump(mode="json")
+    raw["conditions"][1]["exposure"] = raw["conditions"][0]["exposure"]
+    config = ExperimentConfig.model_validate(raw)
     base = RunStore(tmp_path / "base", config, repository=tmp_path)
     consumers = tuple(unit.unit_id for unit in base.expected.units if unit.key.replicate == 0)
-    key = _training_key()
+    key = _training_key(
+        expected_unit_plan_sha256=expected_units_sha256(base.expected),
+        exposure_sha256=base.planned_unit(consumers[0]).exposure_manifest_sha256,
+        provenance_sha256=provenance_identity_sha256(_provenance()),
+    )
     plan = PlannedSharedArtifact(
         key_id=key.key_id,
         owner_condition_id="condition-0",
@@ -1028,7 +1048,11 @@ def test_typed_evidence_and_view_references_validate_and_aggregate_once(
     config = _config(conditions=1, tasks=2, replicates=1)
     base = RunStore(tmp_path / "base", config, repository=tmp_path)
     consumer = next(unit for unit in base.expected.units if unit.key.family_id == "family-0")
-    key = _training_data_key()
+    key = _training_data_key(
+        expected_unit_plan_sha256=expected_units_sha256(base.expected),
+        provenance_sha256=provenance_identity_sha256(_provenance()),
+        reference_exposure_sha256=consumer.exposure_manifest_sha256,
+    )
     evidence_key = evidence_key_for(key)
     plans = (
         PlannedSharedArtifact(
@@ -1165,7 +1189,11 @@ def test_reference_set_rejects_view_from_different_evidence(tmp_path: Path) -> N
     config = _config(conditions=1, tasks=2, replicates=1)
     base = RunStore(tmp_path / "base", config, repository=tmp_path)
     consumer = next(unit for unit in base.expected.units if unit.key.family_id == "family-0")
-    evidence_view_key = _training_data_key()
+    evidence_view_key = _training_data_key(
+        expected_unit_plan_sha256=expected_units_sha256(base.expected),
+        provenance_sha256=provenance_identity_sha256(_provenance()),
+        reference_exposure_sha256=consumer.exposure_manifest_sha256,
+    )
     other_view_key = evidence_view_key.model_copy(update={"probe_policy_sha256": "f" * 64})
     evidence_key = evidence_key_for(evidence_view_key)
     store = RunStore(
@@ -1304,7 +1332,11 @@ def test_shared_cost_loader_rejects_symlinked_cost_root(tmp_path: Path) -> None:
     config = _config(conditions=1, tasks=1, replicates=1)
     base = RunStore(tmp_path / "base", config, repository=tmp_path)
     consumer = base.expected.units[0]
-    key = _training_key()
+    key = _training_key(
+        expected_unit_plan_sha256=expected_units_sha256(base.expected),
+        exposure_sha256=consumer.exposure_manifest_sha256,
+        provenance_sha256=provenance_identity_sha256(_provenance()),
+    )
     plan = PlannedSharedArtifact(
         key_id=key.key_id,
         owner_condition_id="condition-0",

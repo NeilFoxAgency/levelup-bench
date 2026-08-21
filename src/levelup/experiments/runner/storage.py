@@ -126,6 +126,18 @@ def _provenance_identity(provenance: SystemProvenance) -> dict[str, Any]:
     return provenance.model_dump(mode="json", exclude={"captured_at_utc"})
 
 
+def provenance_identity_sha256(provenance: SystemProvenance) -> str:
+    """Hash stable execution provenance while excluding its capture timestamp."""
+
+    return hashlib.sha256(canonical_json_bytes(_provenance_identity(provenance))).hexdigest()
+
+
+def expected_units_sha256(expected: ExpectedUnits) -> str:
+    """Hash the immutable unit plan used by shared-artifact keys."""
+
+    return hashlib.sha256(canonical_json_bytes(expected.model_dump(mode="json"))).hexdigest()
+
+
 def _validate_provenance_policy(
     provenance: SystemProvenance,
     config: ExperimentConfig,
@@ -424,6 +436,8 @@ class RunStore:
             or unit.key.family_id != planned.owner_family_id
         ):
             raise ArtifactValidationError("shared-artifact owner/replicate mismatch")
+        expected_plan_sha256 = expected_units_sha256(self.expected)
+        expected_provenance_sha256 = provenance_identity_sha256(self.load_provenance())
         cost = self.load_shared_cost(reference.key_id, reference.kind)
         if cost.artifact_id != reference.artifact_id or cost.cost_id != reference.cost_id:
             raise ArtifactValidationError("shared-artifact reference does not match cost record")
@@ -443,6 +457,10 @@ class RunStore:
                     or evidence_key.fold_id != planned.owner_fold_id
                     or evidence_key.replicate != planned.owner_replicate
                     or evidence_key.heldout_family_id != planned.owner_family_id
+                    or evidence_key.expected_unit_plan_sha256 != expected_plan_sha256
+                    or evidence_key.provenance_sha256 != expected_provenance_sha256
+                    or evidence_key.reference_exposure_sha256
+                    != unit.exposure_manifest_sha256
                 ):
                     raise ArtifactValidationError(
                         "shared evidence key does not match its frozen owner"
@@ -470,10 +488,14 @@ class RunStore:
                 if (
                     cost.scope != "training_data_view_preparation"
                     or data_key.key_id != reference.key_id
-                    or data_key.condition_id != planned.owner_condition_id
+                    or data_key.condition_id != expected_group
                     or data_key.fold_id != planned.owner_fold_id
                     or data_key.replicate != planned.owner_replicate
                     or data_key.heldout_family_id != planned.owner_family_id
+                    or data_key.expected_unit_plan_sha256 != expected_plan_sha256
+                    or data_key.provenance_sha256 != expected_provenance_sha256
+                    or data_key.reference_exposure_sha256
+                    != unit.exposure_manifest_sha256
                 ):
                     raise ArtifactValidationError(
                         "shared training-data view key does not match its frozen owner"
@@ -503,6 +525,9 @@ class RunStore:
             or training_key.fold_id != planned.owner_fold_id
             or training_key.replicate != planned.owner_replicate
             or training_key.heldout_family_id != planned.owner_family_id
+            or training_key.expected_unit_plan_sha256 != expected_plan_sha256
+            or training_key.provenance_sha256 != expected_provenance_sha256
+            or training_key.exposure_sha256 != unit.exposure_manifest_sha256
         ):
             raise ArtifactValidationError(
                 "shared-artifact training key does not match its frozen owner"
