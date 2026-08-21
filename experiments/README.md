@@ -24,6 +24,17 @@ These files are historical scientific records. Do not overwrite them because a l
   shared-evidence, condition-view, model-lineage, cost-ownership, and resume
   smoke. It contains no comparative outcomes and is forbidden as a
   method-selection input.
+- `milestone6_phase2_screening_readiness.json` is the exact self-hashed parent
+  manifest from the complete six-fold development-only screening preparation.
+  It records the 9,120 planned units, 30 evidence artifacts, 90 representation
+  views, 360 models, and 480 shared-artifact slots without executing validation
+  search, writing comparative outcomes, performing selection, or accessing
+  Milestone 6 final families. It was generated from clean commit `0d53f1b` with
+  `.venv/bin/python -m levelup.experiments.milestone6_phase2_screening_readiness
+  --prepare --output-root runs/milestone6/phase2-screening-readiness-0d53f1b
+  --repository .` in 1,062.60 seconds. The 38 MB raw run tree remains ignored;
+  the committed manifest byte SHA-256 is
+  `67fc33618786e697213fd54f462338be9401a3849085f64635410850470f6d27`.
 
 ## Artifact layers
 
