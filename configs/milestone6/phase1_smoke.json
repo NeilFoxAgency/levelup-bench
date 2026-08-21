@@ -1,0 +1,182 @@
+{
+  "schema_version": "phase1.config.v1",
+  "experiment_id": "milestone6-phase1-runner-smoke",
+  "method_revision": "development-replay-smoke-v1",
+  "split": {
+    "development_tasks": [
+      {
+        "family_id": "battery",
+        "task_id": "micro.adaptive_track.battery.s1000.i0.v1",
+        "task_index": 0,
+        "generator_seed": 1000,
+        "trajectory_catalog": [
+          {
+            "stage_label": "frontier",
+            "trajectory_id": "micro.adaptive_track.battery.s1000.i0.v1.frontier",
+            "source": "synthetic-reference",
+            "provenance": {
+              "generator": "collect_adaptive_bundles"
+            }
+          },
+          {
+            "stage_label": "optimum",
+            "trajectory_id": "micro.adaptive_track.battery.s1000.i0.v1.optimum",
+            "source": "synthetic-reference",
+            "provenance": {
+              "generator": "collect_adaptive_bundles"
+            }
+          }
+        ]
+      },
+      {
+        "family_id": "plain",
+        "task_id": "micro.adaptive_track.plain.s900.i1.v1",
+        "task_index": 1,
+        "generator_seed": 900,
+        "trajectory_catalog": [
+          {
+            "stage_label": "frontier",
+            "trajectory_id": "micro.adaptive_track.plain.s900.i1.v1.frontier",
+            "source": "synthetic-reference",
+            "provenance": {
+              "generator": "collect_adaptive_bundles"
+            }
+          },
+          {
+            "stage_label": "optimum",
+            "trajectory_id": "micro.adaptive_track.plain.s900.i1.v1.optimum",
+            "source": "synthetic-reference",
+            "provenance": {
+              "generator": "collect_adaptive_bundles"
+            }
+          }
+        ]
+      }
+    ],
+    "validation_tasks": [],
+    "final_tasks": []
+  },
+  "conditions": [
+    {
+      "condition_id": "frontier-replay-smoke",
+      "learner_id": "none-reference-replay",
+      "exposure": {
+        "train_task_ids": [
+          "micro.adaptive_track.battery.s1000.i0.v1",
+          "micro.adaptive_track.plain.s900.i1.v1"
+        ],
+        "exposed_trajectories": [
+          {
+            "task_id": "micro.adaptive_track.battery.s1000.i0.v1",
+            "stage_label": "frontier",
+            "trajectory_id": "micro.adaptive_track.battery.s1000.i0.v1.frontier"
+          },
+          {
+            "task_id": "micro.adaptive_track.plain.s900.i1.v1",
+            "stage_label": "frontier",
+            "trajectory_id": "micro.adaptive_track.plain.s900.i1.v1.frontier"
+          }
+        ],
+        "observable_state_access": "none",
+        "action_history_access": false,
+        "action_descriptors_access": false,
+        "probe_interaction_access": false,
+        "search_feedback_access": false,
+        "evaluator_output_access": false,
+        "optimum_threshold_access": false,
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "metadata": {
+          "development_only": true
+        }
+      },
+      "parameters": {
+        "stage": "frontier"
+      }
+    },
+    {
+      "condition_id": "optimum-replay-smoke",
+      "learner_id": "none-reference-replay",
+      "exposure": {
+        "train_task_ids": [
+          "micro.adaptive_track.battery.s1000.i0.v1",
+          "micro.adaptive_track.plain.s900.i1.v1"
+        ],
+        "exposed_trajectories": [
+          {
+            "task_id": "micro.adaptive_track.battery.s1000.i0.v1",
+            "stage_label": "optimum",
+            "trajectory_id": "micro.adaptive_track.battery.s1000.i0.v1.optimum"
+          },
+          {
+            "task_id": "micro.adaptive_track.plain.s900.i1.v1",
+            "stage_label": "optimum",
+            "trajectory_id": "micro.adaptive_track.plain.s900.i1.v1.optimum"
+          }
+        ],
+        "observable_state_access": "none",
+        "action_history_access": false,
+        "action_descriptors_access": false,
+        "probe_interaction_access": false,
+        "search_feedback_access": false,
+        "evaluator_output_access": false,
+        "optimum_threshold_access": false,
+        "privileged_state_access": false,
+        "structured_constraint_access": true,
+        "metadata": {
+          "development_only": true
+        }
+      },
+      "parameters": {
+        "stage": "optimum"
+      }
+    }
+  ],
+  "replicates": 2,
+  "seed_policy": {
+    "derivation_version": "phase1.v1",
+    "model_seed_base": 42,
+    "environment_seed_offset": 0,
+    "probe_seed_base": 2100000,
+    "search_seed_base": 2200000,
+    "data_order_seed_base": 2300000,
+    "replicate_stride": 100000
+  },
+  "device_policy": {
+    "requested_device": "cpu",
+    "torch_threads": 1,
+    "torch_interop_threads": 1,
+    "processes": 1,
+    "deterministic_algorithms": false
+  },
+  "metrics": [
+    {
+      "metric_id": "performance_value",
+      "direction": "minimize",
+      "unit": "ticks",
+      "description": "Independently replayed development-task elapsed ticks."
+    },
+    {
+      "metric_id": "valid_success",
+      "direction": "maximize",
+      "unit": "boolean",
+      "description": "All hard constraints pass and the development task completes."
+    }
+  ],
+  "selection": {
+    "phases": [
+      "development"
+    ],
+    "primary_metric": "performance_value",
+    "rule": "Smoke only: no learner selection; verify deterministic development replay."
+  },
+  "diagnostic_fields": [
+    "not_scientific_result",
+    "smoke_stage_frontier",
+    "smoke_stage_optimum"
+  ],
+  "parameters": {
+    "not_scientific_result": true,
+    "purpose": "config-storage-resume-aggregation-smoke"
+  }
+}

@@ -107,6 +107,18 @@ The current interpretation is that action-frequency change is too lossy. In Comb
 
 See [`docs/milestone-5-interaction-inference.md`](docs/milestone-5-interaction-inference.md) and [`experiments/milestone5_reference.json`](experiments/milestone5_reference.json).
 
+### Milestone 6 - current research program
+
+Phase 0 reproduced and profiled Milestone 5, confirmed its main negative result, and identified
+missing raw-unit and provenance infrastructure. Phase 1 now provides strict configuration,
+task-bound exposure manifests, deterministic seed planning, atomic per-unit records, interruption
+and resume behavior, multidimensional resource accounting, and pure aggregation. No Milestone 6
+learner or final-family result has been claimed yet.
+
+See [`docs/milestone-6-phase-0-report.md`](docs/milestone-6-phase-0-report.md),
+[`docs/milestone-6-phase-1-infrastructure.md`](docs/milestone-6-phase-1-infrastructure.md), and
+[`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md).
+
 ## Reproduce current experiments
 
 Install the ML and development dependencies:

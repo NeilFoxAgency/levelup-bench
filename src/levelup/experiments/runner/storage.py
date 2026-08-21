@@ -1,0 +1,437 @@
+"""Atomic experiment storage and deterministic expected-unit planning."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import tempfile
+from pathlib import Path
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
+
+from levelup.experiments.runner.config import (
+    ExperimentConfig,
+    canonical_json_bytes,
+    run_id_for,
+    scientific_config_sha256,
+    scientific_config_value,
+    scientific_exposure_value,
+)
+from levelup.experiments.runner.provenance import apply_runtime_policy, capture_system_provenance
+from levelup.experiments.runner.records import (
+    AggregateArtifact,
+    AttemptRecord,
+    ExpectedUnits,
+    PlannedUnit,
+    SystemProvenance,
+    UnitKey,
+    UnitRecord,
+    UnitSeeds,
+    unit_id_for,
+)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+class ArtifactValidationError(RuntimeError):
+    """Raised when a stored result is partial, corrupt, unexpected, or mismatched."""
+
+
+class ConflictingResultError(RuntimeError):
+    """Raised when execution tries to replace a different completed atomic result."""
+
+
+def _atomic_write_json(path: Path, value: Any) -> None:
+    """Publish validated canonical JSON through a same-directory atomic replace."""
+
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to replace symlink: {path.name}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = canonical_json_bytes(value) + b"\n"
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=path.parent,
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(rendered)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+        try:
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+        except OSError:
+            directory_fd = None
+        if directory_fd is not None:
+            try:
+                os.fsync(directory_fd)
+            except OSError:
+                pass
+            finally:
+                os.close(directory_fd)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _load_model(path: Path, model_type: type[ModelT]) -> ModelT:
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to read symlink: {path.name}")
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return model_type.model_validate(raw)
+    except (OSError, json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+        raise ArtifactValidationError(
+            f"invalid artifact {path.name}: {type(exc).__name__}"
+        ) from None
+
+
+def _revalidate_instance(instance: ModelT, model_type: type[ModelT]) -> ModelT:
+    try:
+        return model_type.model_validate(instance.model_dump(mode="json", warnings=False))
+    except (ValidationError, TypeError, ValueError) as exc:
+        raise ArtifactValidationError(
+            f"invalid {model_type.__name__} instance: {type(exc).__name__}"
+        ) from None
+
+
+def _tasks_by_phase(config: ExperimentConfig) -> tuple[tuple[str, tuple[Any, ...]], ...]:
+    return (
+        ("development", config.split.development_tasks),
+        ("validation", config.split.validation_tasks),
+        ("final", config.split.final_tasks),
+    )
+
+
+def _provenance_identity(provenance: SystemProvenance) -> dict[str, Any]:
+    return provenance.model_dump(mode="json", exclude={"captured_at_utc"})
+
+
+def _validate_provenance_policy(
+    provenance: SystemProvenance,
+    config: ExperimentConfig,
+    resolved_device: str,
+) -> None:
+    policy = config.device_policy
+    if (
+        provenance.requested_device != policy.requested_device
+        or provenance.resolved_device != resolved_device
+        or provenance.requested_torch_threads != policy.torch_threads
+        or provenance.actual_torch_threads != policy.torch_threads
+        or provenance.requested_torch_interop_threads != policy.torch_interop_threads
+        or provenance.actual_torch_interop_threads != policy.torch_interop_threads
+        or provenance.deterministic_algorithms_requested
+        != policy.deterministic_algorithms
+        or provenance.deterministic_algorithms_actual != policy.deterministic_algorithms
+        or provenance.processes != policy.processes
+    ):
+        raise ArtifactValidationError(
+            "execution provenance does not match the configured runtime policy"
+        )
+
+
+def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
+    """Freeze the complete task/condition/replicate matrix and resolved seeds."""
+
+    config_hash = scientific_config_sha256(config)
+    run_id = run_id_for(config)
+    policy = config.seed_policy
+    units: list[PlannedUnit] = []
+    conditions = sorted(config.conditions, key=lambda condition: condition.condition_id)
+    for phase, tasks in _tasks_by_phase(config):
+        for task in sorted(tasks, key=lambda item: item.task_id):
+            for replicate in range(config.replicates):
+                seeds = UnitSeeds(
+                    model_seed=policy.model_seed_base + replicate,
+                    environment_seed=task.generator_seed + policy.environment_seed_offset,
+                    probe_seed=(
+                        policy.probe_seed_base
+                        + replicate * policy.replicate_stride
+                        + task.task_index
+                    ),
+                    search_seed=(
+                        policy.search_seed_base
+                        + replicate * policy.replicate_stride
+                        + task.task_index
+                    ),
+                    data_order_seed=policy.data_order_seed_base + replicate,
+                )
+                for condition in conditions:
+                    key = UnitKey(
+                        phase=phase,
+                        condition_id=condition.condition_id,
+                        family_id=task.family_id,
+                        task_id=task.task_id,
+                        task_index=task.task_index,
+                        replicate=replicate,
+                    )
+                    exposure_hash = hashlib.sha256(
+                        canonical_json_bytes(scientific_exposure_value(condition.exposure))
+                    ).hexdigest()
+                    units.append(
+                        PlannedUnit(
+                            unit_id=unit_id_for(key),
+                            key=key,
+                            seeds=seeds,
+                            exposure_manifest_sha256=exposure_hash,
+                        )
+                    )
+    return ExpectedUnits(
+        run_id=run_id,
+        config_sha256=config_hash,
+        units=tuple(sorted(units, key=lambda unit: unit.unit_id)),
+    )
+
+
+class RunStore:
+    """Validated file store for one deterministic experiment run."""
+
+    def __init__(
+        self,
+        output_root: str | Path,
+        config: ExperimentConfig,
+        *,
+        repository: str | Path,
+    ) -> None:
+        self.config = config
+        self.config_sha256 = scientific_config_sha256(config)
+        self.run_id = run_id_for(config)
+        self.repository = Path(repository)
+        self.run_dir = Path(output_root) / self.run_id
+        self.units_dir = self.run_dir / "units"
+        self.attempts_dir = self.run_dir / "attempts"
+        self.aggregate_path = self.run_dir / "aggregate.json"
+        self.expected = plan_expected_units(config)
+        self._expected_by_id = {unit.unit_id: unit for unit in self.expected.units}
+        self._execution_ready = False
+
+    def initialize(
+        self,
+        *,
+        for_execution: bool = True,
+    ) -> None:
+        """Create immutable config/unit plans and first-run provenance."""
+
+        resolved_device = (
+            apply_runtime_policy(self.config.device_policy) if for_execution else None
+        )
+
+        self.units_dir.mkdir(parents=True, exist_ok=True)
+        self.attempts_dir.mkdir(parents=True, exist_ok=True)
+        config_path = self.run_dir / "config.json"
+        expected_path = self.run_dir / "expected-units.json"
+        provenance_path = self.run_dir / "provenance.json"
+
+        if config_path.exists():
+            stored_config = _load_model(config_path, ExperimentConfig)
+            if scientific_config_sha256(stored_config) != self.config_sha256:
+                raise ArtifactValidationError("stored config does not match requested run")
+        else:
+            _atomic_write_json(config_path, scientific_config_value(self.config))
+
+        if expected_path.exists():
+            stored_expected = _load_model(expected_path, ExpectedUnits)
+            if stored_expected != self.expected:
+                raise ArtifactValidationError("stored expected-unit plan does not match config")
+        else:
+            _atomic_write_json(expected_path, self.expected.model_dump(mode="json"))
+
+        if provenance_path.exists():
+            stored_provenance = _load_model(provenance_path, SystemProvenance)
+            if for_execution:
+                current_provenance = capture_system_provenance(
+                    self.repository,
+                    self.config.device_policy,
+                )
+                if resolved_device is None:
+                    raise RuntimeError("execution device was not resolved")
+                _validate_provenance_policy(
+                    current_provenance,
+                    self.config,
+                    resolved_device,
+                )
+                if _provenance_identity(stored_provenance) != _provenance_identity(
+                    current_provenance
+                ):
+                    raise ArtifactValidationError(
+                        "stored provenance does not match the current execution environment"
+                    )
+        else:
+            captured = capture_system_provenance(
+                self.repository,
+                self.config.device_policy,
+            )
+            if for_execution:
+                if resolved_device is None:
+                    raise RuntimeError("execution device was not resolved")
+                _validate_provenance_policy(captured, self.config, resolved_device)
+            _atomic_write_json(provenance_path, captured.model_dump(mode="json"))
+        self._execution_ready = for_execution
+
+    def planned_unit(self, unit_id: str) -> PlannedUnit:
+        try:
+            return self._expected_by_id[unit_id]
+        except KeyError as exc:
+            raise ArtifactValidationError(f"unexpected unit_id: {unit_id}") from exc
+
+    def load_provenance(self) -> SystemProvenance:
+        return _load_model(self.run_dir / "provenance.json", SystemProvenance)
+
+    def _unit_path(self, unit_id: str) -> Path:
+        self.planned_unit(unit_id)
+        return self.units_dir / f"{unit_id}.json"
+
+    def load_completed(self, unit_id: str) -> UnitRecord | None:
+        path = self._unit_path(unit_id)
+        if not path.exists():
+            return None
+        record = _load_model(path, UnitRecord)
+        expected = self.planned_unit(unit_id)
+        if (
+            record.run_id != self.run_id
+            or record.config_sha256 != self.config_sha256
+            or record.unit_id != unit_id
+            or record.key != expected.key
+            or record.seeds != expected.seeds
+            or record.exposure_manifest_sha256 != expected.exposure_manifest_sha256
+        ):
+            raise ArtifactValidationError(f"completed unit identity mismatch: {unit_id}")
+        self._validate_outcome_metric(record)
+        return record
+
+    def _validate_outcome_metric(self, record: UnitRecord) -> None:
+        metrics = {
+            metric.metric_id: metric.direction for metric in self.config.metrics
+        }
+        metric_id = record.outcome.performance_metric_id
+        if metric_id not in metrics:
+            raise ArtifactValidationError(
+                f"completed unit uses undeclared performance metric: {metric_id}"
+            )
+        if metrics[metric_id] != record.outcome.performance_direction:
+            raise ArtifactValidationError(
+                f"completed unit metric direction mismatch: {metric_id}"
+            )
+        unknown_diagnostics = set(record.diagnostics) - set(self.config.diagnostic_fields)
+        if unknown_diagnostics:
+            raise ArtifactValidationError(
+                "completed unit uses undeclared diagnostic fields"
+            )
+
+    def write_completed(self, record: UnitRecord) -> bool:
+        """Write once; identical repeats are idempotent and conflicts are rejected."""
+
+        record = _revalidate_instance(record, UnitRecord)
+        path = self._unit_path(record.unit_id)
+        expected = self.planned_unit(record.unit_id)
+        if (
+            record.run_id != self.run_id
+            or record.config_sha256 != self.config_sha256
+            or record.key != expected.key
+            or record.seeds != expected.seeds
+            or record.exposure_manifest_sha256 != expected.exposure_manifest_sha256
+        ):
+            raise ArtifactValidationError("completed record does not match expected unit")
+        self._validate_outcome_metric(record)
+        existing = self.load_completed(record.unit_id)
+        if existing is not None:
+            if existing == record:
+                return False
+            raise ConflictingResultError(f"completed unit already exists: {record.unit_id}")
+        _atomic_write_json(path, record.model_dump(mode="json"))
+        self.load_completed(record.unit_id)
+        return True
+
+    def completed_records(self) -> tuple[UnitRecord, ...]:
+        expected_paths = {f"{unit.unit_id}.json" for unit in self.expected.units}
+        observed_paths = {path.name for path in self.units_dir.glob("*.json")}
+        unexpected = observed_paths - expected_paths
+        if unexpected:
+            raise ArtifactValidationError(f"unexpected completed unit files: {sorted(unexpected)}")
+        records = [
+            record
+            for unit in self.expected.units
+            if (record := self.load_completed(unit.unit_id)) is not None
+        ]
+        return tuple(records)
+
+    def missing_units(self) -> tuple[PlannedUnit, ...]:
+        return tuple(
+            unit for unit in self.expected.units if self.load_completed(unit.unit_id) is None
+        )
+
+    def next_attempt_number(self, unit_id: str) -> int:
+        self.planned_unit(unit_id)
+        prefix = f"{unit_id}.attempt-"
+        numbers: list[int] = []
+        for path in self.attempts_dir.glob(f"{prefix}*.json"):
+            suffix = path.stem.removeprefix(prefix)
+            if suffix.isdigit():
+                numbers.append(int(suffix))
+        return max(numbers, default=0) + 1
+
+    def write_attempt(self, record: AttemptRecord) -> None:
+        record = _revalidate_instance(record, AttemptRecord)
+        expected = self.planned_unit(record.unit_id)
+        if (
+            record.run_id != self.run_id
+            or record.config_sha256 != self.config_sha256
+            or record.key != expected.key
+            or record.seeds != expected.seeds
+        ):
+            raise ArtifactValidationError("attempt record does not match expected unit")
+        path = self.attempts_dir / (
+            f"{record.unit_id}.attempt-{record.attempt:04d}.json"
+        )
+        if path.exists():
+            raise ConflictingResultError(f"attempt already exists: {path.name}")
+        _atomic_write_json(path, record.model_dump(mode="json"))
+        _load_model(path, AttemptRecord)
+
+    def attempt_records(self) -> tuple[AttemptRecord, ...]:
+        records: list[AttemptRecord] = []
+        for path in sorted(self.attempts_dir.glob("*.json")):
+            record = _load_model(path, AttemptRecord)
+            expected = self.planned_unit(record.unit_id)
+            expected_name = f"{record.unit_id}.attempt-{record.attempt:04d}.json"
+            if (
+                path.name != expected_name
+                or record.run_id != self.run_id
+                or record.config_sha256 != self.config_sha256
+                or record.key != expected.key
+                or record.seeds != expected.seeds
+            ):
+                raise ArtifactValidationError(f"attempt identity mismatch: {path.name}")
+            records.append(record)
+        return tuple(records)
+
+    def write_aggregate(self, aggregate: AggregateArtifact) -> bool:
+        from levelup.experiments.runner.aggregate import aggregate_run
+
+        aggregate = _revalidate_instance(aggregate, AggregateArtifact)
+        expected = aggregate_run(self, strict=aggregate.complete, write=False)
+        if aggregate != expected:
+            raise ArtifactValidationError("aggregate does not match validated raw records")
+        if self.aggregate_path.exists():
+            stored = _load_model(self.aggregate_path, AggregateArtifact)
+            if stored == aggregate:
+                return False
+            monotonic_completion = (
+                stored.run_id == aggregate.run_id
+                and stored.config_sha256 == aggregate.config_sha256
+                and stored.expected_units_sha256 == aggregate.expected_units_sha256
+                and not stored.complete
+                and aggregate.inventory.completed > stored.inventory.completed
+                and aggregate.inventory.expected == stored.inventory.expected
+            )
+            if not monotonic_completion:
+                raise ConflictingResultError("aggregate already exists with different content")
+        _atomic_write_json(self.aggregate_path, aggregate.model_dump(mode="json"))
+        return True

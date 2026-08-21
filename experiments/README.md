@@ -103,8 +103,10 @@ A likely local structure is:
 runs/milestone6/
   <run-id>/
     config.json
-    system.json
-    seeds/
+    expected-units.json
+    provenance.json
+    units/
+    attempts/
     aggregate.json
 ```
 
