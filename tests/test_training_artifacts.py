@@ -1,0 +1,403 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import shutil
+from pathlib import Path
+
+import pytest
+import torch
+
+from levelup.experiments.runner.records import PhaseAccounting, ResourceAccounting
+from levelup.experiments.runner.training_artifacts import (
+    MODEL_IDS,
+    TrainingArtifactKey,
+    TrainingReportMetadata,
+    load_training_cost,
+    load_training_key_index,
+    load_training_manifest,
+    load_training_model,
+    write_training_artifact,
+)
+from levelup.learning.state_conditioned import (
+    GlobalAffordanceScorer,
+    StateConditionedScorer,
+)
+
+
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _key(*, model_id: str = "state_conditioned_mlp_listwise_v1") -> TrainingArtifactKey:
+    return TrainingArtifactKey(
+        screening_candidates_sha256=_hash("screening-candidates"),
+        protocol_sha256=_hash("protocol"),
+        task_manifest_sha256=_hash("tasks"),
+        expected_unit_plan_sha256=_hash("expected-units"),
+        exposure_sha256=_hash("exposure"),
+        training_data_sha256=_hash("training-data"),
+        provenance_sha256=_hash("provenance"),
+        fold_id="fold-plain",
+        heldout_family_id="combo",
+        ordered_training_task_ids=("task-a", "task-b"),
+        ordered_heldout_task_ids=("task-c",),
+        condition_id="C-state-conditioned-listwise-optimum",
+        learner_id="state-affordance-mlp-listwise-v1",
+        objective_id="listwise_optimum",
+        backbone_id=model_id,
+        training_tuple_id="lr0p003-e120",
+        replicate=0,
+        model_seed=10,
+        data_order_seed=11,
+        probe_seeds=(12, 13),
+        environment_seeds=(0, 0, 0),
+        probe_spec_sha256=_hash("probe-spec"),
+        training_config_sha256=_hash("training-config-without-search-temperature"),
+        capacity_spec_sha256=_hash("capacity-spec"),
+    )
+
+
+def _report(parameters: int = 3841) -> TrainingReportMetadata:
+    return TrainingReportMetadata(
+        trainable_parameters=parameters,
+        optimizer_steps=2,
+        forward_passes=8,
+        training_examples=4,
+    )
+
+
+def _factory(model_id: str) -> torch.nn.Module:
+    if model_id == "state_conditioned_mlp_listwise_v1":
+        return StateConditionedScorer()
+    if model_id in {
+        "global_affordance_mlp_frequency_v1",
+        "global_affordance_mlp_listwise_v1",
+    }:
+        return GlobalAffordanceScorer()
+    raise AssertionError(model_id)
+
+
+@pytest.mark.parametrize(
+    ("model_id", "factory"),
+    [
+        ("global_affordance_mlp_frequency_v1", _factory),
+        ("global_affordance_mlp_listwise_v1", _factory),
+        ("state_conditioned_mlp_listwise_v1", _factory),
+    ],
+)
+def test_current_mlps_round_trip_exact_outputs_without_pickle(
+    tmp_path: Path,
+    model_id: str,
+    factory: object,
+) -> None:
+    torch.manual_seed(91)
+    model = _factory(model_id)
+    assert model_id in MODEL_IDS
+    parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    inputs = torch.randn(5, 49 if model_id.startswith("global") else 54)
+    expected = model(inputs).detach()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(model_id=model_id),
+        model_id=model_id,
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(parameters),
+    )
+    loaded, _ = load_training_model(
+        tmp_path,
+        manifest.artifact_id,
+        expected_key=_key(model_id=model_id),
+        model_factory=factory,  # type: ignore[arg-type]
+    )
+    assert torch.equal(expected, loaded(inputs).detach())
+    assert not list(tmp_path.rglob("*.pkl"))
+    assert not list(tmp_path.rglob("*.pickle"))
+    assert not list(tmp_path.rglob("*.pt"))
+    assert not list(tmp_path.rglob("*.pth"))
+
+
+def test_write_is_idempotent_and_manifest_is_content_addressed(tmp_path: Path) -> None:
+    model = StateConditionedScorer()
+    first = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    second = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    assert first == second
+    assert (tmp_path / "training-artifacts" / first.artifact_id / "manifest.json").is_file()
+    index = load_training_key_index(tmp_path, _key())
+    assert index.artifact_id == first.artifact_id
+
+
+def test_report_parameter_count_must_match_model(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="parameter count"):
+        write_training_artifact(
+            tmp_path,
+            key=_key(),
+            model_id="state_conditioned_mlp_listwise_v1",
+            model=StateConditionedScorer(),
+            accounting=ResourceAccounting(),
+            report=_report(3601),
+        )
+
+
+def test_same_key_different_wall_time_keeps_first_cost_record(tmp_path: Path) -> None:
+    model = StateConditionedScorer()
+    first_cost = ResourceAccounting(setup=PhaseAccounting(wall_seconds=1.0))
+    second_cost = ResourceAccounting(setup=PhaseAccounting(wall_seconds=2.0))
+    first = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=first_cost,
+        report=_report(),
+    )
+    second = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model=model,
+        model_id="state_conditioned_mlp_listwise_v1",
+        accounting=second_cost,
+        report=_report(),
+    )
+    assert first.artifact_id == second.artifact_id
+    assert load_training_cost(tmp_path, _key()).accounting == first_cost
+
+
+def test_tampered_cost_record_is_rejected(tmp_path: Path) -> None:
+    write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    path = tmp_path / "training-artifact-costs" / f"{_key().key_id}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["accounting"]["setup"]["calls"] = 99
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="cost"):
+        load_training_cost(tmp_path, _key())
+
+
+def test_tampered_tensor_is_rejected(tmp_path: Path) -> None:
+    model = StateConditionedScorer()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    tensor = next((tmp_path / "training-artifacts" / manifest.artifact_id / "tensors").iterdir())
+    tensor.write_bytes(tensor.read_bytes() + b"x")
+    with pytest.raises(RuntimeError, match="integrity"):
+        load_training_manifest(tmp_path, manifest.artifact_id)
+
+
+def test_manifest_body_change_is_rejected_without_id_update(tmp_path: Path) -> None:
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    path = tmp_path / "training-artifacts" / manifest.artifact_id / "manifest.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["report"]["training_examples"] += 1
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="artifact|manifest"):
+        load_training_manifest(tmp_path, manifest.artifact_id)
+
+
+def test_tensor_and_self_declared_hash_change_cannot_retain_artifact_id(
+    tmp_path: Path,
+) -> None:
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    artifact_dir = tmp_path / "training-artifacts" / manifest.artifact_id
+    tensor_path = artifact_dir / "tensors" / manifest.tensors[0].filename
+    payload = bytearray(tensor_path.read_bytes())
+    payload[0] ^= 1
+    tensor_path.write_bytes(payload)
+    manifest_path = artifact_dir / "manifest.json"
+    raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw["tensors"][0]["sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="artifact|manifest"):
+        load_training_manifest(tmp_path, manifest.artifact_id)
+
+
+def test_wrong_key_index_is_rejected(tmp_path: Path) -> None:
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    path = tmp_path / "training-artifact-keys" / f"{_key().key_id}.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["key"]["fold_id"] = "wrong-fold"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="index"):
+        load_training_key_index(tmp_path, _key())
+    assert manifest.artifact_id
+
+
+def test_incomplete_staging_directory_does_not_block_write(tmp_path: Path) -> None:
+    staging = tmp_path / "training-artifacts" / ".interrupted.staging-dead"
+    (staging / "tensors").mkdir(parents=True)
+    (staging / "tensors" / "0000.bin").write_bytes(b"partial")
+    write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+
+
+def test_symlinked_roots_artifact_and_tensor_directories_are_rejected(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-root"
+    write_training_artifact(
+        real_root,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    linked_root = tmp_path / "linked-root"
+    os.symlink(real_root, linked_root)
+    with pytest.raises(RuntimeError, match="symlink"):
+        load_training_manifest(linked_root, next(real_root.glob("training-artifacts/*")).name)
+
+    artifact = next((real_root / "training-artifacts").iterdir())
+    artifact_id = artifact.name
+    moved = tmp_path / "moved-artifact"
+    shutil.move(str(artifact), moved)
+    os.symlink(moved, artifact)
+    with pytest.raises(RuntimeError, match="symlink"):
+        load_training_manifest(real_root, artifact_id)
+
+    index_path = real_root / "training-artifact-keys" / f"{_key().key_id}.json"
+    moved_index = tmp_path / "moved-index.json"
+    shutil.move(str(index_path), moved_index)
+    os.symlink(moved_index, index_path)
+    with pytest.raises(RuntimeError, match="symlink"):
+        load_training_key_index(real_root, _key())
+
+    artifact.unlink()
+    shutil.move(str(moved), artifact)
+    tensor_dir = artifact / "tensors"
+    moved_tensors = tmp_path / "moved-tensors"
+    shutil.move(str(tensor_dir), moved_tensors)
+    os.symlink(moved_tensors, tensor_dir)
+    with pytest.raises(RuntimeError, match="symlink"):
+        load_training_manifest(real_root, artifact_id)
+
+
+@pytest.mark.parametrize("wrong", ["provenance_sha256", "training_config_sha256"])
+def test_wrong_expected_key_is_rejected(tmp_path: Path, wrong: str) -> None:
+    model = StateConditionedScorer()
+    key = _key()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=key,
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    changed = key.model_copy(update={wrong: _hash("changed")})
+    with pytest.raises(RuntimeError, match="key"):
+        load_training_model(
+            tmp_path,
+            manifest.artifact_id,
+            expected_key=changed,
+            model_factory=_factory,
+        )
+
+
+def test_wrong_factory_model_shape_and_manifest_dtype_are_rejected(tmp_path: Path) -> None:
+    model = StateConditionedScorer()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    with pytest.raises(RuntimeError, match="state dict"):
+        load_training_model(
+            tmp_path,
+            manifest.artifact_id,
+            expected_key=_key(),
+            model_factory=lambda _: GlobalAffordanceScorer(),
+        )
+    manifest_path = tmp_path / "training-artifacts" / manifest.artifact_id / "manifest.json"
+    raw = manifest.model_dump(mode="json")
+    raw["tensors"][0]["dtype"] = "float64"
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        load_training_manifest(tmp_path, manifest.artifact_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("model_id", "global_affordance_mlp_listwise_v1"), ("shape", [1])],
+)
+def test_manifest_rejects_wrong_model_id_or_shape(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    model = StateConditionedScorer()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=_key(),
+        model_id="state_conditioned_mlp_listwise_v1",
+        model=model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    manifest_path = tmp_path / "training-artifacts" / manifest.artifact_id / "manifest.json"
+    raw = manifest.model_dump(mode="json")
+    if field == "model_id":
+        raw[field] = value
+    else:
+        raw["tensors"][0][field] = value
+    manifest_path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(RuntimeError):
+        load_training_manifest(tmp_path, manifest.artifact_id)

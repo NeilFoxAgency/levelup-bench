@@ -1,0 +1,576 @@
+"""Content-addressed, non-pickle storage for completed Torch training artifacts.
+
+Artifacts are immutable once published.  The writer is intentionally sequential-only:
+callers that need concurrent preparation must provide an external lock.  A manifest is
+published last, after every tensor file has been flushed and hashed.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import tempfile
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Literal
+
+import numpy as np
+import torch
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+from torch import nn
+
+from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.records import ResourceAccounting
+from levelup.experiments.runner.storage import ArtifactValidationError
+
+HASH_FIELD = Field(pattern=r"^[0-9a-f]{64}$")
+MODEL_IDS = frozenset(
+    {
+        "global_affordance_mlp_frequency_v1",
+        "global_affordance_mlp_listwise_v1",
+        "state_conditioned_mlp_listwise_v1",
+    }
+)
+HEX64 = re.compile(r"^[0-9a-f]{64}$")
+LOCAL_TENSOR = re.compile(r"^[0-9]{4}\.bin$")
+
+
+def _digest(value: Any) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _safe_resolved_child(root: Path, child: Path) -> Path:
+    """Reject links/traversal and require a path to remain beneath root."""
+
+    if root.is_symlink() or child.is_symlink():
+        raise ArtifactValidationError(f"refusing symlink path: {child}")
+    root_resolved = root.resolve()
+    child_resolved = child.resolve()
+    try:
+        child_resolved.relative_to(root_resolved)
+    except ValueError as exc:
+        raise ArtifactValidationError(f"path escapes artifact root: {child}") from exc
+    return child
+
+
+class TrainingArtifactKey(BaseModel):
+    """All scientific inputs that can change a completed training artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-key.v1"] = "runner.training-key.v1"
+    screening_candidates_sha256: str = HASH_FIELD
+    protocol_sha256: str = HASH_FIELD
+    task_manifest_sha256: str = HASH_FIELD
+    expected_unit_plan_sha256: str = HASH_FIELD
+    exposure_sha256: str = HASH_FIELD
+    training_data_sha256: str = HASH_FIELD
+    provenance_sha256: str = HASH_FIELD
+    fold_id: str = Field(min_length=1)
+    heldout_family_id: str = Field(min_length=1)
+    ordered_training_task_ids: tuple[str, ...]
+    ordered_heldout_task_ids: tuple[str, ...]
+    condition_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    objective_id: str = Field(min_length=1)
+    backbone_id: str = Field(min_length=1)
+    training_tuple_id: str = Field(min_length=1)
+    replicate: int = Field(ge=0)
+    model_seed: int
+    data_order_seed: int
+    probe_seeds: tuple[int, ...]
+    environment_seeds: tuple[int, ...]
+    probe_spec_sha256: str = HASH_FIELD
+    training_config_sha256: str = HASH_FIELD
+    capacity_spec_sha256: str = HASH_FIELD
+
+    @model_validator(mode="after")
+    def ids_are_nonempty(self) -> "TrainingArtifactKey":
+        if not self.ordered_training_task_ids:
+            raise ValueError("training artifact requires training task IDs")
+        if any(
+            not item for item in (*self.ordered_training_task_ids, *self.ordered_heldout_task_ids)
+        ):
+            raise ValueError("training and held-out task IDs must be non-empty")
+        return self
+
+    @property
+    def key_id(self) -> str:
+        return _digest(self.model_dump(mode="json"))
+
+
+class TensorMetadata(BaseModel):
+    """Integrity metadata for one raw little-endian float32 tensor file."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    name: str = Field(min_length=1)
+    filename: str = Field(min_length=1)
+    shape: tuple[int, ...]
+    dtype: Literal["float32"] = "float32"
+    byte_length: int = Field(ge=0)
+    sha256: str = HASH_FIELD
+
+    @model_validator(mode="after")
+    def shape_is_valid(self) -> "TensorMetadata":
+        if any(dimension < 0 for dimension in self.shape):
+            raise ValueError("tensor dimensions must be nonnegative")
+        return self
+
+
+class TrainingReportMetadata(BaseModel):
+    """Numeric training report stored with a completed shared artifact."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    trainable_parameters: int = Field(ge=0)
+    optimizer_steps: int = Field(ge=0)
+    forward_passes: int = Field(ge=0)
+    training_examples: int = Field(ge=0)
+
+
+class TrainingArtifactManifest(BaseModel):
+    """Immutable manifest published after all model tensor files."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-artifact.v1"] = "runner.training-artifact.v1"
+    artifact_id: str = HASH_FIELD
+    key: TrainingArtifactKey
+    model_id: str = Field(min_length=1)
+    tensors: tuple[TensorMetadata, ...]
+    report: TrainingReportMetadata
+
+    @model_validator(mode="after")
+    def manifest_is_canonical(self) -> "TrainingArtifactManifest":
+        if self.artifact_id != self.expected_artifact_id:
+            raise ValueError("artifact ID does not match canonical manifest body")
+        if self.model_id not in MODEL_IDS:
+            raise ValueError("model ID is not allowlisted")
+        if self.model_id != self.key.backbone_id:
+            raise ValueError("manifest model ID differs from artifact backbone")
+        names = [tensor.name for tensor in self.tensors]
+        files = [tensor.filename for tensor in self.tensors]
+        if not names or len(names) != len(set(names)) or names != sorted(names):
+            raise ValueError("tensor names must be unique and sorted")
+        if len(files) != len(set(files)) or any(
+            item != f"{index:04d}.bin" or not LOCAL_TENSOR.fullmatch(item)
+            for index, item in enumerate(files)
+        ):
+            raise ValueError("tensor filenames must be unique and local")
+        if any(any(ord(char) < 32 for char in value) for value in names):
+            raise ValueError("tensor names cannot contain control characters")
+        return self
+
+    @property
+    def expected_artifact_id(self) -> str:
+        body = self.model_dump(mode="json", exclude={"artifact_id"})
+        return _digest(body)
+
+
+class TrainingArtifactCostRecord(BaseModel):
+    """First-writer accounting for one immutable training artifact key."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-artifact-cost.v1"] = "runner.training-artifact-cost.v1"
+    cost_id: str = HASH_FIELD
+    key_id: str = HASH_FIELD
+    artifact_id: str = HASH_FIELD
+    key: TrainingArtifactKey
+    accounting: ResourceAccounting
+
+    @model_validator(mode="after")
+    def binding_is_exact(self) -> "TrainingArtifactCostRecord":
+        if self.key_id != self.key.key_id:
+            raise ValueError("cost key ID does not match key")
+        if self.cost_id != self.expected_cost_id:
+            raise ValueError("cost ID does not match canonical cost body")
+        return self
+
+    @property
+    def expected_cost_id(self) -> str:
+        return _digest(self.model_dump(mode="json", exclude={"cost_id"}))
+
+
+class TrainingArtifactKeyIndex(BaseModel):
+    """Immutable key-to-artifact binding, claimed after artifact publication."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["runner.training-artifact-key.v1"] = "runner.training-artifact-key.v1"
+    key_id: str = HASH_FIELD
+    key: TrainingArtifactKey
+    artifact_id: str = HASH_FIELD
+    manifest_sha256: str = HASH_FIELD
+
+    @model_validator(mode="after")
+    def binding_is_exact(self) -> "TrainingArtifactKeyIndex":
+        if self.key_id != self.key.key_id:
+            raise ValueError("key index ID does not match key")
+        return self
+
+
+def _atomic_bytes(path: Path, payload: bytes) -> None:
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to replace symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _exclusive_claim(path: Path, payload: bytes) -> bool:
+    """Claim a path without replacement; callers validate an existing winner."""
+
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to claim symlink: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".claim", delete=False
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> bytes:
+    if tensor.device.type != "cpu" or tensor.dtype != torch.float32:
+        raise ArtifactValidationError("training artifacts require CPU float32 tensors")
+    if not bool(torch.isfinite(tensor).all()):
+        raise ArtifactValidationError("training artifact tensor contains non-finite values")
+    array = tensor.detach().contiguous().numpy().astype("<f4", copy=False)
+    return array.tobytes(order="C")
+
+
+def _state_tensors(model: nn.Module) -> dict[str, tuple[tuple[int, ...], bytes]]:
+    state = model.state_dict()
+    if not state:
+        raise ArtifactValidationError("cannot publish a model with an empty state dict")
+    result: dict[str, tuple[tuple[int, ...], bytes]] = {}
+    for name in sorted(state):
+        tensor = state[name]
+        if not isinstance(tensor, torch.Tensor):
+            raise ArtifactValidationError(f"state entry is not a tensor: {name}")
+        result[name] = (tuple(int(item) for item in tensor.shape), _tensor_bytes(tensor))
+    return result
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to read symlink: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise ValueError("manifest must be an object")
+        return value
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise ArtifactValidationError(
+            f"invalid training artifact manifest: {type(exc).__name__}"
+        ) from None
+
+
+def _validate_tensor_file(path: Path, metadata: TensorMetadata) -> torch.Tensor:
+    if path.is_symlink():
+        raise ArtifactValidationError(f"refusing to read symlink: {path}")
+    try:
+        payload = path.read_bytes()
+    except OSError as exc:
+        raise ArtifactValidationError(f"cannot read tensor file: {path.name}") from exc
+    if (
+        len(payload) != metadata.byte_length
+        or hashlib.sha256(payload).hexdigest() != metadata.sha256
+    ):
+        raise ArtifactValidationError(f"tensor integrity mismatch: {metadata.name}")
+    expected_bytes = 4
+    for dimension in metadata.shape:
+        expected_bytes *= dimension
+    if len(payload) != expected_bytes:
+        raise ArtifactValidationError(f"tensor byte length does not match shape: {metadata.name}")
+    values = np.frombuffer(payload, dtype="<f4").reshape(metadata.shape).copy()
+    tensor = torch.from_numpy(values)
+    if not bool(torch.isfinite(tensor).all()):
+        raise ArtifactValidationError(f"tensor contains non-finite values: {metadata.name}")
+    return tensor
+
+
+def write_training_artifact(
+    output_root: str | Path,
+    *,
+    key: TrainingArtifactKey,
+    model_id: str,
+    model: nn.Module,
+    accounting: ResourceAccounting,
+    report: TrainingReportMetadata,
+) -> TrainingArtifactManifest:
+    """Write or idempotently validate one artifact (sequential callers only)."""
+
+    if model_id not in MODEL_IDS:
+        raise ArtifactValidationError("model ID is not allowlisted")
+    if model_id != key.backbone_id:
+        raise ArtifactValidationError("model ID differs from artifact backbone")
+    actual_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    if report.trainable_parameters != actual_parameters:
+        raise ArtifactValidationError("training report parameter count does not match model")
+    tensors = _state_tensors(model)
+    output = Path(output_root)
+    if output.is_symlink():
+        raise ArtifactValidationError("refusing symlink artifact output root")
+    artifacts_root = output / "training-artifacts"
+    keys_root = output / "training-artifact-keys"
+    if artifacts_root.is_symlink() or keys_root.is_symlink():
+        raise ArtifactValidationError("refusing to use symlink training-artifacts directory")
+    artifact_id = "pending"
+    metadata: list[TensorMetadata] = []
+    for index, name in enumerate(sorted(tensors)):
+        shape, payload = tensors[name]
+        metadata.append(
+            TensorMetadata(
+                name=name,
+                filename=f"{index:04d}.bin",
+                shape=shape,
+                byte_length=len(payload),
+                sha256=hashlib.sha256(payload).hexdigest(),
+            )
+        )
+    body = {
+        "schema_version": "runner.training-artifact.v1",
+        "key": key.model_dump(mode="json"),
+        "model_id": model_id,
+        "tensors": [item.model_dump(mode="json") for item in metadata],
+        "report": report.model_dump(mode="json"),
+    }
+    artifact_id = _digest(body)
+    manifest = TrainingArtifactManifest(
+        artifact_id=artifact_id,
+        key=key,
+        model_id=model_id,
+        tensors=tuple(metadata),
+        report=report,
+    )
+    artifact_dir = output / "training-artifacts" / artifact_id
+    if artifact_dir.is_symlink():
+        raise ArtifactValidationError("refusing to use symlink artifact directory")
+    manifest_path = artifact_dir / "manifest.json"
+    loaded: TrainingArtifactManifest
+    if manifest_path.exists():
+        existing = load_training_manifest(output, artifact_id)
+        if existing != manifest:
+            raise ArtifactValidationError(
+                "existing training artifact conflicts with requested content"
+            )
+        _validate_artifact_files(artifact_dir, existing)
+        loaded = existing
+    else:
+        if artifact_dir.exists():
+            raise ArtifactValidationError("training artifact path is unexpectedly present")
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{artifact_id}.staging-", dir=artifacts_root))
+        tensor_dir = staging / "tensors"
+        try:
+            tensor_dir.mkdir()
+            for item in metadata:
+                _atomic_bytes(tensor_dir / item.filename, tensors[item.name][1])
+            _atomic_bytes(
+                staging / "manifest.json",
+                canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n",
+            )
+            os.replace(staging, artifact_dir)
+        except FileExistsError:
+            if staging.exists():
+                shutil.rmtree(staging)
+            loaded = load_training_manifest(output, artifact_id)
+            if loaded != manifest:
+                raise ArtifactValidationError("racing artifact conflicts with requested content")
+        except Exception:
+            if staging.exists():
+                shutil.rmtree(staging)
+            raise
+        else:
+            loaded = load_training_manifest(output, artifact_id)
+    index = TrainingArtifactKeyIndex(
+        key_id=key.key_id,
+        key=key,
+        artifact_id=artifact_id,
+        manifest_sha256=_digest(loaded.model_dump(mode="json")),
+    )
+    index_path = keys_root / f"{key.key_id}.json"
+    claimed = _exclusive_claim(
+        index_path, canonical_json_bytes(index.model_dump(mode="json")) + b"\n"
+    )
+    if not claimed:
+        winner = load_training_key_index(output, key)
+        if winner.artifact_id != artifact_id:
+            raise ArtifactValidationError("different artifact already won key index race")
+    cost_body = {
+        "schema_version": "runner.training-artifact-cost.v1",
+        "key_id": key.key_id,
+        "artifact_id": artifact_id,
+        "key": key.model_dump(mode="json"),
+        "accounting": accounting.model_dump(mode="json"),
+    }
+    cost = TrainingArtifactCostRecord.model_validate({"cost_id": _digest(cost_body), **cost_body})
+    costs_root = output / "training-artifact-costs"
+    if costs_root.is_symlink():
+        raise ArtifactValidationError("refusing symlink training-artifact-costs directory")
+    cost_path = costs_root / f"{key.key_id}.json"
+    claimed_cost = _exclusive_claim(
+        cost_path,
+        canonical_json_bytes(cost.model_dump(mode="json")) + b"\n",
+    )
+    if not claimed_cost:
+        load_training_cost(output, key)
+    return loaded
+
+
+def load_training_manifest(output_root: str | Path, artifact_id: str) -> TrainingArtifactManifest:
+    """Load and validate an immutable manifest and every referenced tensor file."""
+
+    if not HEX64.fullmatch(artifact_id):
+        raise ArtifactValidationError("invalid training artifact ID")
+    output = Path(output_root)
+    artifact_dir, _ = _validated_artifact_paths(output, artifact_id)
+    raw = _load_json(artifact_dir / "manifest.json")
+    try:
+        manifest = TrainingArtifactManifest.model_validate(raw)
+    except (TypeError, ValueError) as exc:
+        raise ArtifactValidationError("invalid training artifact manifest schema") from exc
+    if manifest.artifact_id != artifact_id or manifest.expected_artifact_id != artifact_id:
+        raise ArtifactValidationError("training artifact ID mismatch")
+    _validate_artifact_files(artifact_dir, manifest)
+    return manifest
+
+
+def _validate_artifact_files(artifact_dir: Path, manifest: TrainingArtifactManifest) -> None:
+    _, tensor_dir = _validated_artifact_paths(artifact_dir.parent.parent, artifact_dir.name)
+    expected = {item.filename for item in manifest.tensors}
+    observed = {path.name for path in tensor_dir.iterdir()}
+    if observed != expected:
+        raise ArtifactValidationError("training artifact has unexpected tensor files")
+    for item in manifest.tensors:
+        _validate_tensor_file(tensor_dir / item.filename, item)
+
+
+def _validated_artifact_paths(output: Path, artifact_id: str) -> tuple[Path, Path]:
+    if output.is_symlink() or (output / "training-artifacts").is_symlink():
+        raise ArtifactValidationError("refusing symlink artifact root")
+    artifacts_root = output / "training-artifacts"
+    artifact_dir = _safe_resolved_child(artifacts_root, artifacts_root / artifact_id)
+    if artifact_dir.is_symlink():
+        raise ArtifactValidationError("refusing symlink artifact directory")
+    tensor_dir = artifact_dir / "tensors"
+    if tensor_dir.is_symlink():
+        raise ArtifactValidationError("refusing symlink tensor directory")
+    if not tensor_dir.is_dir():
+        raise ArtifactValidationError("training artifact tensor directory is invalid")
+    _safe_resolved_child(artifact_dir, tensor_dir)
+    return artifact_dir, tensor_dir
+
+
+def load_training_model(
+    output_root: str | Path,
+    artifact_id: str,
+    *,
+    expected_key: TrainingArtifactKey,
+    model_factory: Callable[[str], nn.Module],
+) -> tuple[nn.Module, TrainingArtifactManifest]:
+    """Load a fresh allowlisted model using a caller-supplied expected factory."""
+
+    manifest = load_training_manifest(output_root, artifact_id)
+    if manifest.key != expected_key or manifest.key.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact key does not match expected key")
+    if manifest.model_id not in MODEL_IDS:
+        raise ArtifactValidationError("model ID is not allowlisted")
+    try:
+        model = model_factory(manifest.model_id)
+    except Exception as exc:
+        raise ArtifactValidationError("model factory rejected artifact model ID") from exc
+    state: dict[str, torch.Tensor] = {}
+    artifact_dir, tensor_dir = _validated_artifact_paths(Path(output_root), artifact_id)
+    _validate_artifact_files(artifact_dir, manifest)
+    for item in manifest.tensors:
+        state[item.name] = _validate_tensor_file(tensor_dir / item.filename, item)
+    try:
+        model.load_state_dict(state, strict=True)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ArtifactValidationError("model state dict does not match artifact") from exc
+    model.eval()
+    return model, manifest
+
+
+def load_training_key_index(
+    output_root: str | Path, expected_key: TrainingArtifactKey
+) -> TrainingArtifactKeyIndex:
+    """Resolve an expected key to its immutable artifact without retraining."""
+
+    output = Path(output_root)
+    if output.is_symlink() or (output / "training-artifact-keys").is_symlink():
+        raise ArtifactValidationError("refusing symlink key-index root")
+    index_path = _safe_resolved_child(
+        output / "training-artifact-keys",
+        output / "training-artifact-keys" / f"{expected_key.key_id}.json",
+    )
+    raw = _load_json(index_path)
+    try:
+        index = TrainingArtifactKeyIndex.model_validate(raw)
+    except (TypeError, ValueError):
+        raise ArtifactValidationError("invalid training artifact key index") from None
+    if index.key != expected_key or index.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact key index does not match expected key")
+    manifest = load_training_manifest(output, index.artifact_id)
+    if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
+        raise ArtifactValidationError("training artifact key index manifest digest mismatch")
+    return index
+
+
+def load_training_cost(
+    output_root: str | Path, expected_key: TrainingArtifactKey
+) -> TrainingArtifactCostRecord:
+    """Load the first-writer cost record for an expected training key."""
+
+    output = Path(output_root)
+    costs_root = output / "training-artifact-costs"
+    if output.is_symlink() or costs_root.is_symlink():
+        raise ArtifactValidationError("refusing symlink cost root")
+    path = _safe_resolved_child(costs_root, costs_root / f"{expected_key.key_id}.json")
+    raw = _load_json(path)
+    try:
+        record = TrainingArtifactCostRecord.model_validate(raw)
+    except (TypeError, ValueError):
+        raise ArtifactValidationError("invalid training artifact cost record") from None
+    if record.key != expected_key or record.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact cost key mismatch")
+    if not HEX64.fullmatch(record.artifact_id):
+        raise ArtifactValidationError("invalid cost artifact ID")
+    index = load_training_key_index(output, expected_key)
+    if record.artifact_id != index.artifact_id:
+        raise ArtifactValidationError("training artifact cost points to the wrong artifact")
+    load_training_manifest(output, record.artifact_id)
+    return record

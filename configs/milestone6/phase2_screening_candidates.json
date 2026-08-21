@@ -1,0 +1,119 @@
+{
+  "schema_version": "milestone6.phase2_screening_candidates.v1",
+  "status": "frozen-before-screening-results",
+  "scope": "known-development-only",
+  "parent_protocol": {
+    "path": "configs/milestone6/development_protocol.json",
+    "sha256": "a0d6e5760591ce70f95df4a87b8166dc69defa5e3242ddadabe3393b3e82a488"
+  },
+  "task_manifest": {
+    "path": "configs/milestone6/development_tasks.json",
+    "sha256": "20f6606bd2150d808b18f011976bbf7c8298627e1cc01eeb67f653eacba9731f"
+  },
+  "folds": {
+    "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+    "kind": "leave-one-family-out",
+    "training_tasks": "eight training_core tasks from each of the five non-held-out families",
+    "heldout_tasks": "eight training_core tasks from the held-out development family",
+    "replicates": [0, 1, 2, 3, 4]
+  },
+  "fixed_controls": [
+    {
+      "variant_id": "A0-fixed",
+      "condition_id": "A0-no-probe-uniform",
+      "learner_id": "uniform-visible-actions-v1",
+      "probe_action_cap": 0,
+      "search_policy": "uniform-visible-actions"
+    },
+    {
+      "variant_id": "A1-fixed",
+      "condition_id": "A1-paid-probe-uniform",
+      "learner_id": "uniform-visible-actions-v1",
+      "probe_action_cap": 64,
+      "search_policy": "uniform-visible-actions"
+    }
+  ],
+  "learned_conditions": [
+    {
+      "condition_id": "B1-clean-global-optimum-frequency",
+      "learner_id": "global-affordance-mlp-frequency-v1",
+      "objective": "optimum_frequency",
+      "backbone": "global_affordance_mlp",
+      "candidate_tuple_ids": "all"
+    },
+    {
+      "condition_id": "B2-global-listwise-optimum",
+      "learner_id": "global-affordance-mlp-listwise-v1",
+      "objective": "listwise_optimum",
+      "backbone": "global_affordance_mlp",
+      "candidate_tuple_ids": "all"
+    },
+    {
+      "condition_id": "C-state-conditioned-listwise-optimum",
+      "learner_id": "state-affordance-mlp-listwise-v1",
+      "objective": "listwise_optimum",
+      "backbone": "state_affordance_mlp",
+      "candidate_tuple_ids": "all"
+    }
+  ],
+  "candidate_tuples": [
+    {"tuple_id": "lr0p003-e120-t0p6", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e120-t0p9", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e120-t1p2", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p003-e180-t0p6", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e180-t0p9", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e180-t1p2", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e120-t0p6", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e120-t0p9", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e120-t1p2", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e180-t0p6", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e180-t0p9", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e180-t1p2", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 1.2}
+  ],
+  "fixed_defaults": {
+    "optimizer": "adam",
+    "weight_decay": 0.0001,
+    "mlp_hidden_widths": [48, 24],
+    "probe_actions_per_task": 64,
+    "probe_coverage_target_samples_per_alias": 8,
+    "probe_actions_per_attempt": 16,
+    "candidate_episodes_per_task": 150,
+    "adaptation_actions_per_task": 2048,
+    "maximum_actions_per_candidate_episode": 64,
+    "device": "cpu",
+    "torch_threads": 1,
+    "processes": 1
+  },
+  "artifact_sharing": {
+    "training_data_artifact_identity": "condition, fold, replicate, exposure, probe policy and data-order seed",
+    "model_artifact_identity": "training-data artifact, condition, fold, replicate, model seed, learning rate and epochs",
+    "search_temperature_in_model_artifact_identity": false,
+    "heldout_probe_reuse_across_units": false,
+    "training_cost_owner": "one shared artifact per condition, fold, replicate and applicable training tuple",
+    "task_unit_training_cost": 0
+  },
+  "expected_matrix": {
+    "fixed_control_variants": 2,
+    "learned_variants_per_condition": 12,
+    "learned_conditions": 3,
+    "total_variants": 38,
+    "training_data_artifacts": 90,
+    "trained_model_artifacts": 360,
+    "heldout_task_units": 9120
+  },
+  "screening_advancement_rule": {
+    "scope": "select one numeric tuple independently within each of B1, B2 and C; retain A0 and A1",
+    "endpoint_adaptation_actions": 2048,
+    "steps": [
+      "maximize the minimum family exact-optimum success rate",
+      "retain tuples within five absolute percentage points of the best minimum-family success rate",
+      "minimize worst-family median restricted interactions to exact optimum with failures at 2049",
+      "minimize macro-average family median restricted interactions",
+      "minimize one-time training optimizer steps, then forward passes",
+      "choose the ascending numeric tuple (learning_rate, training_epochs, search_temperature)"
+    ],
+    "cross_condition_elimination": false,
+    "selection_rule_changes_after_screening_results": "forbidden"
+  },
+  "final_family_access": false
+}
