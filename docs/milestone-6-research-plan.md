@@ -183,6 +183,20 @@ directed subset.
 
 Purpose: test whether the improvement direction carries information.
 
+### Phase 2 screening runtime gate
+
+Before any comparative development unit runs, the committed readiness manifest and its explicit
+raw artifact root must pass the read-only screening runtime loader. The gate pins the manifest
+bytes, rebuilds the frozen leave-one-family-out plan, reopens the exact 30 evidence artifacts, 90
+representation views, 360 capacity-checked models, and 480 shared-artifact declarations, and
+rejects final-family, outcome, aggregate, partial, extra, or symlinked state.
+
+Loading alone leaves all six child stores non-executable. Immediately before execution, the
+runtime must recapture current repository and device provenance, recheck the authority bytes and
+complete prepared tree, and only then activate all six stores transactionally. A failed recheck
+leaves every store locked. This gate performs no probe, training, search, evaluator, oracle,
+aggregation, selection, or comparative-result read.
+
 ## Phase 3 - represent decisions in context
 
 Phase 2 may support only the state-conditioning comparison B2 versus C. Claims about transition

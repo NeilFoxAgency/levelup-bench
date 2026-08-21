@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -24,7 +25,11 @@ from levelup.experiments.runner import (
     scientific_config_sha256,
 )
 from levelup.experiments.runner.aggregate import IncompleteRunError, _records_sha256
-from levelup.experiments.runner.config import DevicePolicy, canonical_json_bytes
+from levelup.experiments.runner.config import (
+    DevicePolicy,
+    canonical_json_bytes,
+    scientific_config_value,
+)
 from levelup.experiments.runner.provenance import capture_system_provenance
 from levelup.experiments.runner.records import (
     ExpectedSharedArtifacts,
@@ -589,6 +594,95 @@ def test_initialize_snapshots_are_immutable_and_idempotent(
     )
     with pytest.raises(ArtifactValidationError, match="stored provenance"):
         store.initialize()
+
+
+def test_internal_activate_prepared_batch_is_read_only_and_transactional(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _store(tmp_path / "first")
+    second = _store(
+        tmp_path / "second",
+        _config(conditions=1, tasks=2, replicates=2),
+    )
+    stores = (first, second)
+    for store in stores:
+        store._execution_ready = False
+    snapshots = {
+        store.run_id: {
+            path.name: path.read_bytes()
+            for path in store.run_dir.iterdir()
+            if path.is_file()
+        }
+        for store in stores
+    }
+
+    def forbidden(*args: object, **kwargs: object) -> str:
+        raise AssertionError("activation must not capture provenance or apply policy")
+
+    monkeypatch.setattr("levelup.experiments.runner.storage.capture_system_provenance", forbidden)
+    monkeypatch.setattr("levelup.experiments.runner.storage.apply_runtime_policy", forbidden)
+
+    RunStore._activate_prepared_batch(stores, _provenance())
+
+    assert all(store._execution_ready for store in stores)
+    assert {
+        store.run_id: {
+            path.name: path.read_bytes()
+            for path in store.run_dir.iterdir()
+            if path.is_file()
+        }
+        for store in stores
+    } == snapshots
+
+    # A later failed activation clears every stale gate and never partially
+    # re-enables the first store.
+    (second.run_dir / "expected-units.json").write_bytes(b"{}\n")
+    with pytest.raises(ArtifactValidationError, match="non-canonical"):
+        RunStore._activate_prepared_batch(stores, _provenance())
+    assert not first._execution_ready
+    assert not second._execution_ready
+
+
+def test_internal_activate_prepared_batch_requires_canonical_plans_and_directories(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path / "canonical", _config(conditions=1, tasks=1, replicates=1))
+    store._execution_ready = False
+    config_path = store.run_dir / "config.json"
+    config_path.write_text(
+        json.dumps(json.loads(config_path.read_text(encoding="utf-8")), indent=2) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ArtifactValidationError, match="non-canonical"):
+        RunStore._activate_prepared_batch((store,), _provenance())
+    assert not store._execution_ready
+
+    config_path.write_bytes(canonical_json_bytes(scientific_config_value(store.config)) + b"\n")
+    (store.run_dir / "provenance.json").unlink()
+    with pytest.raises(ArtifactValidationError, match="missing prepared provenance"):
+        RunStore._activate_prepared_batch((store,), _provenance())
+    assert not store._execution_ready
+
+
+def test_internal_activate_prepared_batch_rejects_symlink_ancestors_and_duplicates(
+    tmp_path: Path,
+) -> None:
+    real_root = tmp_path / "real-root"
+    alias_root = tmp_path / "alias-root"
+    config = _config(conditions=1, tasks=1, replicates=1)
+    _store(real_root, config)
+    alias_root.symlink_to(real_root, target_is_directory=True)
+    store = RunStore(alias_root, config, repository=tmp_path)
+    store._execution_ready = False
+    with pytest.raises(ArtifactValidationError, match="symlink"):
+        RunStore._activate_prepared_batch((store,), _provenance())
+    assert not store._execution_ready
+
+    first = _store(tmp_path / "first", _config(conditions=1, tasks=1, replicates=1))
+    first._execution_ready = True
+    with pytest.raises(ArtifactValidationError, match="duplicate run IDs"):
+        RunStore._activate_prepared_batch((first, first), _provenance())
+    assert not first._execution_ready
 
 
 def test_atomic_write_cleans_temporary_file_when_replace_fails(

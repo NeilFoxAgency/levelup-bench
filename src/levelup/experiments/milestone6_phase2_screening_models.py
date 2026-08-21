@@ -32,6 +32,7 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     ScreeningModelKeys,
     build_screening_data_keys,
     build_screening_model_keys,
+    load_screening_data_inventory,
 )
 from levelup.experiments.runner import within_parameter_tolerance
 from levelup.experiments.runner.config import (
@@ -523,6 +524,179 @@ def materialize_screening_models(
         loaded = _preflight(root, config, model_keys, data.manifests)
     if len(loaded) != 60:
         raise TrainingDataArtifactError("screening model materialization is incomplete")
+    reports = {identity: item[2] for identity, item in loaded.items()}
+    _validate_matched_pairs(reports, payloads, model_keys)
+    return MaterializedScreeningModels(
+        manifests={identity: item[0] for identity, item in loaded.items()},
+        costs={identity: item[1] for identity, item in loaded.items()},
+        compute=reports,
+        b1_compute={identity: report for identity, report in reports.items() if identity[0] == B1},
+    )
+
+
+def _load_one_readonly(
+    run_dir: Path,
+    config: ExperimentConfig,
+    key: TrainingArtifactKey,
+    data_manifest: TrainingDataArtifactManifest,
+    payload: Any,
+) -> tuple[TrainingArtifactManifest, TrainingArtifactCostRecord, ModelComputeReport]:
+    """Load one artifact and recompute its report without a forward execution."""
+
+    index = load_training_key_index(run_dir, key)
+    cost = load_training_cost(run_dir, key)
+    model, manifest = load_training_model(
+        run_dir,
+        index.artifact_id,
+        expected_key=key,
+        model_factory=_model_factory,
+    )
+    if model.training:
+        raise TrainingDataArtifactError("screening model loader did not return eval mode")
+    artifact_dir = run_dir / "training-artifacts" / manifest.artifact_id
+    try:
+        artifact_entries = tuple(artifact_dir.iterdir())
+    except OSError as exc:
+        raise TrainingDataArtifactError("screening model artifact is unreadable") from exc
+    if (
+        artifact_dir.is_symlink()
+        or {item.name for item in artifact_entries} != {"manifest.json", "tensors"}
+        or any(item.is_symlink() for item in artifact_entries)
+        or not (artifact_dir / "manifest.json").is_file()
+        or not (artifact_dir / "tensors").is_dir()
+    ):
+        raise TrainingDataArtifactError("screening model artifact inventory drifted")
+    if manifest.model_id != _expected_model_id(key.condition_id) or manifest.key != key:
+        raise TrainingDataArtifactError("screening model manifest identity drifted")
+    if cost.artifact_id != manifest.artifact_id or cost.key_id != key.key_id:
+        raise TrainingDataArtifactError("screening model cost lineage drifted")
+    if not isinstance(cost.accounting, TrainingPreparationAccounting):
+        raise TrainingDataArtifactError("screening model cost has the wrong preparation schema")
+    actual_parameters = sum(
+        parameter.numel() for parameter in model.parameters() if parameter.requires_grad
+    )
+    samples = learner_samples(payload)
+    if key.condition_id == B1:
+        features, targets = global_frequency_optimum_examples(samples)
+        if len(features) != len(targets):
+            raise TrainingDataArtifactError("B1 examples and targets are not aligned")
+        training_examples = len(features)
+    elif key.condition_id == B2:
+        training_examples = len(global_listwise_optimum_examples(samples))
+    elif key.condition_id == C:
+        training_examples = len(optimum_imitation_examples(samples))
+    else:
+        raise TrainingDataArtifactError("screening model has an unsupported condition")
+    epochs = _training_parameters(
+        config, key.condition_id, key.training_tuple_id
+    ).epochs
+    expected_forward_passes = (
+        epochs if key.condition_id == B1 else epochs * training_examples
+    )
+    expected_report = TrainingReportMetadata(
+        trainable_parameters=actual_parameters,
+        training_examples=training_examples,
+        optimizer_steps=epochs,
+        forward_passes=expected_forward_passes,
+    )
+    if manifest.report != expected_report:
+        raise TrainingDataArtifactError("screening model report is not canonically derived")
+    accounting = cost.accounting
+    if accounting.setup.wall_seconds <= 0 or accounting.training.wall_seconds <= 0:
+        raise TrainingDataArtifactError("screening model working-phase wall time is absent")
+    expected_training = PhaseAccounting(
+        calls=1,
+        optimizer_steps=epochs,
+        forward_passes=expected_forward_passes,
+        wall_seconds=accounting.training.wall_seconds,
+    )
+    expected_setup = PhaseAccounting(calls=1, wall_seconds=accounting.setup.wall_seconds)
+    expected_serialization = PhaseAccounting(calls=1)
+    if accounting.training != expected_training:
+        raise TrainingDataArtifactError("screening model training accounting drifted")
+    if accounting.setup != expected_setup or accounting.serialization != expected_serialization:
+        raise TrainingDataArtifactError("screening model preparation accounting drifted")
+    if (
+        accounting.training_probes != PhaseAccounting()
+        or accounting.reference_replay != PhaseAccounting()
+    ):
+        raise TrainingDataArtifactError("screening model includes unearned interaction cost")
+    if key.training_data_sha256 != data_manifest.artifact_id:
+        raise TrainingDataArtifactError("screening model references the wrong training view")
+    return manifest, cost, ModelComputeReport(
+        model_id=manifest.model_id,
+        objective_id=key.objective_id,
+        trainable_parameters=actual_parameters,
+        training_examples=training_examples,
+        optimizer_steps=epochs,
+        forward_passes=expected_forward_passes,
+        training_wall_seconds=accounting.training.wall_seconds,
+    )
+
+
+def load_screening_model_inventory(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    data: MaterializedScreeningData,
+    model_keys: ScreeningModelKeys,
+    run_dir: str | Path,
+) -> MaterializedScreeningModels:
+    """Read and validate all 60 model artifacts without training or inference."""
+
+    validate_screening_child_config(config)
+    if config.split.final_tasks:
+        raise ValueError("screening model inventory cannot receive final tasks")
+    if data_keys != build_screening_data_keys(config, data_keys.provenance):
+        raise ValueError("screening model inventory received noncanonical data keys")
+    if len(data_keys.evidence) != 5 or len(data_keys.views) != 15:
+        raise ValueError("screening model inventory received incomplete data keys")
+    expected_data = load_screening_data_inventory(config, data_keys, run_dir)
+    if expected_data != data:
+        raise TrainingDataArtifactError("screening model inventory data has drifted")
+    expected_model_keys = build_screening_model_keys(config, data_keys, data.manifests)
+    if model_keys != expected_model_keys or len(model_keys.models) != 60:
+        raise ValueError("screening model-key inventory is not the frozen 60-model matrix")
+
+    root = Path(run_dir)
+    if root.is_symlink() or not root.exists() or not root.is_dir():
+        raise TrainingDataArtifactError("screening model inventory root is missing or unsafe")
+    for parent in (root, *root.parents):
+        if parent.is_symlink():
+            raise TrainingDataArtifactError("screening model inventory has a symlinked ancestor")
+
+    expected_ids = {key.key_id for key in model_keys.models.values()}
+    expected_names = {f"{key_id}.json" for key_id in expected_ids}
+    _check_inventory(
+        root,
+        {
+            "screening-model-intents": (expected_names, "file"),
+            "training-artifact-keys": (expected_names, "file"),
+            "training-artifact-costs": (expected_names, "file"),
+        },
+    )
+    for identity, key in model_keys.models.items():
+        data_manifest = data.manifests.views[(identity[0], identity[2])]
+        intent_path = root / "screening-model-intents" / f"{key.key_id}.json"
+        if intent_path.read_bytes() != canonical_json_bytes(
+            _intent_body(config, key, data_manifest)
+        ) + b"\n":
+            raise TrainingDataArtifactError("screening model intent content drifted")
+
+    payloads = _validate_data(root, data_keys, data)
+    loaded: dict[ModelIdentity, tuple[TrainingArtifactManifest, TrainingArtifactCostRecord, ModelComputeReport]] = {}
+    artifact_ids: set[str] = set()
+    for identity, key in model_keys.models.items():
+        data_manifest = data.manifests.views[(identity[0], identity[2])]
+        item = _load_one_readonly(
+            root,
+            config,
+            key,
+            data_manifest,
+            payloads[(identity[0], identity[2])],
+        )
+        loaded[identity] = item
+        artifact_ids.add(item[0].artifact_id)
+    _check_inventory(root, {"training-artifacts": (artifact_ids, "directory")})
     reports = {identity: item[2] for identity, item in loaded.items()}
     _validate_matched_pairs(reports, payloads, model_keys)
     return MaterializedScreeningModels(

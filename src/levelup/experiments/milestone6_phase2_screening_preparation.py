@@ -9,6 +9,7 @@ held-out execution, aggregation, or selection, and it never loads final-family m
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import tempfile
 import time
@@ -61,6 +62,7 @@ from levelup.experiments.runner.training_data_artifacts import (
     TrainingDataArtifactManifest,
     TrainingDataEvidenceKey,
     TrainingDataEvidenceManifest,
+    TrainingDataPayload,
     evidence_key_for,
     load_training_data_artifact,
     load_training_data_evidence,
@@ -724,6 +726,219 @@ def _require_exact_data_namespace(
     )
     if observed != manifests:
         raise TrainingDataArtifactError("screening data namespace reload drifted")
+
+
+def _require_readonly_root(root: Path, *, label: str) -> None:
+    """Require an already-published, non-symlinked tree before any reads.
+
+    The materializers are allowed to create their output tree.  Public inventory
+    loaders are deliberately stricter: a missing path, a symlinked ancestor, or a
+    non-directory root is an invalid inventory rather than an invitation to create
+    state.  This also makes the no-write contract mechanically testable.
+    """
+
+    if root.is_symlink():
+        raise TrainingDataArtifactError(f"{label} cannot be a symlink")
+    if not root.exists() or not root.is_dir():
+        raise TrainingDataArtifactError(f"{label} must be an existing directory")
+    for parent in (root, *root.parents):
+        if parent.is_symlink():
+            raise TrainingDataArtifactError(f"{label} has a symlinked ancestor")
+
+
+def _require_readonly_namespace(
+    root: Path,
+    expected: dict[str, tuple[set[str], str]],
+) -> None:
+    """Require exact direct-entry inventories without creating or touching files."""
+
+    for name, (expected_names, entry_kind) in expected.items():
+        directory = root / name
+        if directory.is_symlink() or not directory.is_dir():
+            raise TrainingDataArtifactError(
+                f"screening data {name} namespace is missing or unsafe"
+            )
+        try:
+            entries = tuple(directory.iterdir())
+        except OSError as exc:
+            raise TrainingDataArtifactError(
+                f"screening data {name} namespace cannot be read"
+            ) from exc
+        if {entry.name for entry in entries} != expected_names:
+            raise TrainingDataArtifactError(
+                f"screening data {name} namespace inventory drifted"
+            )
+        for entry in entries:
+            if entry.is_symlink() or (
+                entry_kind == "file" and not entry.is_file()
+            ) or (entry_kind == "directory" and not entry.is_dir()):
+                raise TrainingDataArtifactError(
+                    f"screening data {name} namespace contains an unsafe entry"
+                )
+
+
+def _validate_evidence_accounting(
+    config: ExperimentConfig,
+    payload: TrainingDataPayload,
+    accounting: TrainingPreparationAccounting,
+) -> None:
+    """Recompute every recoverable evidence cost from learner-visible samples.
+
+    Sanitization deliberately removes probe transition order and wall-clock samples,
+    so attempt count and elapsed time cannot be reconstructed without re-running the
+    environment.  They are nevertheless constrained to their exact phase schema,
+    call/reset identity, physically possible bounds, and positive first-writer wall
+    totals.  Actions and replay work are recomputed exactly from the payload.
+    """
+
+    sample_count = len(payload.samples)
+    if sample_count != 40:
+        raise TrainingDataArtifactError("screening evidence does not contain 40 samples")
+    action_cap = int(config.parameters["probe_action_cap"])
+    actions_per_attempt = int(config.parameters["probe_actions_per_attempt"])
+    probe_actions_by_sample = tuple(
+        sum(sample.affordances.sample_counts.values()) for sample in payload.samples
+    )
+    if any(actions != action_cap for actions in probe_actions_by_sample):
+        raise TrainingDataArtifactError("screening evidence did not spend the declared probe cap")
+    probe_actions = sum(probe_actions_by_sample)
+    minimum_probe_calls = sum(
+        math.ceil(actions / actions_per_attempt) for actions in probe_actions_by_sample
+    )
+    probe_calls = accounting.training_probes.calls
+    if (
+        probe_calls != accounting.training_probes.resets
+        or not minimum_probe_calls <= probe_calls <= probe_actions
+    ):
+        raise TrainingDataArtifactError("screening evidence probe attempts are inconsistent")
+    replay_actions = 2 * sum(
+        len(sample.trace.transitions) for sample in payload.samples
+    )
+    if (
+        accounting.setup.wall_seconds <= 0
+        or accounting.training_probes.wall_seconds <= 0
+        or accounting.reference_replay.wall_seconds <= 0
+    ):
+        raise TrainingDataArtifactError("screening evidence working-phase wall time is absent")
+    expected = TrainingPreparationAccounting(
+        setup=PhaseAccounting(
+            calls=sample_count,
+            wall_seconds=accounting.setup.wall_seconds,
+        ),
+        training_probes=PhaseAccounting(
+            calls=probe_calls,
+            actions=probe_actions,
+            environment_steps=probe_actions,
+            resets=probe_calls,
+            wall_seconds=accounting.training_probes.wall_seconds,
+        ),
+        reference_replay=PhaseAccounting(
+            calls=sample_count,
+            actions=replay_actions,
+            environment_steps=replay_actions,
+            resets=sample_count * 2,
+            wall_seconds=accounting.reference_replay.wall_seconds,
+        ),
+        serialization=PhaseAccounting(calls=1),
+    )
+    if accounting != expected:
+        raise TrainingDataArtifactError("screening evidence accounting is not canonical")
+
+
+def load_screening_data_inventory(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    output_root: str | Path,
+) -> MaterializedScreeningData:
+    """Read and validate the complete 5-evidence/15-view inventory.
+
+    This is intentionally separate from :func:`materialize_screening_data`.  It
+    requires every publication marker and every content-addressed artifact to
+    already exist, and never claims intents, creates directories, probes, replays,
+    or writes anything.
+    """
+
+    validate_screening_child_config(config)
+    if config.split.final_tasks:
+        raise ValueError("screening data inventory cannot receive final tasks")
+    if data_keys != build_screening_data_keys(config, data_keys.provenance):
+        raise ValueError("screening data inventory received noncanonical data keys")
+    if len(data_keys.evidence) != 5 or len(data_keys.views) != 15:
+        raise TrainingDataArtifactError("screening data inventory is not exactly 5+15")
+
+    run_dir = Path(output_root)
+    _require_readonly_root(run_dir, label="screening data inventory root")
+    expected_intents = {
+        f"{key.key_id}.json" for key in data_keys.evidence.values()
+    }
+    expected_evidence_costs = set(expected_intents)
+    expected_view_costs = {
+        f"{key.key_id}.json" for key in data_keys.views.values()
+    }
+    expected_view_keys = set(expected_view_costs)
+    _require_readonly_namespace(
+        run_dir,
+        {
+            "screening-data-intents": (expected_intents, "file"),
+            "training-data-evidence-costs": (expected_evidence_costs, "file"),
+            "training-data-view-costs": (expected_view_costs, "file"),
+            "training-data-artifact-keys": (expected_view_keys, "file"),
+        },
+    )
+
+    for replicate, key in data_keys.evidence.items():
+        intent = run_dir / "screening-data-intents" / f"{key.key_id}.json"
+        if intent.read_bytes() != canonical_json_bytes(_intent_body(config, data_keys, replicate)):
+            raise TrainingDataArtifactError("screening data intent content drifted")
+
+    evidence: dict[int, TrainingDataEvidenceManifest] = {}
+    views: dict[tuple[str, int], TrainingDataArtifactManifest] = {}
+    evidence_cost_ids: dict[int, str] = {}
+    view_cost_ids: dict[tuple[str, int], str] = {}
+    evidence_payloads: dict[int, TrainingDataPayload] = {}
+    evidence_artifact_ids: set[str] = set()
+    view_artifact_ids: set[str] = set()
+    for replicate, key in data_keys.evidence.items():
+        cost = load_training_data_evidence_cost(run_dir, key)
+        manifest, payload = load_training_data_evidence(
+            run_dir, cost.artifact_id, expected_key=key
+        )
+        if cost.artifact_id != manifest.evidence_id:
+            raise TrainingDataArtifactError("screening evidence cost lineage drifted")
+        evidence[replicate] = manifest
+        evidence_payloads[replicate] = payload
+        evidence_cost_ids[replicate] = cost.cost_id
+        evidence_artifact_ids.add(manifest.evidence_id)
+        _validate_evidence_accounting(config, payload, cost.accounting)
+    for identity, key in data_keys.views.items():
+        cost = load_training_data_view_cost(run_dir, key)
+        manifest, _ = load_training_data_artifact(run_dir, expected_key=key)
+        if cost.artifact_id != manifest.artifact_id:
+            raise TrainingDataArtifactError("screening view cost lineage drifted")
+        if cost.accounting != TrainingPreparationAccounting(
+            serialization=PhaseAccounting(calls=1)
+        ):
+            raise TrainingDataArtifactError("screening view accounting is not canonical")
+        views[identity] = manifest
+        view_cost_ids[identity] = cost.cost_id
+        view_artifact_ids.add(manifest.artifact_id)
+
+    manifests = ScreeningDataManifests(evidence=evidence, views=views)
+    if set(evidence_payloads) != set(data_keys.evidence):
+        raise TrainingDataArtifactError("screening evidence payload inventory is incomplete")
+    _validate_data_manifests(data_keys, manifests)
+    _require_readonly_namespace(
+        run_dir,
+        {
+            "training-data-evidence": (evidence_artifact_ids, "directory"),
+            "training-data-artifacts": (view_artifact_ids, "directory"),
+        },
+    )
+    return MaterializedScreeningData(
+        manifests=manifests,
+        evidence_cost_ids=evidence_cost_ids,
+        view_cost_ids=view_cost_ids,
+    )
 
 
 def materialize_screening_data(

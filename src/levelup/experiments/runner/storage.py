@@ -248,6 +248,148 @@ class RunStore:
         self._validate_shared_plan()
         self._execution_ready = False
 
+    @staticmethod
+    def _validate_prepared_path(path: Path, *, kind: str) -> Path:
+        """Validate a prepared path without creating or opening its contents."""
+
+        # Check every textual ancestor before resolving the path.  Resolving
+        # first would make a symlinked run directory look like an ordinary
+        # prepared directory and would also make a later check race-prone.
+        absolute = Path(os.path.abspath(path))
+        current = absolute
+        while True:
+            if current.is_symlink():
+                raise ArtifactValidationError(
+                    f"refusing symlink {kind} path: {path}"
+                )
+            if current.parent == current:
+                break
+            current = current.parent
+        if kind.endswith("directory"):
+            if not absolute.is_dir():
+                raise ArtifactValidationError(f"missing prepared {kind}: {path}")
+        elif not absolute.is_file():
+            raise ArtifactValidationError(f"missing prepared {kind}: {path}")
+        return absolute.resolve(strict=False)
+
+    @staticmethod
+    def _require_canonical_bytes(
+        path: Path,
+        expected: bytes,
+        *,
+        kind: str,
+    ) -> bytes:
+        try:
+            observed = path.read_bytes()
+        except OSError as exc:
+            raise ArtifactValidationError(f"cannot read prepared {kind}: {path}") from exc
+        if observed != expected:
+            raise ArtifactValidationError(f"non-canonical prepared {kind}: {path.name}")
+        return observed
+
+    @classmethod
+    def _activate_prepared_batch(
+        cls,
+        stores: tuple["RunStore", ...],
+        provenance: SystemProvenance,
+    ) -> None:
+        """Internally activate already-prepared stores as one transaction.
+
+        The internal caller must have just applied the runtime policy and
+        captured ``provenance`` from the current execution environment.
+        Preparation must have created all plans and stored provenance already;
+        this read-only boundary only verifies those bytes and flips the
+        in-memory execution gates after every store has passed validation.
+        Public callers must continue to use ``initialize(for_execution=True)``
+        so policy application and live provenance capture cannot be skipped.
+        """
+
+        try:
+            provided = tuple(stores)
+        except TypeError as exc:
+            raise ArtifactValidationError("prepared stores must be iterable") from exc
+
+        # Clear stale readiness before any validation.  A failed reactivation
+        # must never leave a previously-ready store usable.
+        for store in provided:
+            if isinstance(store, cls):
+                store._execution_ready = False
+        if not provided:
+            raise ArtifactValidationError("prepared store batch cannot be empty")
+        if any(not isinstance(store, cls) for store in provided):
+            raise ArtifactValidationError("prepared batch contains a non-RunStore")
+        if not isinstance(provenance, SystemProvenance):
+            raise ArtifactValidationError("prepared batch provenance is invalid")
+        provenance = _revalidate_instance(provenance, SystemProvenance)
+
+        run_ids = [store.run_id for store in provided]
+        if len(run_ids) != len(set(run_ids)):
+            raise ArtifactValidationError("prepared batch contains duplicate run IDs")
+
+        canonical_paths: list[Path] = []
+        for store in provided:
+            canonical_paths.append(
+                cls._validate_prepared_path(store.run_dir, kind="run directory")
+            )
+        if len(canonical_paths) != len(set(canonical_paths)):
+            raise ArtifactValidationError("prepared batch contains duplicate run paths")
+
+        for store in provided:
+            config_path = cls._validate_prepared_path(
+                store.run_dir / "config.json", kind="config file"
+            )
+            expected_path = cls._validate_prepared_path(
+                store.run_dir / "expected-units.json", kind="expected-units file"
+            )
+            shared_path = cls._validate_prepared_path(
+                store.run_dir / "expected-shared-artifacts.json",
+                kind="expected-shared-artifacts file",
+            )
+            provenance_path = cls._validate_prepared_path(
+                store.run_dir / "provenance.json", kind="provenance file"
+            )
+            cls._validate_prepared_path(store.units_dir, kind="units directory")
+            cls._validate_prepared_path(store.attempts_dir, kind="attempts directory")
+
+            cls._require_canonical_bytes(
+                config_path,
+                canonical_json_bytes(scientific_config_value(store.config)) + b"\n",
+                kind="config",
+            )
+            cls._require_canonical_bytes(
+                expected_path,
+                canonical_json_bytes(store.expected.model_dump(mode="json")) + b"\n",
+                kind="expected-units",
+            )
+            cls._require_canonical_bytes(
+                shared_path,
+                canonical_json_bytes(store.expected_shared.model_dump(mode="json")) + b"\n",
+                kind="expected-shared-artifacts",
+            )
+            stored_provenance = _load_model(provenance_path, SystemProvenance)
+            cls._require_canonical_bytes(
+                provenance_path,
+                canonical_json_bytes(
+                    stored_provenance.model_dump(mode="json", warnings=False)
+                )
+                + b"\n",
+                kind="provenance",
+            )
+            if _provenance_identity(stored_provenance) != _provenance_identity(provenance):
+                raise ArtifactValidationError(
+                    "prepared provenance identity does not match supplied provenance"
+                )
+            _validate_provenance_policy(
+                provenance,
+                store.config,
+                provenance.resolved_device,
+            )
+
+        # No mutation, policy application, or provenance capture occurs above
+        # this point.  The batch becomes usable only after every store passes.
+        for store in provided:
+            store._execution_ready = True
+
     def _validate_shared_plan(self) -> None:
         units = {unit.unit_id: unit for unit in self.expected.units}
         conditions = {condition.condition_id for condition in self.config.conditions}
