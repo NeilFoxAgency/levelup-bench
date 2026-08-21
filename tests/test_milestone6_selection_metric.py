@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -14,6 +15,8 @@ from levelup.experiments.runner.records import (
     UnitSeeds,
 )
 from levelup.experiments.runner.selection_metric import (
+    _FROZEN_AUTHORITY_FAMILY_IDS_SHA256,
+    _FROZEN_FAMILY_ORDER,
     _SPEC_CONSTRUCTION_TOKEN,
     ExpectedSelectionUnit,
     SelectionMetricSpec,
@@ -109,6 +112,9 @@ def _spec(
 ) -> SelectionMetricSpec:
     if family_universe is None:
         family_universe = tuple(sorted({record.key.family_id for record in records}))
+    authority_family_ids = (
+        _FROZEN_FAMILY_ORDER if family_universe == _FROZEN_FAMILY_ORDER else ()
+    )
     return SelectionMetricSpec(
         condition_id="variant",
         phase="validation",
@@ -118,6 +124,10 @@ def _spec(
         screening_candidates_sha256="d" * 64,
         task_manifest_sha256="e" * 64,
         family_universe=family_universe,
+        authority_family_ids=authority_family_ids,
+        authority_family_ids_sha256=(
+            _FROZEN_AUTHORITY_FAMILY_IDS_SHA256 if authority_family_ids else ""
+        ),
         expected_units=tuple(
             ExpectedSelectionUnit(
                 run_id=record.run_id,
@@ -216,49 +226,79 @@ def test_restricted_metric_excludes_replay_evaluator_and_training_phases() -> No
 
 def test_summarize_variant_aggregates_within_family_before_equal_family_weighting() -> None:
     records = (
-        _record(family_id="family-a", index=0, probe_actions=4, search_actions=6, first_hit=10),
-        _record(family_id="family-a", index=1, probe_actions=8, search_actions=12, first_hit=20),
-        _record(family_id="family-b", index=2, probe_actions=10, search_actions=20, first_hit=30),
+        _record(family_id="plain", index=0, probe_actions=4, search_actions=6, first_hit=10),
+        _record(family_id="plain", index=1, probe_actions=8, search_actions=12, first_hit=20),
+        _record(family_id="battery", index=2, probe_actions=10, search_actions=20, first_hit=30),
         _record(
-            family_id="family-b",
+            family_id="battery",
             index=3,
             probe_actions=12,
             search_actions=18,
             first_hit=None,
             success=False,
         ),
+        *(
+            _record(
+                family_id=family_id,
+                index=index,
+                probe_actions=10,
+                search_actions=20,
+                first_hit=30,
+            )
+            for index, family_id in enumerate(_FROZEN_FAMILY_ORDER[2:], start=4)
+        ),
     )
 
-    summary = summarize_variant(records, _spec(records))
+    summary = summarize_variant(
+        records,
+        _spec(records, family_universe=_FROZEN_FAMILY_ORDER),
+    )
 
     assert summary.minimum_family_exact_optimum_success_rate == pytest.approx(0.5)
     assert summary.worst_family_median_restricted_interactions == pytest.approx(47.5)
-    assert summary.macro_average_family_median_restricted_interactions == pytest.approx(31.25)
-    assert tuple(family.family_id for family in summary.families) == ("family-a", "family-b")
-    assert tuple(family.exact_optimum_success_rate for family in summary.families) == (
-        1.0,
-        0.5,
+    assert summary.macro_average_family_median_restricted_interactions == pytest.approx(
+        30.4166666667
     )
-    # The pooled median would be 25; the selected summary is the macro-average of family medians.
-    assert summary.macro_average_family_median_restricted_interactions != pytest.approx(25.0)
+    assert tuple(family.family_id for family in summary.families) == tuple(
+        sorted(_FROZEN_FAMILY_ORDER)
+    )
+    assert tuple(family.exact_optimum_success_rate for family in summary.families) == (
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    )
+    # The pooled median would be 30; the selected summary equal-weights family medians.
+    assert summary.macro_average_family_median_restricted_interactions != pytest.approx(30.0)
 
 
 def test_summarize_variant_rejects_duplicate_missing_and_extra_units() -> None:
-    first = _record(index=0)
-    second = _record(index=1)
-    spec = _spec((first, second))
+    records = tuple(
+        _record(family_id=family_id, index=index)
+        for index, family_id in enumerate(_FROZEN_FAMILY_ORDER)
+    )
+    spec = _spec(records, family_universe=_FROZEN_FAMILY_ORDER)
 
-    for malformed in ((first, first), (first,), (first, second, _record(index=2))):
+    for malformed in (
+        (records[0], records[0], *records[2:]),
+        records[:-1],
+        (*records, _record(family_id="plain", index=99)),
+    ):
         with pytest.raises(ValueError):
             summarize_variant(malformed, spec)
 
 
 def test_summarize_variant_rejects_incomplete_frozen_family_universe() -> None:
-    record = _record(family_id="family-a")
-    spec = _spec((record,), family_universe=("family-a", "family-b"))
+    record = _record(family_id="plain")
+    spec = _spec((record,), family_universe=_FROZEN_FAMILY_ORDER)
 
     with pytest.raises(ValueError, match="complete frozen family universe"):
         summarize_variant((record,), spec)
+    forged_subset = _spec((record,), family_universe=("plain",))
+    with pytest.raises(ValueError, match="complete frozen family universe"):
+        summarize_variant((record,), forged_subset)
 
 
 def test_selection_spec_rejects_final_or_mixed_phase_expected_units() -> None:
@@ -361,15 +401,19 @@ def test_shared_selection_requires_planned_keys_candidate_hash_and_zero_local_tr
 
 
 def test_merge_selection_specs_requires_compatible_disjoint_families() -> None:
-    family_a = _record(family_id="family-a", index=0)
-    family_b = _record(family_id="family-b", index=1)
-    universe = ("family-a", "family-b")
-    left = _spec((family_a,), family_universe=universe)
-    right = _spec((family_b,), family_universe=universe)
+    records = tuple(
+        _record(family_id=family_id, index=index)
+        for index, family_id in enumerate(_FROZEN_FAMILY_ORDER)
+    )
+    specs = tuple(
+        _spec((record,), family_universe=_FROZEN_FAMILY_ORDER)
+        for record in records
+    )
+    left, right = specs[:2]
 
-    merged = merge_selection_metric_specs((left, right))
-    assert merged.family_ids == frozenset({"family-a", "family-b"})
-    assert len(merged.expected_units) == 2
+    merged = merge_selection_metric_specs(specs)
+    assert merged.family_ids == frozenset(_FROZEN_FAMILY_ORDER)
+    assert len(merged.expected_units) == len(_FROZEN_FAMILY_ORDER)
 
     with pytest.raises(ValueError, match="at least one"):
         merge_selection_metric_specs(())
@@ -377,9 +421,26 @@ def test_merge_selection_specs_requires_compatible_disjoint_families() -> None:
         merge_selection_metric_specs((left, left))
     with pytest.raises(ValueError, match="family universe"):
         merge_selection_metric_specs((left,))
-    incompatible = _spec((family_b,), endpoint=32, family_universe=universe)
+    with pytest.raises(ValueError, match="authority family universe"):
+        merge_selection_metric_specs(
+            (
+                replace(
+                    left,
+                    authority_family_ids=(),
+                    authority_family_ids_sha256="",
+                    _construction_token=_SPEC_CONSTRUCTION_TOKEN,
+                ),
+                *specs[1:],
+            )
+        )
+    incompatible = replace(
+        right,
+        endpoint=32,
+        failure_sentinel=33,
+        _construction_token=_SPEC_CONSTRUCTION_TOKEN,
+    )
     with pytest.raises(ValueError, match="incompatible"):
-        merge_selection_metric_specs((left, incompatible))
+        merge_selection_metric_specs((*specs[:1], incompatible, *specs[2:]))
 
 
 @pytest.mark.parametrize(

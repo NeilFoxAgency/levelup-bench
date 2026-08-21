@@ -1,17 +1,30 @@
-"""Concrete development-screening keys and shared plans without materialization.
+"""Concrete development-screening keys, shared plans, and data materialization.
 
 This module binds the frozen logical lineage plan to content-addressed evidence, view,
-and model keys.  It performs no probing, training, held-out execution, aggregation, or
-selection, and it never loads final-family material.
+and model keys.  Its explicit data-materialization entry point performs paid probes and
+reference replay on development training tasks only.  It performs no model training,
+held-out execution, aggregation, or selection, and it never loads final-family material.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from levelup.experiments.milestone6_phase2 import _training_probe_seed
+from levelup.experiments.milestone6_baselines import (
+    build_clean_optimum_training_sample,
+)
+from levelup.experiments.milestone6_phase2 import (
+    _forbidden_aliases,
+    _training_probe_seed,
+    reconstruct_development_training_task,
+)
 from levelup.experiments.milestone6_phase2_screening import (
     B1,
     B2,
@@ -30,9 +43,11 @@ from levelup.experiments.runner.config import (
 from levelup.experiments.runner.records import (
     ExpectedSharedArtifacts,
     ExpectedUnits,
+    PhaseAccounting,
     PlannedSharedArtifact,
     PlannedUnit,
     SystemProvenance,
+    TrainingPreparationAccounting,
 )
 from levelup.experiments.runner.storage import (
     expected_units_sha256,
@@ -41,11 +56,18 @@ from levelup.experiments.runner.storage import (
 )
 from levelup.experiments.runner.training_artifacts import TrainingArtifactKey
 from levelup.experiments.runner.training_data_artifacts import (
+    TrainingDataArtifactError,
     TrainingDataArtifactKey,
     TrainingDataArtifactManifest,
     TrainingDataEvidenceKey,
     TrainingDataEvidenceManifest,
     evidence_key_for,
+    load_training_data_artifact,
+    load_training_data_evidence,
+    load_training_data_evidence_cost,
+    load_training_data_view_cost,
+    sanitize_clean_optimum_samples,
+    write_training_data_artifact,
 )
 
 _REPRESENTATIONS = {
@@ -72,6 +94,13 @@ _MODEL_IDENTITIES = {
         "state_conditioned_mlp_listwise_v1",
     ),
 }
+PreparationEvent = Callable[[str], None]
+LoadedScreeningReplicate = tuple[
+    TrainingDataEvidenceManifest,
+    dict[tuple[str, int], TrainingDataArtifactManifest],
+    str,
+    dict[tuple[str, int], str],
+]
 
 
 def _digest(value: Any) -> str:
@@ -100,6 +129,15 @@ class ScreeningModelKeys:
     """Sixty temperature-independent model keys for one fold."""
 
     models: dict[tuple[str, str, int], TrainingArtifactKey]
+
+
+@dataclass(frozen=True, slots=True)
+class MaterializedScreeningData:
+    """Fully reloaded 5+15 data inventory for one screening fold."""
+
+    manifests: ScreeningDataManifests
+    evidence_cost_ids: dict[int, str]
+    view_cost_ids: dict[tuple[str, int], str]
 
 
 def _learned_condition_ids(config: ExperimentConfig, base: str) -> tuple[str, ...]:
@@ -284,6 +322,453 @@ def _validate_data_manifests(
     view_ids = {item.artifact_id for item in manifests.views.values()}
     if len(evidence_ids) != 5 or len(view_ids) != 15 or evidence_ids & view_ids:
         raise ValueError("screening data manifest identities collide")
+
+
+def _screening_training_batch(
+    config: ExperimentConfig,
+    *,
+    replicate: int,
+) -> tuple[Any, TrainingPreparationAccounting]:
+    """Build one canonical paid-probe/optimum batch across all 40 training tasks."""
+
+    snapshot = _authority_snapshot()
+    condition = next(
+        item
+        for item in config.conditions
+        if item.parameters.get("base_condition_id") == B1
+    )
+    exposure_by_task = {
+        item.task_id: item for item in condition.exposure.exposed_trajectories
+    }
+    if tuple(condition.exposure.train_task_ids) != tuple(
+        task.task_id for task in config.split.development_tasks
+    ):
+        raise ValueError("screening materialization training order drifted")
+    samples = []
+    setup_wall = 0.0
+    probe_calls = probe_actions = probe_resets = 0
+    probe_wall = 0.0
+    replay_calls = replay_actions = replay_resets = 0
+    replay_wall = 0.0
+    for task in config.split.development_tasks:
+        setup_started = time.perf_counter()
+        reconstruction = reconstruct_development_training_task(
+            family=task.family_id,
+            task_index=task.task_index,
+            generator_seed=task.generator_seed,
+            expected_task_id=task.task_id,
+        )
+        setup_wall += time.perf_counter() - setup_started
+        exposure = exposure_by_task[task.task_id]
+        trajectory = reconstruction.trajectories.get(exposure.trajectory_id)
+        if trajectory is None:
+            raise ValueError("screening optimum exposure is absent from reconstruction")
+        sample = build_clean_optimum_training_sample(
+            reconstruction.environment,
+            trajectory,
+            task_identity=task,
+            exposure=exposure,
+            forbidden_aliases=_forbidden_aliases(reconstruction.environment),
+            probe_seed=_training_probe_seed(
+                task,
+                replicate=replicate,
+                protocol=snapshot.protocol,
+            ),
+            probe_action_cap=int(config.parameters["probe_action_cap"]),
+            target_samples_per_alias=int(
+                config.parameters["probe_coverage_target_samples_per_alias"]
+            ),
+            probe_actions_per_attempt=int(config.parameters["probe_actions_per_attempt"]),
+        )
+        samples.append(sample)
+        probe_calls += sample.probe.accounting.attempts
+        probe_actions += sample.probe.accounting.actions
+        probe_resets += sample.probe.accounting.resets
+        probe_wall += sample.probe.accounting.wall_seconds
+        replay_calls += sample.reference.evaluator_calls
+        replay_actions += (
+            sample.reference.evaluator_replay_actions
+            + sample.reference.observable_replay_actions
+        )
+        replay_resets += sample.reference.resets
+        replay_wall += (
+            sample.reference.evaluator_wall_seconds
+            + sample.reference.observable_replay_wall_seconds
+        )
+    sanitized = sanitize_clean_optimum_samples(tuple(samples))
+    return sanitized, TrainingPreparationAccounting(
+        setup=PhaseAccounting(calls=len(samples), wall_seconds=setup_wall),
+        training_probes=PhaseAccounting(
+            calls=probe_calls,
+            actions=probe_actions,
+            environment_steps=probe_actions,
+            resets=probe_resets,
+            wall_seconds=probe_wall,
+        ),
+        reference_replay=PhaseAccounting(
+            calls=replay_calls,
+            actions=replay_actions,
+            environment_steps=replay_actions,
+            resets=replay_resets,
+            wall_seconds=replay_wall,
+        ),
+        serialization=PhaseAccounting(calls=1),
+    )
+
+
+def _intent_body(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    replicate: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "milestone6.screening-data-intent.v1",
+        "run_id": run_id_for(config),
+        "config_sha256": scientific_config_sha256(config),
+        "replicate": replicate,
+        "evidence_key_id": data_keys.evidence[replicate].key_id,
+        "view_key_ids": [
+            data_keys.views[(base, replicate)].key_id for base in LEARNED_BASES
+        ],
+    }
+
+
+def _intent_path(run_dir: Path, evidence_key_id: str) -> Path:
+    return run_dir / "screening-data-intents" / f"{evidence_key_id}.json"
+
+
+def _claim_materialization_intent(path: Path, body: dict[str, Any]) -> bool:
+    """Publish one intent atomically and report whether this caller won the claim."""
+
+    payload = canonical_json_bytes(body)
+    if os.path.lexists(path):
+        if path.is_symlink() or not path.is_file():
+            raise TrainingDataArtifactError(
+                "screening data intent must be a regular non-symlink file"
+            )
+        try:
+            observed = path.read_bytes()
+        except OSError as exc:
+            raise TrainingDataArtifactError("cannot read screening data intent") from exc
+        if observed != payload:
+            raise TrainingDataArtifactError("screening data intent conflicts")
+        return False
+    if path.parent.is_symlink() or path.parent.parent.is_symlink():
+        raise TrainingDataArtifactError("screening data intent path cannot be a symlink")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink() or not path.parent.is_dir():
+        raise TrainingDataArtifactError("screening data intent directory is unsafe")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        dir=path.parent,
+    )
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temporary_name, path)
+        except FileExistsError:
+            if path.is_symlink() or not path.is_file():
+                raise TrainingDataArtifactError(
+                    "concurrent screening data intent claim is unsafe"
+                )
+            try:
+                observed = path.read_bytes()
+            except OSError as exc:
+                raise TrainingDataArtifactError(
+                    "cannot read concurrent screening data intent"
+                ) from exc
+            if observed != payload:
+                raise TrainingDataArtifactError(
+                    "concurrent screening data intent conflicts"
+                )
+            return False
+        return True
+    finally:
+        try:
+            os.unlink(temporary_name)
+        except FileNotFoundError:
+            pass
+
+
+def _load_screening_data_replicate(
+    run_dir: Path,
+    data_keys: ScreeningDataKeys,
+    replicate: int,
+) -> tuple[
+    TrainingDataEvidenceManifest,
+    dict[tuple[str, int], TrainingDataArtifactManifest],
+    str,
+    dict[tuple[str, int], str],
+]:
+    evidence_key = data_keys.evidence[replicate]
+    evidence_cost = load_training_data_evidence_cost(run_dir, evidence_key)
+    evidence_manifest, _ = load_training_data_evidence(
+        run_dir,
+        evidence_cost.artifact_id,
+        expected_key=evidence_key,
+    )
+    views: dict[tuple[str, int], TrainingDataArtifactManifest] = {}
+    view_cost_ids: dict[tuple[str, int], str] = {}
+    for base in LEARNED_BASES:
+        identity = (base, replicate)
+        key = data_keys.views[identity]
+        manifest, _ = load_training_data_artifact(run_dir, expected_key=key)
+        cost = load_training_data_view_cost(run_dir, key)
+        if (
+            cost.artifact_id != manifest.artifact_id
+            or manifest.evidence_id != evidence_manifest.evidence_id
+            or manifest.payload_sha256 != evidence_manifest.payload_sha256
+            or manifest.payload_bytes != evidence_manifest.payload_bytes
+        ):
+            raise TrainingDataArtifactError("screening data replicate lineage drifted")
+        views[identity] = manifest
+        view_cost_ids[identity] = cost.cost_id
+    return evidence_manifest, views, evidence_cost.cost_id, view_cost_ids
+
+
+def _require_namespace_inventory(
+    run_dir: Path,
+    expected: dict[str, tuple[set[str], str]],
+) -> None:
+    for name, (expected_names, entry_kind) in expected.items():
+        directory = run_dir / name
+        if not expected_names:
+            if os.path.lexists(directory):
+                raise TrainingDataArtifactError(
+                    "screening data has an unclaimed or partial namespace"
+                )
+            continue
+        if directory.is_symlink() or not directory.is_dir():
+            raise TrainingDataArtifactError("screening data namespace is missing or unsafe")
+        entries = tuple(directory.iterdir())
+        if {entry.name for entry in entries} != expected_names:
+            raise TrainingDataArtifactError("screening data namespace inventory drifted")
+        for entry in entries:
+            if entry.is_symlink() or (
+                entry_kind == "file" and not entry.is_file()
+            ) or (entry_kind == "directory" and not entry.is_dir()):
+                raise TrainingDataArtifactError(
+                    "screening data namespace contains an unsafe entry"
+                )
+
+
+def _preflight_existing_data_namespace(
+    run_dir: Path,
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+) -> dict[int, LoadedScreeningReplicate]:
+    """Load every claimed replicate and reject all other namespace state."""
+
+    expected_intents = {
+        f"{key.key_id}.json": replicate
+        for replicate, key in data_keys.evidence.items()
+    }
+    intent_root = run_dir / "screening-data-intents"
+    claimed: dict[int, Path] = {}
+    if os.path.lexists(intent_root):
+        if intent_root.is_symlink() or not intent_root.is_dir():
+            raise TrainingDataArtifactError("screening data intent namespace is unsafe")
+        for entry in intent_root.iterdir():
+            replicate = expected_intents.get(entry.name)
+            if (
+                replicate is None
+                or entry.is_symlink()
+                or not entry.is_file()
+            ):
+                raise TrainingDataArtifactError(
+                    "screening data intent namespace contains an unexpected entry"
+                )
+            claimed[replicate] = entry
+
+    loaded: dict[int, LoadedScreeningReplicate] = {}
+    for replicate in sorted(claimed):
+        _claim_materialization_intent(
+            claimed[replicate],
+            _intent_body(config, data_keys, replicate),
+        )
+        loaded[replicate] = _load_screening_data_replicate(
+            run_dir,
+            data_keys,
+            replicate,
+        )
+
+    expected_evidence_ids = {
+        item[0].evidence_id for item in loaded.values()
+    }
+    expected_view_ids = {
+        manifest.artifact_id
+        for item in loaded.values()
+        for manifest in item[1].values()
+    }
+    claimed_replicates = set(loaded)
+    _require_namespace_inventory(
+        run_dir,
+        {
+            "screening-data-intents": (
+                {
+                    f"{data_keys.evidence[replicate].key_id}.json"
+                    for replicate in claimed_replicates
+                },
+                "file",
+            ),
+            "training-data-evidence-costs": (
+                {
+                    f"{data_keys.evidence[replicate].key_id}.json"
+                    for replicate in claimed_replicates
+                },
+                "file",
+            ),
+            "training-data-view-costs": (
+                {
+                    f"{data_keys.views[(base, replicate)].key_id}.json"
+                    for replicate in claimed_replicates
+                    for base in LEARNED_BASES
+                },
+                "file",
+            ),
+            "training-data-artifact-keys": (
+                {
+                    f"{data_keys.views[(base, replicate)].key_id}.json"
+                    for replicate in claimed_replicates
+                    for base in LEARNED_BASES
+                },
+                "file",
+            ),
+            "training-data-evidence": (expected_evidence_ids, "directory"),
+            "training-data-artifacts": (expected_view_ids, "directory"),
+        },
+    )
+    return loaded
+
+
+def _prepare_screening_data_replicate(
+    run_dir: Path,
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    replicate: int,
+    *,
+    event: PreparationEvent | None = None,
+) -> tuple[
+    TrainingDataEvidenceManifest,
+    dict[tuple[str, int], TrainingDataArtifactManifest],
+    str,
+    dict[tuple[str, int], str],
+]:
+    """Materialize one replicate once; any interrupted/corrupt state fails closed."""
+
+    if replicate not in data_keys.evidence:
+        raise ValueError("unknown screening data replicate")
+    loaded_replicates = _preflight_existing_data_namespace(run_dir, config, data_keys)
+    if replicate in loaded_replicates:
+        if event is not None:
+            event(f"replicate_loaded:{replicate}")
+        return loaded_replicates[replicate]
+    intent = _intent_path(run_dir, data_keys.evidence[replicate].key_id)
+    if not _claim_materialization_intent(
+        intent,
+        _intent_body(config, data_keys, replicate),
+    ):
+        raise TrainingDataArtifactError(
+            "screening data replicate was claimed concurrently; retry only after completion"
+        )
+    if event is not None:
+        event(f"replicate_build:{replicate}")
+    try:
+        sanitized, evidence_accounting = _screening_training_batch(
+            config,
+            replicate=replicate,
+        )
+        view_accounting = TrainingPreparationAccounting(
+            serialization=PhaseAccounting(calls=1)
+        )
+        for base in LEARNED_BASES:
+            write_training_data_artifact(
+                run_dir,
+                data_keys.views[(base, replicate)],
+                sanitized,
+                evidence_accounting=evidence_accounting,
+                view_accounting=view_accounting,
+            )
+    except Exception as exc:
+        raise TrainingDataArtifactError(
+            "screening data materialization interrupted; intent remains fail-closed"
+        ) from exc
+    completed = _preflight_existing_data_namespace(run_dir, config, data_keys)
+    try:
+        return completed[replicate]
+    except KeyError as exc:
+        raise TrainingDataArtifactError(
+            "screening data materialization did not publish its claimed replicate"
+        ) from exc
+
+
+def _require_exact_data_namespace(
+    run_dir: Path,
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    manifests: ScreeningDataManifests,
+) -> None:
+    loaded = _preflight_existing_data_namespace(run_dir, config, data_keys)
+    if set(loaded) != set(data_keys.evidence):
+        raise TrainingDataArtifactError("screening data namespace is incomplete")
+    observed = ScreeningDataManifests(
+        evidence={replicate: item[0] for replicate, item in loaded.items()},
+        views={
+            identity: manifest
+            for item in loaded.values()
+            for identity, manifest in item[1].items()
+        },
+    )
+    if observed != manifests:
+        raise TrainingDataArtifactError("screening data namespace reload drifted")
+
+
+def materialize_screening_data(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    output_root: str | Path,
+    *,
+    event: PreparationEvent | None = None,
+) -> MaterializedScreeningData:
+    """Materialize and fully reload the exact 5-evidence/15-view child inventory."""
+
+    if data_keys != build_screening_data_keys(config, data_keys.provenance):
+        raise ValueError("screening materialization received noncanonical data keys")
+    run_dir = Path(output_root)
+    if run_dir.is_symlink():
+        raise TrainingDataArtifactError("screening materialization root cannot be a symlink")
+    evidence: dict[int, TrainingDataEvidenceManifest] = {}
+    views: dict[tuple[str, int], TrainingDataArtifactManifest] = {}
+    evidence_cost_ids: dict[int, str] = {}
+    view_cost_ids: dict[tuple[str, int], str] = {}
+    for replicate in range(config.replicates):
+        (
+            evidence_manifest,
+            replicate_views,
+            evidence_cost_id,
+            replicate_view_cost_ids,
+        ) = _prepare_screening_data_replicate(
+            run_dir,
+            config,
+            data_keys,
+            replicate,
+            event=event,
+        )
+        evidence[replicate] = evidence_manifest
+        views.update(replicate_views)
+        evidence_cost_ids[replicate] = evidence_cost_id
+        view_cost_ids.update(replicate_view_cost_ids)
+    manifests = ScreeningDataManifests(evidence=evidence, views=views)
+    _validate_data_manifests(data_keys, manifests)
+    _require_exact_data_namespace(run_dir, config, data_keys, manifests)
+    return MaterializedScreeningData(
+        manifests=manifests,
+        evidence_cost_ids=evidence_cost_ids,
+        view_cost_ids=view_cost_ids,
+    )
 
 
 def _training_tuple_conditions(

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 
 import pytest
 
+import levelup.experiments.milestone6_phase2_screening_preparation as preparation_module
 from levelup.experiments.milestone6_phase2_screening import (
     B1,
     B2,
@@ -18,6 +19,7 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     build_screening_data_keys,
     build_screening_model_keys,
     build_screening_shared_plan,
+    materialize_screening_data,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import SystemProvenance
@@ -27,6 +29,7 @@ from levelup.experiments.runner.storage import (
     provenance_identity_sha256,
 )
 from levelup.experiments.runner.training_data_artifacts import (
+    TrainingDataArtifactError,
     TrainingDataArtifactManifest,
     TrainingDataEvidenceManifest,
 )
@@ -269,6 +272,301 @@ def test_model_key_builder_rejects_unbound_data_manifests(tamper: str) -> None:
 
     with pytest.raises(ValueError):
         build_screening_model_keys(config, data_keys, changed)
+
+
+def test_one_replicate_materialization_loads_cleanly_then_rejects_corruption(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    events = []
+    evidence, views, evidence_cost_id, view_cost_ids = (
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+            event=events.append,
+        )
+    )
+    assert events == ["replicate_build:0"]
+    assert evidence.key == data_keys.evidence[0]
+    assert set(views) == {(base, 0) for base in BASES}
+    assert len(evidence_cost_id) == 64
+    assert set(view_cost_ids) == set(views)
+    assert {manifest.evidence_id for manifest in views.values()} == {
+        evidence.evidence_id
+    }
+
+    def unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("valid resume must not repeat probes")
+
+    monkeypatch.setattr(
+        preparation_module,
+        "_screening_training_batch",
+        unexpected_rebuild,
+    )
+    events.clear()
+    loaded = preparation_module._prepare_screening_data_replicate(
+        tmp_path,
+        config,
+        data_keys,
+        0,
+        event=events.append,
+    )
+    assert events == ["replicate_loaded:0"]
+    assert loaded[0] == evidence
+    assert loaded[1] == views
+
+    corrupt_key = data_keys.views[(B1, 0)]
+    index_path = (
+        tmp_path / "training-data-artifact-keys" / f"{corrupt_key.key_id}.json"
+    )
+    index_path.write_text("{", encoding="utf-8")
+    with pytest.raises(TrainingDataArtifactError):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+
+
+def test_full_data_materialization_has_exact_inventory_and_clean_resume(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    events = []
+    materialized = materialize_screening_data(
+        config,
+        data_keys,
+        tmp_path,
+        event=events.append,
+    )
+    assert events == [f"replicate_build:{replicate}" for replicate in range(5)]
+    assert len(materialized.manifests.evidence) == 5
+    assert len(materialized.manifests.views) == 15
+    assert len(materialized.evidence_cost_ids) == 5
+    assert len(materialized.view_cost_ids) == 15
+
+    def unexpected_rebuild(*args, **kwargs):
+        raise AssertionError("complete screening data resume must not repeat probes")
+
+    monkeypatch.setattr(
+        preparation_module,
+        "_screening_training_batch",
+        unexpected_rebuild,
+    )
+    events.clear()
+    resumed = materialize_screening_data(
+        config,
+        data_keys,
+        tmp_path,
+        event=events.append,
+    )
+    assert events == [f"replicate_loaded:{replicate}" for replicate in range(5)]
+    assert resumed == materialized
+
+
+def test_interrupted_materialization_intent_never_repeats_paid_probes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    calls = 0
+
+    def interrupted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("injected interruption")
+
+    monkeypatch.setattr(preparation_module, "_screening_training_batch", interrupted)
+    with pytest.raises(TrainingDataArtifactError, match="intent remains fail-closed"):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+    with pytest.raises(TrainingDataArtifactError):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+    assert calls == 1
+
+
+def test_concurrent_intent_loser_never_runs_paid_probes(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    calls = 0
+
+    def lost_claim(*args, **kwargs):
+        return False
+
+    def unexpected_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("concurrent intent loser must not build paid probes")
+
+    monkeypatch.setattr(preparation_module, "_claim_materialization_intent", lost_claim)
+    monkeypatch.setattr(preparation_module, "_screening_training_batch", unexpected_build)
+    with pytest.raises(TrainingDataArtifactError, match="claimed concurrently"):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+    assert calls == 0
+
+
+def test_matching_intent_symlink_is_rejected_before_batch_builder(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    replicate = 0
+    intent = preparation_module._intent_path(
+        tmp_path,
+        data_keys.evidence[replicate].key_id,
+    )
+    intent.parent.mkdir(parents=True)
+    target = tmp_path / "matching-intent.json"
+    target.write_bytes(
+        canonical_json_bytes(preparation_module._intent_body(config, data_keys, replicate))
+    )
+    intent.symlink_to(target)
+    load_calls = 0
+
+    def unexpected_load(*args, **kwargs):
+        nonlocal load_calls
+        load_calls += 1
+        return None
+
+    monkeypatch.setattr(
+        preparation_module,
+        "_load_screening_data_replicate",
+        unexpected_load,
+    )
+    calls = 0
+
+    def unexpected_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("intent symlink must fail before batch construction")
+
+    monkeypatch.setattr(preparation_module, "_screening_training_batch", unexpected_build)
+    with pytest.raises(TrainingDataArtifactError):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            replicate,
+        )
+    assert calls == 0
+    assert load_calls == 0
+
+
+@pytest.mark.parametrize(
+    ("namespace", "entry_name"),
+    (
+        ("training-data-evidence", "orphan-evidence"),
+        ("training-data-evidence", "staging-evidence"),
+        ("training-data-artifacts", "orphan-view"),
+        ("training-data-artifacts", "staging-view"),
+    ),
+)
+def test_orphan_or_staging_artifact_directory_is_rejected_before_batch_builder(
+    namespace: str,
+    entry_name: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    (tmp_path / namespace / entry_name).mkdir(parents=True)
+    calls = 0
+
+    def unexpected_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("orphan/staging artifact must fail before batch construction")
+
+    monkeypatch.setattr(preparation_module, "_screening_training_batch", unexpected_build)
+    with pytest.raises(TrainingDataArtifactError):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+    assert calls == 0
+
+
+@pytest.mark.parametrize("entry_type", ("directory", "symlink"))
+@pytest.mark.parametrize("path_kind", ("evidence_cost", "view_key", "view_cost"))
+def test_expected_direct_namespace_entry_type_is_rejected_before_batch_builder(
+    entry_type: str,
+    path_kind: str,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    evidence_key = data_keys.evidence[0]
+    view_key = data_keys.views[(B1, 0)]
+    if path_kind == "evidence_cost":
+        expected_path = (
+            tmp_path
+            / "training-data-evidence-costs"
+            / f"{evidence_key.key_id}.json"
+        )
+    elif path_kind == "view_key":
+        expected_path = (
+            tmp_path
+            / "training-data-artifact-keys"
+            / f"{view_key.key_id}.json"
+        )
+    else:
+        expected_path = (
+            tmp_path
+            / "training-data-view-costs"
+            / f"{view_key.key_id}.json"
+        )
+    expected_path.parent.mkdir(parents=True)
+    if entry_type == "directory":
+        expected_path.mkdir()
+    else:
+        target = tmp_path / "expected-entry-target.json"
+        target.write_text("placeholder", encoding="utf-8")
+        expected_path.symlink_to(target)
+    calls = 0
+
+    def unexpected_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise AssertionError("unsafe expected namespace entry must fail before batch construction")
+
+    monkeypatch.setattr(preparation_module, "_screening_training_batch", unexpected_build)
+    with pytest.raises(TrainingDataArtifactError):
+        preparation_module._prepare_screening_data_replicate(
+            tmp_path,
+            config,
+            data_keys,
+            0,
+        )
+    assert calls == 0
 
 
 @pytest.mark.parametrize("tamper", ("unknown_unit", "wrong_replicate", "owner", "conditions"))

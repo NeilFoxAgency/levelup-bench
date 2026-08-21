@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -87,19 +88,36 @@ def _manifest_tasks() -> tuple[dict[str, Any], ...]:
     return tuple(tasks)
 
 
-def _training_identity(entry: dict[str, Any]) -> TaskIdentity:
-    family = str(entry["family"])
+@dataclass(frozen=True, slots=True)
+class DevelopmentTrainingTask:
+    """Reconstructed development environment and its exact reference catalog."""
+
+    environment: Any
+    trajectories: dict[str, Trajectory]
+    catalog: tuple[TrajectoryIdentity, ...]
+
+
+def reconstruct_development_training_task(
+    *,
+    family: str,
+    task_index: int,
+    generator_seed: int,
+    expected_task_id: str,
+) -> DevelopmentTrainingTask:
+    """Reconstruct one development training task without touching final helpers."""
+
     if family == "combo":
         environment = make_combo_track(
-            int(entry["task_index"]),
-            int(entry["generator_seed"]),
+            task_index,
+            generator_seed,
         )
         frontier_cost, frontier_actions = combo_frontier_path(environment)
         optimum_cost, optimum_actions = combo_optimal_path(environment)
         if frontier_cost <= optimum_cost or frontier_actions == optimum_actions:
             raise ValueError("generated Combo task has no strict frontier-to-optimum gap")
-        if environment.task_spec.task_id != entry["task_id"]:
+        if environment.task_spec.task_id != expected_task_id:
             raise RuntimeError("development manifest task reconstruction drift")
+        trajectories: dict[str, Trajectory] = {}
         catalog_items: list[TrajectoryIdentity] = []
         for label, actions in (
             ("frontier", frontier_actions),
@@ -115,6 +133,7 @@ def _training_identity(entry: dict[str, Any]) -> TaskIdentity:
                     for index, action in enumerate(actions)
                 ),
             )
+            trajectories[trajectory_id] = trajectory
             catalog_items.append(
                 TrajectoryIdentity(
                     stage_label=label,
@@ -127,37 +146,56 @@ def _training_identity(entry: dict[str, Any]) -> TaskIdentity:
                     },
                 )
             )
-        catalog = tuple(catalog_items)
-    else:
-        bundle = adaptive_track_bundle(
-            family,
-            int(entry["task_index"]),
-            int(entry["generator_seed"]),
+        return DevelopmentTrainingTask(
+            environment=environment,
+            trajectories=trajectories,
+            catalog=tuple(catalog_items),
         )
-        if bundle.environment.task_spec.task_id != entry["task_id"]:
-            raise RuntimeError("development manifest task reconstruction drift")
-        catalog = tuple(
-            TrajectoryIdentity(
-                stage_label=stage.label,
-                trajectory_id=stage.trajectory_id,
-                source="synthetic-reference",
-                provenance={
-                    "content_sha256": trajectory_content_sha256(
-                        bundle.trajectories[stage.trajectory_id]
-                    ),
-                    "kind": "synthetic_policy",
-                    "generated_from_hidden_oracle": stage.label == "optimum",
-                },
-            )
-            for stage in bundle.ladder.stages
+
+    bundle = adaptive_track_bundle(
+        family,
+        task_index,
+        generator_seed,
+    )
+    if bundle.environment.task_spec.task_id != expected_task_id:
+        raise RuntimeError("development manifest task reconstruction drift")
+    catalog = tuple(
+        TrajectoryIdentity(
+            stage_label=stage.label,
+            trajectory_id=stage.trajectory_id,
+            source="synthetic-reference",
+            provenance={
+                "content_sha256": trajectory_content_sha256(
+                    bundle.trajectories[stage.trajectory_id]
+                ),
+                "kind": "synthetic_policy",
+                "generated_from_hidden_oracle": stage.label == "optimum",
+            },
         )
+        for stage in bundle.ladder.stages
+    )
+    return DevelopmentTrainingTask(
+        environment=bundle.environment,
+        trajectories=dict(bundle.trajectories),
+        catalog=catalog,
+    )
+
+
+def _training_identity(entry: dict[str, Any]) -> TaskIdentity:
+    family = str(entry["family"])
+    reconstruction = reconstruct_development_training_task(
+        family=family,
+        task_index=int(entry["task_index"]),
+        generator_seed=int(entry["generator_seed"]),
+        expected_task_id=str(entry["task_id"]),
+    )
     return TaskIdentity(
         family_id=family,
         task_id=str(entry["task_id"]),
         task_index=int(entry["task_index"]),
         generator_seed=int(entry["generator_seed"]),
         environment_reset_seed=int(entry["environment_reset_seed"]),
-        trajectory_catalog=catalog,
+        trajectory_catalog=reconstruction.catalog,
     )
 
 

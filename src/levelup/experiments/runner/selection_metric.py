@@ -28,6 +28,9 @@ METRIC_SCHEMA_VERSION = "restricted-interactions.v1"
 ACTION_FORMULA = "accounting.probes.actions + accounting.search.actions"
 ORACLE_POLICY = "fixed_batch_then_independent_replay_then_reporting_only_oracle"
 _FROZEN_FAMILY_ORDER = ("plain", "battery", "cooldown", "heat", "momentum", "combo")
+_FROZEN_AUTHORITY_FAMILY_IDS_SHA256 = hashlib.sha256(
+    json.dumps(_FROZEN_FAMILY_ORDER, separators=(",", ":"), ensure_ascii=True).encode()
+).hexdigest()
 _FROZEN_SCREENING_REPLICATES = (0, 1, 2, 3, 4)
 _FROZEN_PROTOCOL_SHA256 = "7e6911c120db091e2b250f7a91520dd5f81a481cb4a19662eeae858c7da1c059"
 _FROZEN_SCREENING_SHA256 = "f3c3b4c239df54de4ed5c675f21a846253102e54d822023d782c941542c19f69"
@@ -89,6 +92,11 @@ class SelectionMetricSpec:
     screening_candidates_sha256: str
     task_manifest_sha256: str
     family_universe: tuple[str, ...]
+    # Explicitly retain the authority universe copied by the frozen builder.
+    # This prevents a merged child spec from silently substituting a private
+    # family universe for the one loaded from the protocol files.
+    authority_family_ids: tuple[str, ...] = ()
+    authority_family_ids_sha256: str = ""
     metric_id: str = METRIC_ID
     schema_version: str = METRIC_SCHEMA_VERSION
     action_formula: str = ACTION_FORMULA
@@ -126,6 +134,15 @@ class SelectionMetricSpec:
             or len(self.family_universe) != len(set(self.family_universe))
         ):
             raise ValueError("selection family universe is invalid")
+        if self.authority_family_ids:
+            if (
+                self.authority_family_ids != self.family_universe
+                or self.authority_family_ids != _FROZEN_FAMILY_ORDER
+                or len(self.authority_family_ids) != len(set(self.authority_family_ids))
+                or self.authority_family_ids_sha256
+                != _FROZEN_AUTHORITY_FAMILY_IDS_SHA256
+            ):
+                raise ValueError("selection authority family universe is inconsistent")
         identities = [(unit.run_id, unit.unit_id) for unit in self.expected_units]
         if len(identities) != len(set(identities)):
             raise ValueError("selection expected units contain duplicate identities")
@@ -194,6 +211,8 @@ def load_selection_authority(
     task_manifest_bytes = task_manifest_path.read_bytes()
     task_manifest_sha256 = hashlib.sha256(task_manifest_bytes).hexdigest()
     task_manifest = json.loads(task_manifest_bytes)
+    if not all(isinstance(payload, dict) for payload in (protocol, screening, task_manifest)):
+        raise ValueError("frozen selection authority files must contain JSON objects")
     if (
         protocol_sha256 != _FROZEN_PROTOCOL_SHA256
         or screening_sha256 != _FROZEN_SCREENING_SHA256
@@ -210,7 +229,11 @@ def load_selection_authority(
         or screening.get("scope") != "known-development-only"
         or screening.get("final_family_access") is not False
         or screening.get("parent_protocol", {}).get("sha256") != protocol_sha256
+        or screening.get("parent_protocol", {}).get("path")
+        != "configs/milestone6/development_protocol.json"
         or screening.get("task_manifest", {}).get("sha256") != task_manifest_sha256
+        or screening.get("task_manifest", {}).get("path")
+        != "configs/milestone6/development_tasks.json"
     ):
         raise ValueError("frozen selection authority files are inconsistent")
 
@@ -218,15 +241,21 @@ def load_selection_authority(
     protocol_seed_policy = protocol.get("seed_policy", {})
     screening_folds = screening.get("folds", {})
     screening_replicates = tuple(screening_folds.get("replicates", ()))
+    protocol_family_order = tuple(protocol.get("family_order", ()))
+    screening_family_order = tuple(screening_folds.get("family_order", ()))
+    manifest_family_order = tuple(task_manifest.get("family_order", ()))
     if (
         protocol_folds.get("kind") != "leave-one-family-out"
         or protocol_folds.get("training_tasks_per_nonheld_family") != 8
         or protocol_folds.get("screening_heldout_tasks_per_family") != 8
         or tuple(protocol_seed_policy.get("screening_replicates", ()))
         != _FROZEN_SCREENING_REPLICATES
-        or tuple(screening_folds.get("family_order", ())) != _FROZEN_FAMILY_ORDER
+        or protocol_family_order != _FROZEN_FAMILY_ORDER
+        or screening_family_order != protocol_family_order
+        or manifest_family_order != protocol_family_order
         or screening_folds.get("kind") != "leave-one-family-out"
         or screening_replicates != _FROZEN_SCREENING_REPLICATES
+        or len(set(screening_replicates)) != len(screening_replicates)
         or screening_folds.get("training_tasks")
         != "eight training_core tasks from each of the five non-held-out families"
         or screening_folds.get("heldout_tasks")
@@ -248,9 +277,23 @@ def load_selection_authority(
         or set(task_manifest.get("role_metadata", {})) != allowed_roles
         or not isinstance(tasks, list)
         or not tasks
+        or task_manifest.get("generator_seeds")
+        != {
+            "plain": 900,
+            "battery": 1000,
+            "cooldown": 1100,
+            "heat": 1200,
+            "momentum": 1300,
+            "combo": 2026,
+        }
+        or task_manifest.get("environment_reset_seed") != 0
     ):
         raise ValueError("development task-manifest authority drifted")
+    if any(not isinstance(task, dict) for task in tasks):
+        raise ValueError("development task manifest contains a malformed task")
     task_ids = [task.get("task_id") for task in tasks]
+    if any(not isinstance(task_id, str) or not task_id for task_id in task_ids):
+        raise ValueError("development task manifest contains an invalid task ID")
     if len(task_ids) != len(set(task_ids)):
         raise ValueError("development task manifest contains duplicate task IDs")
     heldout_task_ids: list[tuple[str, tuple[str, ...]]] = []
@@ -282,8 +325,17 @@ def load_selection_authority(
             task.get("family") not in _FROZEN_FAMILY_ORDER
             or not isinstance(roles, list)
             or not roles
+            or any(not isinstance(role, str) for role in roles)
             or not set(roles) <= allowed_roles
             or "known_development" not in roles
+            or any(
+                token in role.lower()
+                for role in roles
+                for token in ("final", "validation")
+            )
+            or not isinstance(task.get("task_index"), int)
+            or not isinstance(task.get("generator_seed"), int)
+            or not isinstance(task.get("environment_reset_seed"), int)
         ):
             raise ValueError("development task manifest contains a non-development task")
 
@@ -347,7 +399,7 @@ def load_selection_authority(
         raise ValueError("frozen screening candidate matrix drifted")
 
     expected_matrix = screening.get("expected_matrix", {})
-    if expected_matrix != {
+    frozen_expected_matrix = {
         "fixed_control_variants": 2,
         "learned_variants_per_condition": 12,
         "learned_conditions": 3,
@@ -356,8 +408,34 @@ def load_selection_authority(
         "training_data_artifacts": 90,
         "trained_model_artifacts": 360,
         "heldout_task_units": 9120,
-    }:
+    }
+    if expected_matrix != frozen_expected_matrix:
         raise ValueError("frozen screening expected matrix drifted")
+    authority_expected_matrix = {
+        "fixed_control_variants": len(expected_fixed_controls),
+        "learned_variants_per_condition": len(expected_candidates),
+        "learned_conditions": len(expected_learned_conditions),
+        "total_variants": len(expected_fixed_controls)
+        + len(expected_learned_conditions) * len(expected_candidates),
+        "canonical_evidence_artifacts": len(protocol_family_order)
+        * len(screening_replicates),
+        "training_data_artifacts": len(protocol_family_order)
+        * len(screening_replicates)
+        * 3,
+        "trained_model_artifacts": len(protocol_family_order)
+        * len(screening_replicates)
+        * len(expected_learned_conditions)
+        * 4,
+        "heldout_task_units": len(protocol_family_order)
+        * protocol_folds["screening_heldout_tasks_per_family"]
+        * len(screening_replicates)
+        * (
+            len(expected_fixed_controls)
+            + len(expected_learned_conditions) * len(expected_candidates)
+        ),
+    }
+    if expected_matrix != authority_expected_matrix:
+        raise ValueError("screening expected matrix is not bound to the frozen folds")
 
     expected_protocol_freeze = {
         "amended_at_local_date": "2026-08-21",
@@ -493,8 +571,8 @@ def build_selection_metric_spec(
         config.split.final_tasks
         or "final" in config.selection.phases
         or any("final" in condition.execution_phases for condition in config.conditions)
-        or any(unit.key.phase == "final" for unit in expected.units)
-        or any(artifact.consumer_phase == "final" for artifact in expected_shared.artifacts)
+        or any(unit.key.phase != phase for unit in expected.units)
+        or any(artifact.consumer_phase != phase for artifact in expected_shared.artifacts)
     ):
         raise ValueError("selection config or plan contains forbidden final-family material")
     if (
@@ -685,6 +763,8 @@ def build_selection_metric_spec(
         screening_candidates_sha256=authority.screening_candidates_sha256,
         task_manifest_sha256=authority.task_manifest_sha256,
         family_universe=authority.family_ids,
+        authority_family_ids=authority.family_ids,
+        authority_family_ids_sha256=_FROZEN_AUTHORITY_FAMILY_IDS_SHA256,
         expected_units=tuple(
             ExpectedSelectionUnit(
                 run_id=run_id,
@@ -710,6 +790,18 @@ def merge_selection_metric_specs(
     if not materialized:
         raise ValueError("at least one selection metric spec is required")
     first = materialized[0]
+    if (
+        not first.authority_family_ids
+        or first.authority_family_ids != _FROZEN_FAMILY_ORDER
+        or first.authority_family_ids_sha256
+        != _FROZEN_AUTHORITY_FAMILY_IDS_SHA256
+        or any(spec.authority_family_ids != first.authority_family_ids for spec in materialized)
+        or any(
+            spec.authority_family_ids_sha256 != first.authority_family_ids_sha256
+            for spec in materialized
+        )
+    ):
+        raise ValueError("child selection metric specs lack the frozen authority family universe")
     comparable_fields = (
         "condition_id",
         "phase",
@@ -724,6 +816,8 @@ def merge_selection_metric_specs(
         "screening_candidates_sha256",
         "task_manifest_sha256",
         "family_universe",
+        "authority_family_ids",
+        "authority_family_ids_sha256",
     )
     if any(
         any(getattr(spec, field) != getattr(first, field) for field in comparable_fields)
@@ -738,7 +832,7 @@ def merge_selection_metric_specs(
     ):
         raise ValueError("child selection metric specs have overlapping held-out families")
     combined_families = frozenset().union(*family_sets)
-    if combined_families != frozenset(first.family_universe):
+    if combined_families != frozenset(first.authority_family_ids):
         raise ValueError("child selection metric specs do not cover the frozen family universe")
     return SelectionMetricSpec(
         condition_id=first.condition_id,
@@ -749,6 +843,8 @@ def merge_selection_metric_specs(
         screening_candidates_sha256=first.screening_candidates_sha256,
         task_manifest_sha256=first.task_manifest_sha256,
         family_universe=first.family_universe,
+        authority_family_ids=first.authority_family_ids,
+        authority_family_ids_sha256=first.authority_family_ids_sha256,
         expected_units=tuple(unit for spec in materialized for unit in spec.expected_units),
         require_shared_preparation=first.require_shared_preparation,
         _construction_token=_SPEC_CONSTRUCTION_TOKEN,
@@ -832,7 +928,12 @@ def summarize_variant(
 ) -> VariantSelectionSummary:
     """Require the exact frozen matrix, aggregate within families, then equal-weight families."""
 
-    if not spec.has_complete_family_coverage:
+    if (
+        spec.family_universe != _FROZEN_FAMILY_ORDER
+        or spec.authority_family_ids != _FROZEN_FAMILY_ORDER
+        or spec.authority_family_ids_sha256 != _FROZEN_AUTHORITY_FAMILY_IDS_SHA256
+        or not spec.has_complete_family_coverage
+    ):
         raise ValueError("selection summary requires the complete frozen family universe")
     materialized = tuple(records)
     actual_ids = [(record.run_id, record.unit_id) for record in materialized]
