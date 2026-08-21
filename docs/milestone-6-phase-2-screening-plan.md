@@ -41,7 +41,8 @@ development family.
 The frozen matrix contains:
 
 - 2 fixed controls plus 36 learned variants = 38 variants;
-- 90 condition/fold/replicate training-data artifacts;
+- 30 canonical fold/replicate evidence artifacts, each shared unchanged by B1, B2, and C;
+- 90 condition/fold/replicate training-data views over those shared evidence artifacts;
 - 360 trained model artifacts after temperature reuse; and
 - 9,120 held-out task units.
 
@@ -49,10 +50,14 @@ No task or family outside the committed development manifest may enter these cou
 
 ## Shared-cost rule
 
-Training-task probing, reference validation, training setup, and optimizer work belong to immutable
-shared artifacts. They are recorded once per declared owner and never copied into each of the eight
-held-out units. Each held-out unit still performs and pays for its own probe, candidate generation,
-and evaluator replay; held-out probes are not physically reused across candidate variants.
+Training-task probing and reference validation produce one immutable canonical evidence artifact
+per fold and replicate. B1, B2, and C consume those exact same traces and affordance tables; their
+90 condition-bound training-data views may differ only in declared representation/objective
+metadata and deterministic transformation, never by regenerating or recharging the underlying
+evidence. Model setup and optimizer work are recorded once per model owner and never copied into
+each of the eight held-out units. Each held-out unit still performs and pays for its own probe,
+candidate generation, and evaluator replay; held-out probes are not physically reused across
+candidate variants.
 
 The current smoke's unit-local repeated training is forbidden for screening.
 

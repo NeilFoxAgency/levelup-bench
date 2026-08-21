@@ -91,11 +91,16 @@ def test_phase2_screening_counts_and_artifact_sharing_are_frozen() -> None:
         "learned_variants_per_condition": 12,
         "learned_conditions": 3,
         "total_variants": 38,
+        "canonical_evidence_artifacts": 30,
         "training_data_artifacts": 90,
         "trained_model_artifacts": 360,
         "heldout_task_units": 9120,
     }
     sharing = payload["artifact_sharing"]
+    assert "condition and temperature excluded" in sharing[
+        "canonical_evidence_artifact_identity"
+    ]
+    assert sharing["cross_condition_evidence_reuse"].startswith("B1, B2 and C")
     assert sharing["search_temperature_in_model_artifact_identity"] is False
     assert sharing["heldout_probe_reuse_across_units"] is False
     assert sharing["task_unit_training_cost"] == 0

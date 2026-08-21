@@ -85,11 +85,15 @@
     "processes": 1
   },
   "artifact_sharing": {
-    "training_data_artifact_identity": "condition, fold, replicate, exposure, probe policy and data-order seed",
-    "model_artifact_identity": "training-data artifact, condition, fold, replicate, model seed, learning rate and epochs",
+    "canonical_evidence_artifact_identity": "fold, replicate, ordered task and optimum-reference identities, probe policy and non-label seeds; condition and temperature excluded",
+    "training_data_view_identity": "condition, canonical evidence artifact, representation schema and data-order seed",
+    "cross_condition_evidence_reuse": "B1, B2 and C consume the same canonical evidence artifact for each fold and replicate",
+    "model_artifact_identity": "training-data view, condition, fold, replicate, model seed, learning rate and epochs",
     "search_temperature_in_model_artifact_identity": false,
     "heldout_probe_reuse_across_units": false,
-    "training_cost_owner": "one shared artifact per condition, fold, replicate and applicable training tuple",
+    "evidence_cost_owner": "one canonical evidence artifact per fold and replicate",
+    "view_cost_owner": "one deterministic condition-bound view per condition, fold and replicate; no repeated probing or reference replay",
+    "model_cost_owner": "one model artifact per condition, fold, replicate and applicable training tuple",
     "task_unit_training_cost": 0
   },
   "expected_matrix": {
@@ -97,6 +101,7 @@
     "learned_variants_per_condition": 12,
     "learned_conditions": 3,
     "total_variants": 38,
+    "canonical_evidence_artifacts": 30,
     "training_data_artifacts": 90,
     "trained_model_artifacts": 360,
     "heldout_task_units": 9120
