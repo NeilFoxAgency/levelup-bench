@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,6 +26,7 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     build_screening_model_keys,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.records import SystemProvenance
 from levelup.experiments.runner.training_artifacts import (
     TrainingArtifactManifest,
     TrainingReportMetadata,
@@ -35,9 +36,30 @@ from levelup.experiments.runner.training_data_artifacts import (
     TrainingDataArtifactManifest,
     TrainingDataEvidenceManifest,
 )
-from tests.test_milestone6_phase2_screening_models import PROVENANCE
 
 FAMILY_ORDER = ("plain", "battery", "cooldown", "heat", "momentum", "combo")
+PROVENANCE = SystemProvenance(
+    git_commit_sha="0" * 40,
+    git_dirty=False,
+    python_version="test-python",
+    packages={"levelup-bench": "test"},
+    installed_packages_sha256="a" * 64,
+    os="test-os",
+    architecture="test-arch",
+    cpu="test-cpu",
+    cpu_count=1,
+    memory_bytes=1,
+    requested_device="cpu",
+    resolved_device="cpu",
+    requested_torch_threads=1,
+    actual_torch_threads=1,
+    requested_torch_interop_threads=1,
+    actual_torch_interop_threads=1,
+    deterministic_algorithms_requested=True,
+    deterministic_algorithms_actual=True,
+    processes=1,
+    captured_at_utc=datetime(2026, 8, 21, tzinfo=UTC),
+)
 _REAL_BUILD_PLAN = readiness.build_screening_readiness_plan
 _REAL_SCREENING_CONFIGS = screening_child_configs
 _REAL_BUILD_DATA_KEYS = build_screening_data_keys
