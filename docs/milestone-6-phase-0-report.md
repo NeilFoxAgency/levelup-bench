@@ -1,8 +1,11 @@
 # Milestone 6 Phase 0 Research Report
 
-**Date:** 2026-08-20 (America/New_York)  
-**Handoff commit:** `ead615e4c56e5bc008e675a04c13d2e9cb63492d` (`Prepare Codex research handoff`)  
-**Historical Milestone 5 commit:** `8e77415c5cc90b01057e525b41b578deeccb30f9`  
+**Date:** 2026-08-20 (America/New_York)
+
+**Handoff commit:** `ead615e4c56e5bc008e675a04c13d2e9cb63492d` (`Prepare Codex research handoff`)
+
+**Historical Milestone 5 commit:** `8e77415c5cc90b01057e525b41b578deeccb30f9`
+
 **Working branch:** `milestone6-phase0`
 
 ## Executive decision
