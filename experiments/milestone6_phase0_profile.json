@@ -1,0 +1,204 @@
+{
+  "schema_version": "0.1",
+  "experiment": "milestone6_phase0_reproduction_and_profile_v1",
+  "date_local": "2026-08-20",
+  "git": {
+    "handoff_sha": "ead615e4c56e5bc008e675a04c13d2e9cb63492d",
+    "historical_milestone5_sha": "8e77415c5cc90b01057e525b41b578deeccb30f9",
+    "working_branch": "milestone6-phase0"
+  },
+  "local_system": {
+    "machine": "MacBook Pro",
+    "cpu": "Apple M2 Max",
+    "cpu_cores_reported": 12,
+    "memory_bytes": 34359738368,
+    "os": "macOS 15.6.1 build 24G90",
+    "architecture": "arm64",
+    "python": "3.11.7",
+    "torch": "2.13.0",
+    "pydantic": "2.13.4",
+    "pytest": "8.4.2",
+    "ruff": "0.16.4",
+    "mps_built": true,
+    "mps_available": true,
+    "cuda_available": false
+  },
+  "validation": {
+    "pytest_passed": 48,
+    "ruff_check_passed": true
+  },
+  "smoke_reproduction": {
+    "config": {
+      "development_tasks_per_family": 1,
+      "final_task_count": 1,
+      "replicates": 1,
+      "max_episodes": 5,
+      "probes_per_action": 2,
+      "cv_validation_tasks": 1,
+      "cv_replicates": 1,
+      "cv_max_episodes": 5,
+      "cv_model_epochs": 4,
+      "final_model_epochs": 4
+    },
+    "repetitions": 2,
+    "exact_match": true,
+    "canonicalization": "json.dumps(report, sort_keys=True, separators=(',', ':')).encode()",
+    "sha256": "8a918575c7c94e0bf5ea1e40a78cf5ee86299e6be9c96043ec868a0645154708",
+    "wall_seconds": [
+      0.731816,
+      0.13165
+    ]
+  },
+  "full_reproduction": {
+    "local_mac": {
+      "ignored_artifact": "runs/phase0/milestone5_reproduction_py3.11.7_torch2.13.0.json",
+      "sha256": "c1d7cb3e5311b27a101f73305041c66161c014c8f7d819c3829202cf3db5157c",
+      "wall_seconds": 21.45,
+      "maximum_resident_set_bytes": 299433984,
+      "exact_match_to_historical": false,
+      "qualitative_primary_conclusion_preserved": true
+    },
+    "linux_x86_emulation": {
+      "container_image": "python:3.11.16-slim",
+      "requested_platform": "linux/amd64",
+      "torch": "2.13.0",
+      "ignored_artifact": "runs/phase0/milestone5_reproduction_linux_x86_py3.11.16_torch2.13.0.json",
+      "sha256": "88c88b8f1bdbd57646506e9cce7d5318646d03f5bcc8a4a0caad51f25ac7ad96",
+      "wall_seconds": 39.86,
+      "maximum_resident_set_kib": 787984,
+      "exact_match_to_historical": false,
+      "qualitative_primary_conclusion_preserved": true
+    },
+    "github_actions": {
+      "run_id": 32427935733,
+      "historical_attempt": 1,
+      "reproduction_attempt": 2,
+      "head_sha": "8e77415c5cc90b01057e525b41b578deeccb30f9",
+      "workflow": "milestone5-reference",
+      "raw_artifact_sha256": "a98ea99dd13f55b3c4bed626a68b63803b65082420fec2aecc3d171b52f06aea",
+      "attempts_byte_identical": true,
+      "url": "https://github.com/NeilFoxAgency/levelup-bench/actions/runs/32427935733"
+    }
+  },
+  "component_profile": {
+    "method": "Ephemeral wrappers timed unmodified milestone5 module functions. Times are inclusive and nested; shares use instrumented total wall time.",
+    "instrumented_total_wall_seconds": 21.233276,
+    "selected_mix": {
+      "optimum": 0.75,
+      "pooled": 0.25,
+      "delta": 0.0
+    },
+    "components": {
+      "search_for_optimum": {
+        "calls": 1560,
+        "inclusive_seconds": 18.681822
+      },
+      "sample_candidate": {
+        "calls": 115671,
+        "inclusive_seconds": 16.791909,
+        "candidate_actions": 1613877
+      },
+      "probe_action_effects": {
+        "calls": 910,
+        "inclusive_seconds": 1.183825,
+        "probe_actions": 91460
+      },
+      "train_interaction_model": {
+        "calls": 19,
+        "inclusive_seconds": 1.141956
+      },
+      "evaluate_trajectory": {
+        "calls": 6403,
+        "inclusive_seconds": 0.443047,
+        "replay_actions": 60059
+      },
+      "action_weights": {
+        "calls": 1560,
+        "inclusive_seconds": 0.123815
+      },
+      "build_development_bundles": {
+        "calls": 1,
+        "inclusive_seconds": 0.072303
+      }
+    },
+    "derived_throughput": {
+      "candidate_episodes_per_candidate_generation_second": 6888.5,
+      "candidate_actions_per_candidate_generation_second": 96110.4,
+      "probe_actions_per_probe_second": 77258.0,
+      "replay_actions_per_replay_second": 135559.0,
+      "action_weight_calls_per_scoring_second": 12599.4
+    }
+  },
+  "neural_cpu_mps_benchmark": {
+    "method": "Actual 570x49 training tensor and 49-48-24-1 model; 180 epochs; one CPU thread; device warmup; explicit MPS synchronization; five timed repetitions.",
+    "training_examples": 570,
+    "features": 49,
+    "cpu": {
+      "training_seconds": [
+        0.049699,
+        0.049158,
+        0.048757,
+        0.048652,
+        0.049412
+      ],
+      "training_median_seconds": 0.049158,
+      "training_examples_per_second": 2087152.9,
+      "resident_inference_2000x5_seconds": [
+        0.037357,
+        0.037843,
+        0.037638,
+        0.036926,
+        0.03649
+      ],
+      "resident_inference_examples_per_second": 267688.3,
+      "end_to_end_inference_500x5_seconds": [
+        0.014581,
+        0.014525,
+        0.014654,
+        0.014987,
+        0.015
+      ],
+      "end_to_end_inference_examples_per_second": 170598.0
+    },
+    "mps": {
+      "training_seconds": [
+        0.173701,
+        0.158603,
+        0.161801,
+        0.155755,
+        0.156817
+      ],
+      "training_median_seconds": 0.158603,
+      "training_examples_per_second": 646898.6,
+      "resident_inference_2000x5_seconds": [
+        0.278362,
+        0.280314,
+        0.286446,
+        0.281257,
+        0.279832
+      ],
+      "resident_inference_examples_per_second": 35674.3,
+      "end_to_end_inference_500x5_seconds": [
+        0.284691,
+        0.260427,
+        0.261818,
+        0.257536,
+        0.259072
+      ],
+      "end_to_end_inference_examples_per_second": 9599.6,
+      "current_allocated_memory_bytes": 256256,
+      "driver_allocated_memory_bytes": 17432576
+    }
+  },
+  "serialization_benchmark": {
+    "input_json_bytes": 137871,
+    "repetitions": 1000,
+    "median_milliseconds": 0.768895,
+    "p95_milliseconds": 0.840833
+  },
+  "interpretation": {
+    "device_decision": "Use CPU for the historical Milestone 5 workload and initial Milestone 6 baselines; remeasure if model size or invocation frequency changes.",
+    "portability": "The two retained hosted-workflow artifacts are byte-identical. Other tested runtime and hardware combinations preserved the primary qualitative conclusion but not exact learned-condition aggregates.",
+    "interaction_accounting_caveat": "Historical condition interaction metrics include probe and search actions but omit evaluator replay actions."
+  }
+}

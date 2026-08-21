@@ -12,6 +12,12 @@ It is not the place for large raw sweep outputs, checkpoints, frame dumps, or te
 
 These files are historical scientific records. Do not overwrite them because a later method is better.
 
+## Research-process artifacts
+
+- `milestone6_phase0_profile.json` records the Phase 0 Milestone 5 reproduction,
+  component profile, and matched CPU/MPS microbenchmark. It is a reproducibility
+  and planning artifact, not a Milestone 6 final-evaluation reference.
+
 ## Artifact layers
 
 LevelUp distinguishes three layers:

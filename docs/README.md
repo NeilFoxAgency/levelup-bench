@@ -13,6 +13,7 @@ If you are joining the project for the first time, especially as a coding or res
 | [`benchmark-contract.md`](benchmark-contract.md) | Non-negotiable semantics for tasks, constraints, privileged verification, performance ladders, exposure, replay, reliability, and scoring. |
 | [`research-methodology.md`](research-methodology.md) | Experimental integrity rules: development versus final data, contamination, controls, selection, reproducibility, statistics, and negative results. |
 | [`milestone-6-research-plan.md`](milestone-6-research-plan.md) | The immediate research program for state-conditioned and sequence-aware improvement learning. |
+| [`milestone-6-phase-0-report.md`](milestone-6-phase-0-report.md) | Phase 0 architecture audit, Milestone 5 reproduction, CPU/MPS profiling, scientific diagnosis, risks, and the gate into Phase 1. |
 | [`metrics-and-reporting.md`](metrics-and-reporting.md) | Performance, gap closure, sample efficiency, reliability, interaction cost, cognitive cost, and reporting conventions. |
 | [`prior-art-and-reuse.md`](prior-art-and-reuse.md) | Public benchmark and tooling repositories to inspect before reinventing infrastructure. |
 | [`speedrun-tas-roadmap.md`](speedrun-tas-roadmap.md) | How the synthetic work is intended to become real speedrun/TAS research, including data, categories, emulators, candidate selection, and record verification. |
