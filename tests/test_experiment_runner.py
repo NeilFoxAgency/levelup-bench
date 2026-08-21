@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -24,7 +25,7 @@ from levelup.experiments.runner import (
     run_id_for,
     scientific_config_sha256,
 )
-from levelup.experiments.runner.aggregate import IncompleteRunError, _records_sha256
+from levelup.experiments.runner.aggregate import _records_sha256
 from levelup.experiments.runner.config import (
     DevicePolicy,
     canonical_json_bytes,
@@ -32,6 +33,7 @@ from levelup.experiments.runner.config import (
 )
 from levelup.experiments.runner.provenance import capture_system_provenance
 from levelup.experiments.runner.records import (
+    AttemptRecord,
     ExpectedSharedArtifacts,
     PlannedSharedArtifact,
     PlannedUnit,
@@ -864,6 +866,289 @@ def test_resume_is_idempotent_and_does_not_rewrite_completed_units(tmp_path: Pat
     assert unit_bytes == {path.name: path.read_bytes() for path in store.units_dir.glob("*.json")}
 
 
+def _attempt_record(store: RunStore, planned: PlannedUnit) -> AttemptRecord:
+    return AttemptRecord(
+        run_id=store.run_id,
+        config_sha256=store.config_sha256,
+        unit_id=planned.unit_id,
+        attempt=1,
+        key=planned.key,
+        seeds=planned.seeds,
+        status="failed",
+        stage="executor",
+        exception_type="RuntimeError",
+        sanitized_message="executor raised RuntimeError",
+        retryable=True,
+        started_at_utc="2026-01-01T00:00:00+00:00",
+        finished_at_utc="2026-01-01T00:00:01+00:00",
+        elapsed_wall_seconds=1.0,
+    )
+
+
+def test_concurrent_completed_publication_is_exclusive_and_conflicts_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    first_store = _store(tmp_path, config)
+    second_store = _store(tmp_path, config)
+    planned = first_store.expected.units[0]
+    first_record = _record(first_store, planned)
+    second_record = first_record.model_copy(
+        update={
+            "outcome": first_record.outcome.model_copy(update={"performance_value": 999.0})
+        }
+    )
+    barrier = threading.Barrier(2)
+    original = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_exclusive_write_json_at"]
+    )
+    publish = original._exclusive_write_json_at
+
+    def gated(run_fd: int, namespace_fd: int, name: str, value: object) -> bool:
+        barrier.wait(timeout=5)
+        return publish(run_fd, namespace_fd, name, value)
+
+    monkeypatch.setattr(original, "_exclusive_write_json_at", gated)
+    outcomes: list[object] = []
+
+    def write(store: RunStore, record: UnitRecord) -> None:
+        try:
+            outcomes.append(store.write_completed(record))
+        except Exception as exc:  # pragma: no cover - assertion below checks exact type
+            outcomes.append(exc)
+
+    threads = [
+        threading.Thread(target=write, args=(first_store, first_record)),
+        threading.Thread(target=write, args=(second_store, second_record)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert sorted(type(item).__name__ for item in outcomes) == [
+        "ConflictingResultError",
+        "bool",
+    ]
+    assert first_store.load_completed(planned.unit_id) in (first_record, second_record)
+
+
+def test_conflicting_publication_preserves_false_when_temp_cleanup_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    planned = store.expected.units[0]
+    record = _record(store, planned)
+    assert store.write_completed(record)
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_exclusive_write_json_at"]
+    )
+
+    def fail_cleanup(*args: object, **kwargs: object) -> None:
+        raise PermissionError("simulated cleanup failure")
+
+    with store._open_result_namespace("units") as (run_fd, namespace_fd):
+        with monkeypatch.context() as scoped:
+            scoped.setattr(storage_module.os, "unlink", fail_cleanup)
+            assert not storage_module._exclusive_write_json_at(
+                run_fd,
+                namespace_fd,
+                f"{planned.unit_id}.json",
+                record.model_dump(mode="json"),
+            )
+
+    for temporary in store.run_dir.glob(".publication-*.tmp"):
+        temporary.unlink()
+    assert store.load_completed(planned.unit_id) == record
+
+
+def test_concurrent_attempt_number_collision_is_exclusive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    first_store = _store(tmp_path, config)
+    second_store = _store(tmp_path, config)
+    planned = first_store.expected.units[0]
+    first_record = _attempt_record(first_store, planned)
+    second_record = _attempt_record(second_store, planned)
+    barrier = threading.Barrier(2)
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_exclusive_write_json_at"]
+    )
+    publish = storage_module._exclusive_write_json_at
+
+    def gated(run_fd: int, namespace_fd: int, name: str, value: object) -> bool:
+        barrier.wait(timeout=5)
+        return publish(run_fd, namespace_fd, name, value)
+
+    monkeypatch.setattr(storage_module, "_exclusive_write_json_at", gated)
+    outcomes: list[object] = []
+
+    def write(store: RunStore, record: AttemptRecord) -> None:
+        try:
+            store.write_attempt(record)
+            outcomes.append(True)
+        except Exception as exc:  # pragma: no cover - assertion below checks exact type
+            outcomes.append(exc)
+
+    threads = [
+        threading.Thread(target=write, args=(first_store, first_record)),
+        threading.Thread(target=write, args=(second_store, second_record)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert not any(thread.is_alive() for thread in threads)
+    assert sorted(type(item).__name__ for item in outcomes) == [
+        "ConflictingResultError",
+        "bool",
+    ]
+    assert len(first_store.attempt_records()) == 1
+
+
+@pytest.mark.parametrize("namespace", ["units", "attempts"])
+def test_post_activation_namespace_symlink_is_rejected_without_external_write(
+    tmp_path: Path, namespace: str
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    original_namespace = store.run_dir / f"{namespace}-original"
+    namespace_dir = store.run_dir / namespace
+    namespace_dir.rename(original_namespace)
+    external = tmp_path / f"external-{namespace}"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    namespace_dir.symlink_to(external, target_is_directory=True)
+    planned = store.expected.units[0]
+    with pytest.raises(ArtifactValidationError, match="securely open|identity changed"):
+        if namespace == "units":
+            store.load_completed(planned.unit_id)
+        else:
+            store.attempt_records()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_post_activation_run_directory_substitution_is_rejected(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    detached = tmp_path / "run-detached"
+    store.run_dir.rename(detached)
+    external = tmp_path / "external-run"
+    (external / "units").mkdir(parents=True)
+    (external / "attempts").mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    store.run_dir.symlink_to(external, target_is_directory=True)
+
+    with pytest.raises(ArtifactValidationError, match="securely open|identity changed"):
+        store.completed_records()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+
+
+def test_completed_read_is_fd_anchored_across_namespace_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    planned = store.expected.units[0]
+    record = _record(store, planned)
+    assert store.write_completed(record)
+    namespace_dir = store.units_dir
+    detached = store.run_dir / "units-detached"
+    external = tmp_path / "external-read"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    (external / f"{planned.unit_id}.json").write_text("not-json", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_load_model_at"]
+    )
+    load = storage_module._load_model_at
+    raced = False
+
+    def gated(directory_fd: int, name: str, model_type: type[object]) -> object:
+        nonlocal raced
+        if name == f"{planned.unit_id}.json" and not raced:
+            raced = True
+            barrier.wait(timeout=5)
+            barrier.wait(timeout=5)
+        return load(directory_fd, name, model_type)
+
+    monkeypatch.setattr(storage_module, "_load_model_at", gated)
+
+    def substitute() -> None:
+        barrier.wait(timeout=5)
+        namespace_dir.rename(detached)
+        namespace_dir.symlink_to(external, target_is_directory=True)
+        barrier.wait(timeout=5)
+
+    replacer = threading.Thread(target=substitute)
+    replacer.start()
+    with pytest.raises(ArtifactValidationError, match="securely open|identity changed"):
+        store.load_completed(planned.unit_id)
+    replacer.join(timeout=10)
+    assert not replacer.is_alive()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert (external / f"{planned.unit_id}.json").read_text(encoding="utf-8") == "not-json"
+
+
+def test_completed_write_is_fd_anchored_across_namespace_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    planned = store.expected.units[0]
+    record = _record(store, planned)
+    namespace_dir = store.units_dir
+    detached = store.run_dir / "units-detached"
+    external = tmp_path / "external-write"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    barrier = threading.Barrier(2)
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_exclusive_write_json_at"]
+    )
+    publish = storage_module._exclusive_write_json_at
+
+    def gated(run_fd: int, namespace_fd: int, name: str, value: object) -> bool:
+        barrier.wait(timeout=5)
+        barrier.wait(timeout=5)
+        return publish(run_fd, namespace_fd, name, value)
+
+    monkeypatch.setattr(storage_module, "_exclusive_write_json_at", gated)
+
+    def substitute() -> None:
+        barrier.wait(timeout=5)
+        namespace_dir.rename(detached)
+        namespace_dir.symlink_to(external, target_is_directory=True)
+        barrier.wait(timeout=5)
+
+    replacer = threading.Thread(target=substitute)
+    replacer.start()
+    with pytest.raises(ArtifactValidationError, match="securely open|identity changed"):
+        store.write_completed(record)
+    replacer.join(timeout=10)
+    assert not replacer.is_alive()
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
+    assert not (external / f"{planned.unit_id}.json").exists()
+    assert (detached / f"{planned.unit_id}.json").is_file()
+
+
+@pytest.mark.parametrize("namespace,entry_name", [("units", "unknown.json"), ("attempts", "unknown.json")])
+def test_unknown_result_namespace_entry_is_rejected(
+    tmp_path: Path, namespace: str, entry_name: str
+) -> None:
+    store = _store(tmp_path, _config(conditions=1, tasks=1, replicates=1))
+    (store.run_dir / namespace / entry_name).write_text("{}", encoding="utf-8")
+    with pytest.raises(ArtifactValidationError, match="unexpected"):
+        if namespace == "units":
+            store.completed_records()
+        else:
+            store.attempt_records()
+
+
 def test_aggregation_is_strict_deterministic_and_read_only(tmp_path: Path) -> None:
     store = _store(tmp_path)
     ExperimentRunner(store).execute(_payload)
@@ -942,8 +1227,9 @@ def test_aggregation_never_merges_development_and_validation_slices(
 def test_strict_aggregation_rejects_missing_units(tmp_path: Path) -> None:
     store = _store(tmp_path)
     (store.units_dir / ".stale-unit.tmp").write_text("partial", encoding="utf-8")
-    with pytest.raises(IncompleteRunError, match="incomplete units"):
+    with pytest.raises(ArtifactValidationError, match="unexpected completed unit"):
         aggregate_run(store, strict=True, write=False)
+    (store.units_dir / ".stale-unit.tmp").unlink()
     assert len(store.missing_units()) == len(store.expected.units)
 
 
@@ -956,7 +1242,7 @@ def test_attempt_filename_must_match_validated_identity(tmp_path: Path) -> None:
     ExperimentRunner(store).execute(fail, fail_fast=False)
     path = next(store.attempts_dir.glob("*.json"))
     path.rename(store.attempts_dir / "renamed.json")
-    with pytest.raises(ArtifactValidationError, match="identity mismatch"):
+    with pytest.raises(ArtifactValidationError, match="unexpected attempt"):
         store.attempt_records()
 
 

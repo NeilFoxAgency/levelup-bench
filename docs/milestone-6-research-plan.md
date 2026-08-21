@@ -197,6 +197,15 @@ complete prepared tree, and only then activate all six stores transactionally. A
 leaves every store locked. This gate performs no probe, training, search, evaluator, oracle,
 aggregation, selection, or comparative-result read.
 
+The next committed boundary executes one authorized validation unit at a time. It loads only the
+unit's declared temperature-independent model and evidence-to-view-to-model lineage, pays the
+declared held-out probe where applicable, completes the fixed 150-episode/2,048-action candidate
+generation batch without an evaluator or optimum input, hashes that batch, independently replays
+every candidate, and only then queries the optimum for typed reporting. Unit-local training remains
+zero. Result and attempt files are enumerated and published through pinned directory descriptors
+with write-once semantics, so post-activation path substitution and concurrent writers fail closed.
+This implementation milestone does not itself execute or inspect comparative screening outcomes.
+
 ## Phase 3 - represent decisions in context
 
 Phase 2 may support only the state-conditioning comparison B2 versus C. Claims about transition
