@@ -6,6 +6,7 @@ import torch
 from levelup.learning.state_conditioned import (
     PROBE_FEATURE_COUNT,
     STATE_CONDITIONED_FEATURE_COUNT,
+    STATE_FEATURE_COUNT,
     AffordanceTable,
     GlobalAffordanceScorer,
     ObservableTrace,
@@ -187,4 +188,33 @@ def test_global_unknown_affordance_fallback_is_neutral() -> None:
     assert unknown == 2
     assert weights == pytest.approx(
         {"known": 1 / 3, "unknown-a": 1 / 3, "unknown-b": 1 / 3}
+    )
+
+
+def test_state_conditioning_is_the_only_b2_to_c_input_difference() -> None:
+    first = _transition()
+    second = ObservedTransition(
+        before=parse_observation(_observation(progress=5, elapsed=20)),
+        action_alias="opaque-a",
+        after=parse_observation(_observation(progress=6, elapsed=25)),
+        completed=False,
+    )
+    table = build_affordance_table((first,), target_samples_per_alias=1)
+    samples = (
+        (ObservableTrace((first,)), table),
+        (ObservableTrace((second,)), table),
+    )
+    global_examples = global_listwise_optimum_examples(samples)
+    state_examples = optimum_imitation_examples(samples)
+    assert torch.equal(
+        global_examples[0].candidate_features,
+        global_examples[1].candidate_features,
+    )
+    assert torch.equal(
+        state_examples[0].candidate_features[:, STATE_FEATURE_COUNT:],
+        state_examples[1].candidate_features[:, STATE_FEATURE_COUNT:],
+    )
+    assert not torch.equal(
+        state_examples[0].candidate_features[:, :STATE_FEATURE_COUNT],
+        state_examples[1].candidate_features[:, :STATE_FEATURE_COUNT],
     )

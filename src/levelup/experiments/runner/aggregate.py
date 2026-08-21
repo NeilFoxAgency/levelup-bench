@@ -98,13 +98,20 @@ def _slice(records: list[UnitRecord]) -> AggregateSlice:
 def _paired_seed_audit(store: RunStore) -> bool:
     grouped: dict[tuple[str, str, int], set[str]] = defaultdict(set)
     seed_values: dict[tuple[str, str, int], set[str]] = defaultdict(set)
-    expected_conditions = {condition.condition_id for condition in store.config.conditions}
+    expected_conditions = {
+        phase: {
+            condition.condition_id
+            for condition in store.config.conditions
+            if phase in condition.execution_phases
+        }
+        for phase in ("development", "validation", "final")
+    }
     for planned in store.expected.units:
         group = (planned.key.phase, planned.key.task_id, planned.key.replicate)
         grouped[group].add(planned.key.condition_id)
         seed_values[group].add(planned.seeds.model_dump_json())
     return all(
-        conditions == expected_conditions and len(seed_values[group]) == 1
+        conditions == expected_conditions[group[0]] and len(seed_values[group]) == 1
         for group, conditions in grouped.items()
     )
 
@@ -147,7 +154,6 @@ def aggregate_run(
         by_phase_condition[(record.key.phase, record.key.condition_id)].append(record)
         by_phase_family[(record.key.phase, record.key.family_id)].append(record)
 
-    condition_ids = sorted(condition.condition_id for condition in store.config.conditions)
     phases = tuple(
         phase
         for phase in ("development", "validation", "final")
@@ -156,6 +162,14 @@ def aggregate_run(
     family_ids_by_phase = {
         phase: sorted(
             {unit.key.family_id for unit in store.expected.units if unit.key.phase == phase}
+        )
+        for phase in phases
+    }
+    condition_ids_by_phase = {
+        phase: sorted(
+            condition.condition_id
+            for condition in store.config.conditions
+            if phase in condition.execution_phases
         )
         for phase in phases
     }
@@ -189,7 +203,7 @@ def aggregate_run(
         by_phase_condition={
             phase: {
                 condition_id: _slice(by_phase_condition[(phase, condition_id)])
-                for condition_id in condition_ids
+                for condition_id in condition_ids_by_phase[phase]
             }
             for phase in phases
         },

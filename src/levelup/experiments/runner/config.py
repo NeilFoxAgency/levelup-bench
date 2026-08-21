@@ -142,8 +142,19 @@ class ConditionSpec(BaseModel):
 
     condition_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
+    execution_phases: tuple[
+        Literal["development", "validation", "final"], ...
+    ] = ("development", "validation", "final")
     exposure: ExposureSpec
     parameters: dict[str, JsonValue] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def execution_phases_are_unique(self) -> "ConditionSpec":
+        if not self.execution_phases:
+            raise ValueError("condition execution_phases cannot be empty")
+        if len(self.execution_phases) != len(set(self.execution_phases)):
+            raise ValueError("condition execution_phases must be unique")
+        return self
 
 
 class SeedPolicy(BaseModel):

@@ -313,6 +313,52 @@ def test_expected_matrix_is_complete_deterministic_and_seed_paired() -> None:
     assert {unit.seeds.environment_seed for unit in first.units} == {0}
 
 
+def test_condition_execution_phases_exclude_training_tasks_from_evaluation_units() -> None:
+    raw = _config(conditions=1, tasks=1, replicates=2).model_dump(mode="json")
+    raw["split"]["validation_tasks"] = [
+        {
+            "family_id": "heldout-family",
+            "task_id": "heldout-task",
+            "task_index": 7,
+            "generator_seed": 700,
+            "environment_reset_seed": 0,
+            "trajectory_catalog": [],
+        }
+    ]
+    raw["conditions"][0]["execution_phases"] = ["validation"]
+    raw["selection"] = {
+        "phases": ["validation"],
+        "primary_metric": "performance",
+        "rule": "Validation-only fixture.",
+    }
+    planned = plan_expected_units(ExperimentConfig.model_validate(raw))
+    assert len(planned.units) == 2
+    assert {unit.key.phase for unit in planned.units} == {"validation"}
+    assert {unit.key.task_id for unit in planned.units} == {"heldout-task"}
+
+
+def test_paired_seed_audit_uses_phase_local_condition_sets(tmp_path: Path) -> None:
+    raw = _config(conditions=2, tasks=1, replicates=1).model_dump(mode="json")
+    raw["split"]["validation_tasks"] = [
+        {
+            "family_id": "heldout-family",
+            "task_id": "heldout-task",
+            "task_index": 7,
+            "generator_seed": 700,
+            "environment_reset_seed": 0,
+            "trajectory_catalog": [],
+        }
+    ]
+    raw["conditions"][0]["execution_phases"] = ["development"]
+    raw["conditions"][1]["execution_phases"] = ["validation"]
+    raw["selection"]["phases"] = ["development", "validation"]
+    config = ExperimentConfig.model_validate(raw)
+    aggregate = aggregate_run(_store(tmp_path, config))
+    assert aggregate.paired_seed_audit_passed
+    assert set(aggregate.by_phase_condition["development"]) == {"condition-0"}
+    assert set(aggregate.by_phase_condition["validation"]) == {"condition-1"}
+
+
 def test_validity_requires_an_independent_evaluator() -> None:
     with pytest.raises(ValidationError, match="independent evaluator"):
         UnitOutcome(

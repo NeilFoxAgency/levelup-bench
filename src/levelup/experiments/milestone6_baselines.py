@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import random
+import time
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -55,6 +56,7 @@ class ProbeAccounting:
     resets: int
     actions: int
     discovered_aliases: tuple[str, ...]
+    wall_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +78,8 @@ class ValidatedObservableTrace:
     evaluator_replay_actions: int
     observable_replay_actions: int
     resets: int
+    evaluator_wall_seconds: float
+    observable_replay_wall_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +98,8 @@ class SearchAccounting:
     evaluator_calls: int
     evaluator_replay_actions: int
     unknown_affordance_decisions: int
+    generation_wall_seconds: float
+    evaluator_wall_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +109,7 @@ class GenerationAccounting:
     actions: int
     forward_passes: int
     unknown_affordance_decisions: int
+    wall_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,6 +231,7 @@ def discover_affordances(
     if actions_per_attempt < 1:
         raise ValueError("actions_per_attempt must be positive")
     rng = random.Random(seed)
+    started = time.perf_counter()
     transitions: list[ObservedTransition] = []
     sample_counts: dict[str, int] = {}
     attempts = 0
@@ -283,6 +291,7 @@ def discover_affordances(
             resets=resets,
             actions=actions,
             discovered_aliases=tuple(sorted(table.features)),
+            wall_seconds=time.perf_counter() - started,
         ),
     )
 
@@ -301,9 +310,7 @@ def validate_and_sanitize_reference(
         raise ValueError("task identity does not match reference trajectory")
     if environment.task_spec.task_id != task_identity.task_id:
         raise ValueError("task identity does not match reference environment")
-    catalog = {
-        item.trajectory_id: item for item in task_identity.trajectory_catalog
-    }
+    catalog = {item.trajectory_id: item for item in task_identity.trajectory_catalog}
     catalog_entry = catalog.get(trajectory.trajectory_id)
     if catalog_entry is None:
         raise ValueError("reference trajectory is absent from the canonical task catalog")
@@ -321,12 +328,15 @@ def validate_and_sanitize_reference(
     if trajectory_content_sha256(trajectory) != expected_content_sha256:
         raise ValueError("reference content does not match the canonical task catalog")
 
+    evaluator_started = time.perf_counter()
     result = evaluate_trajectory(environment.fresh(), trajectory)
+    evaluator_wall = time.perf_counter() - evaluator_started
     if not result.performance_eligible_for(environment.task_spec):
         raise ValueError("reference trajectory is not an independently valid completion")
     if result.performance_value is None:
         raise RuntimeError("valid reference has no performance value")
 
+    observable_replay_started = time.perf_counter()
     replay_environment = environment.fresh()
     replay_seed = trajectory.environment_seed
     if replay_seed is None:
@@ -357,6 +367,7 @@ def validate_and_sanitize_reference(
         raise RuntimeError("sanitized replay did not reproduce reference completion")
     if replay_environment.objective_value() != result.performance_value:
         raise RuntimeError("sanitized replay performance disagrees with evaluator replay")
+    observable_replay_wall = time.perf_counter() - observable_replay_started
     return ValidatedObservableTrace(
         task_id=task_identity.task_id,
         stage_label=exposure.stage_label,
@@ -367,6 +378,8 @@ def validate_and_sanitize_reference(
         evaluator_replay_actions=len(trajectory.steps),
         observable_replay_actions=len(trajectory.steps),
         resets=2,
+        evaluator_wall_seconds=evaluator_wall,
+        observable_replay_wall_seconds=observable_replay_wall,
     )
 
 
@@ -416,18 +429,13 @@ def optimum_only_training_samples(
 
     if not samples:
         raise ValueError("at least one validated optimum sample is required")
-    if any(
-        sample._construction_token is not _CANONICAL_CLEAN_SAMPLE_TOKEN
-        for sample in samples
-    ):
+    if any(sample._construction_token is not _CANONICAL_CLEAN_SAMPLE_TOKEN for sample in samples):
         raise ValueError("optimum imitation requires canonical paid-probe samples")
     if any(sample.reference.stage_label != "optimum" for sample in samples):
         raise ValueError("optimum imitation cannot consume non-optimum reference data")
     if any(sample.reference.task_id != sample.probe.task_id for sample in samples):
         raise ValueError("reference and paid-probe task identities do not match")
-    return tuple(
-        (sample.reference.trace, sample.probe.affordances) for sample in samples
-    )
+    return tuple((sample.reference.trace, sample.probe.affordances) for sample in samples)
 
 
 def generate_candidates_with_observable_policy(
@@ -452,6 +460,7 @@ def generate_candidates_with_observable_policy(
     if not 0 <= prior_adaptation_actions <= total_adaptation_action_cap:
         raise ValueError("prior adaptation actions exceed the total cap")
     rng = random.Random(seed)
+    started = time.perf_counter()
     episodes = resets = actions = forward_passes = 0
     unknown_decisions = 0
     generated: list[GeneratedCandidate] = []
@@ -528,6 +537,7 @@ def generate_candidates_with_observable_policy(
             actions=actions,
             forward_passes=forward_passes,
             unknown_affordance_decisions=unknown_decisions,
+            wall_seconds=time.perf_counter() - started,
         ),
     )
 
@@ -539,6 +549,7 @@ def evaluate_generated_search(
     """Evaluate a completed candidate batch without changing its generation history."""
 
     evaluated: list[EvaluatedCandidate] = []
+    started = time.perf_counter()
     first_valid: int | None = None
     best: float | None = None
     evaluator_calls = 0
@@ -573,5 +584,7 @@ def evaluate_generated_search(
             evaluator_calls=evaluator_calls,
             evaluator_replay_actions=replay_actions,
             unknown_affordance_decisions=accounting.unknown_affordance_decisions,
+            generation_wall_seconds=accounting.wall_seconds,
+            evaluator_wall_seconds=time.perf_counter() - started,
         ),
     )

@@ -166,6 +166,8 @@ def plan_expected_units(config: ExperimentConfig) -> ExpectedUnits:
                     data_order_seed=policy.data_order_seed_base + replicate,
                 )
                 for condition in conditions:
+                    if phase not in condition.execution_phases:
+                        continue
                     key = UnitKey(
                         phase=phase,
                         condition_id=condition.condition_id,
