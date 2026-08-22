@@ -595,3 +595,51 @@ until all 480 actual model artifacts and reports are persisted, descriptor-reloa
 against the exact evidence-derived views, and accepted by a separate opaque model-artifact
 authority. In particular, caller-supplied tensor hashes or uniformly rehashed recurrent-step
 counts are not accepted as execution evidence.
+
+### Phase 3 model-preparation boundary
+
+The next preparation step is a development-only, resumable build of exactly 480
+temperature-independent model owners (the frozen four-condition, six-family,
+five-replicate, four-training-tuple matrix). It is authorized only by the
+descriptor-reloaded Phase 2 runtime and the immutable Phase 3 plan, anchor, and
+evidence authorities. Evidence payloads are read through held, descriptor-pinned
+fold/data descriptors and their canonical manifest and payload bytes are bound
+into each owner; path-based re-resolution is not an authority substitute.
+
+Preparation persists three separate opaque namespaces —
+`phase3-model-artifacts/`, `phase3-model-artifact-keys/`, and
+`phase3-model-artifact-costs/` — for model artifacts, keys, and costs. Each artifact is content-addressed and
+validated against the frozen architecture/capacity, optimizer, training tuple,
+tensor identity, and exact training/forward/recurrent/serialization accounting.
+Atomic claims, canonical progress, and staging outside those authority
+namespaces make interruption and resume crash-safe; stale or extra authority
+entries fail closed. A bounded preparation call may build a prefix for testing,
+but it cannot claim completion until all 480 owners and the exact evidence/view
+matrix are present.
+
+This boundary performs no environment interaction, probe, search, replay,
+evaluator, oracle, outcome/result read, aggregation, selection, or final-family
+access. Later screening execution must consume only the opaque, descriptor-
+reloaded and revalidated artifacts through pinned namespaces; it must not train
+models or reconstruct them from caller-supplied paths or hashes. These artifacts
+support the already frozen representation ladder; they do not authorize new
+comparative claims or alter the selection protocol.
+
+Run preparation with two explicit, independently validated repositories: the clean
+historical Phase 2 screening-publication checkout named by the readiness manifest,
+and the clean current Phase 3 authority/source checkout that supplies this driver.
+The driver records a write-once preparation provenance artifact containing the
+current git, Python, PyTorch, device, and system identity and binds its stable hash
+and git commit into every model key and progress record. Omitting both `--limit`
+and `--owner-id` requests the full frozen 480-owner matrix; those options exist
+only for bounded integration and recovery checks.
+
+```bash
+python -m levelup.experiments.milestone6_phase3_model_preparation_driver \
+  --manifest-path /absolute/path/to/clean-phase2-publication-checkout/experiments/milestone6_phase2_screening_readiness.json \
+  --manifest-sha256 ee2cd37c0981b459237bc8691511ed6e048863cdcf5aa04bc7f0713726ef1109 \
+  --raw-root /absolute/path/to/phase2-raw-root \
+  --screening-repository /absolute/path/to/clean-phase2-publication-checkout \
+  --authority-repository /absolute/path/to/clean-current-phase3-checkout \
+  --output-root /absolute/path/to/phase3-model-output-root
+```

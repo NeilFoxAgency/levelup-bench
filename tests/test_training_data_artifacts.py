@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import PhaseAccounting, TrainingPreparationAccounting
 from levelup.experiments.runner.secure_fs import open_directory_chain
 from levelup.experiments.runner.training_data_artifacts import (
@@ -26,8 +27,10 @@ from levelup.experiments.runner.training_data_artifacts import (
     load_training_data_evidence_at,
     load_training_data_evidence_cost,
     load_training_data_evidence_cost_at,
+    load_training_data_evidence_payload_bundle_from_at,
     load_training_data_view_cost,
     load_training_data_view_cost_at,
+    open_training_data_reader,
     sanitize_clean_optimum_samples,
     write_training_data_artifact,
 )
@@ -188,6 +191,74 @@ def test_fd_root_loaders_match_path_loader_validation(tmp_path: Path) -> None:
         assert load_training_data_view_cost_at(
             run_fd, key.key_id
         ) == load_training_data_view_cost(tmp_path, key.key_id)
+    finally:
+        os.close(run_fd)
+
+
+def test_fd_evidence_bundle_returns_validated_canonical_payload_bytes(tmp_path: Path) -> None:
+    key = _key()
+    written = _write(tmp_path, key, _canonical_data())
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        with open_training_data_reader(run_fd) as reader:
+            bundle = load_training_data_evidence_payload_bundle_from_at(
+                reader,
+                written.evidence_id,
+                expected_key=evidence_key_for(key),
+            )
+            assert bundle.manifest.evidence_id == written.evidence_id
+            assert bundle.payload.samples[0].task_id == "task-a"
+            assert bundle.manifest_bytes == canonical_json_bytes(
+                bundle.manifest.model_dump(mode="json")
+            )
+            assert bundle.payload_bytes == canonical_json_bytes(
+                bundle.payload.model_dump(mode="json")
+            )
+            assert hashlib.sha256(bundle.payload_bytes).hexdigest() == bundle.manifest.payload_sha256
+            assert len(bundle.payload_bytes) == bundle.manifest.payload_bytes
+    finally:
+        os.close(run_fd)
+
+
+def test_fd_evidence_bundle_rejects_payload_hash_drift(tmp_path: Path) -> None:
+    key = _key()
+    written = _write(tmp_path, key, _canonical_data())
+    payload_path = tmp_path / "training-data-evidence" / written.evidence_id / "samples.json"
+    payload_path.write_text(payload_path.read_text(encoding="utf-8").replace("wait", "drift"))
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        with open_training_data_reader(run_fd) as reader:
+            with pytest.raises(TrainingDataArtifactError, match="integrity"):
+                load_training_data_evidence_payload_bundle_from_at(
+                    reader,
+                    written.evidence_id,
+                    expected_key=evidence_key_for(key),
+                )
+    finally:
+        os.close(run_fd)
+
+
+def test_fd_evidence_bundle_remains_anchored_after_run_path_substitution(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    key = _key()
+    written = _write(run_root, key, _canonical_data())
+    run_fd = open_directory_chain(run_root)
+    detached = tmp_path / "run-detached"
+    run_root.rename(detached)
+    external = tmp_path / "external"
+    external.mkdir()
+    run_root.symlink_to(external, target_is_directory=True)
+    try:
+        with open_training_data_reader(run_fd) as reader:
+            bundle = load_training_data_evidence_payload_bundle_from_at(
+                reader,
+                written.evidence_id,
+                expected_key=evidence_key_for(key),
+            )
+        assert bundle.manifest.evidence_id == written.evidence_id
+        assert bundle.payload.samples[0].task_id == "task-a"
     finally:
         os.close(run_fd)
 

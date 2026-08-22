@@ -55,6 +55,22 @@ class PinnedTrainingDataReader:
     artifact_root_fd: int
 
 
+@dataclass(frozen=True, slots=True)
+class TrainingDataEvidencePayloadBundle:
+    """One evidence manifest, parsed payload, and its validated raw bytes.
+
+    ``payload_bytes`` are copied from the descriptor-relative file read that was
+    checked against ``manifest.payload_sha256`` and ``manifest.payload_bytes``.
+    Callers that need to derive further learner artifacts can therefore retain the
+    exact bytes used for the integrity decision without reopening the run path.
+    """
+
+    manifest: TrainingDataEvidenceManifest
+    payload: TrainingDataPayload
+    manifest_bytes: bytes
+    payload_bytes: bytes
+
+
 @contextmanager
 def open_training_data_reader(run_fd: int) -> Iterator[PinnedTrainingDataReader]:
     """Pin every training-data namespace used by one validation transaction."""
@@ -699,11 +715,17 @@ def _validate_loaded_from_at(
             os.close(artifact_fd)
 
 
-def _load_evidence_from_at(
+def _load_evidence_payload_bundle_from_at(
     evidence_root_fd: int,
     evidence_id: str,
-) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
-    """Load evidence bytes below one already-pinned evidence namespace."""
+) -> TrainingDataEvidencePayloadBundle:
+    """Load and validate evidence below one already-pinned namespace.
+
+    The manifest and payload are both resolved relative to the retained evidence
+    root descriptor.  The payload bytes are read once, then parsed and checked for
+    canonical encoding, digest, byte count, task order, and evidence identity
+    before being returned to the caller.
+    """
 
     if not HEX64.fullmatch(evidence_id):
         raise TrainingDataArtifactError("invalid evidence ID")
@@ -712,9 +734,16 @@ def _load_evidence_from_at(
         evidence_fd = open_child_directory(evidence_root_fd, evidence_id)
         if set(regular_entries_at(evidence_fd)) != {"manifest.json", "samples.json"}:
             raise TrainingDataArtifactError("training-data evidence has unexpected files")
+        manifest_bytes = read_bytes_at(evidence_fd, "manifest.json")
+        try:
+            manifest_value = json.loads(manifest_bytes)
+        except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise TrainingDataArtifactError(
+                "invalid training-data evidence manifest"
+            ) from exc
         evidence_manifest = _validate_model(
             TrainingDataEvidenceManifest,
-            load_json_at(evidence_fd, "manifest.json"),
+            manifest_value,
             "training-data evidence manifest",
         )
         assert isinstance(evidence_manifest, TrainingDataEvidenceManifest)
@@ -730,9 +759,17 @@ def _load_evidence_from_at(
             or evidence_manifest.payload_sha256 != observed_hash
             or evidence_manifest.payload_bytes != len(payload_bytes)
             or evidence_manifest.sample_task_ids != observed_tasks
+            or manifest_bytes
+            != canonical_json_bytes(evidence_manifest.model_dump(mode="json"))
+            or payload_bytes != canonical_json_bytes(payload.model_dump(mode="json"))
         ):
             raise TrainingDataArtifactError("training-data evidence integrity mismatch")
-        return evidence_manifest, payload
+        return TrainingDataEvidencePayloadBundle(
+            evidence_manifest,
+            payload,
+            manifest_bytes,
+            payload_bytes,
+        )
     except TrainingDataArtifactError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -740,6 +777,16 @@ def _load_evidence_from_at(
     finally:
         if evidence_fd is not None:
             os.close(evidence_fd)
+
+
+def _load_evidence_from_at(
+    evidence_root_fd: int,
+    evidence_id: str,
+) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
+    """Load evidence bytes below one already-pinned evidence namespace."""
+
+    bundle = _load_evidence_payload_bundle_from_at(evidence_root_fd, evidence_id)
+    return bundle.manifest, bundle.payload
 
 
 def write_training_data_artifact(
@@ -941,6 +988,24 @@ def load_training_data_evidence_from_at(
     if manifest.key != expected_key or manifest.evidence_key_id != expected_key.key_id:
         raise TrainingDataArtifactError("training-data evidence key mismatch")
     return manifest, payload
+
+
+def load_training_data_evidence_payload_bundle_from_at(
+    reader: PinnedTrainingDataReader,
+    evidence_id: str,
+    *,
+    expected_key: TrainingDataEvidenceKey,
+) -> TrainingDataEvidencePayloadBundle:
+    """Return typed evidence plus the exact validated payload bytes.
+
+    This API is intentionally rooted at an already-held
+    :class:`PinnedTrainingDataReader`; it never resolves or reopens the run path.
+    """
+
+    bundle = _load_evidence_payload_bundle_from_at(reader.evidence_root_fd, evidence_id)
+    if bundle.manifest.key != expected_key or bundle.manifest.evidence_key_id != expected_key.key_id:
+        raise TrainingDataArtifactError("training-data evidence key mismatch")
+    return bundle
 
 
 def load_training_data_evidence_cost(

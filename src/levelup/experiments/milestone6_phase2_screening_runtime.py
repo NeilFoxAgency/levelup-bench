@@ -193,6 +193,11 @@ class ScreeningRuntime:
     manifest_parent_identity: tuple[int, int]
     manifest_file_identity: FileIdentity
     result_namespace_snapshot: tuple[tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...] = ()
+    # Explicit dual-repository loads retain independent authority identity and
+    # provenance. Legacy callers default these to the historical repository.
+    authority_repository: Path | None = None
+    authority_repository_identity: tuple[int, int] | None = None
+    authority_provenance: SystemProvenance | None = None
 
     @property
     def authority_bytes_by_path(self) -> tuple[tuple[Path, bytes], ...]:
@@ -222,6 +227,9 @@ class ScreeningRuntime:
                 or not self.child_identities
                 or self.manifest_parent_identity is None
                 or self.manifest_file_identity is None
+                or self.authority_repository is None
+                or self.authority_repository_identity is None
+                or self.authority_provenance is None
                 or any(
                     source.parent_identity is None or source.file_identity is None
                     for source in self.authority_sources
@@ -243,6 +251,8 @@ class ScreeningRuntime:
                 raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 _fail("screening runtime provenance changed after runtime load", exc)
+
+            _recheck_authority_repository(self)
 
             _recheck_manifest_and_tree(
                 self.manifest_path,
@@ -289,6 +299,7 @@ class ScreeningRuntime:
                     repository=self.repository,
                     manifest_bytes=self.manifest_bytes,
                 )
+                _recheck_authority_repository(self)
             except TrainingDataArtifactError:
                 raise
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -311,6 +322,9 @@ def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
         or not runtime.child_identities
         or runtime.manifest_parent_identity is None
         or runtime.manifest_file_identity is None
+        or runtime.authority_repository is None
+        or runtime.authority_repository_identity is None
+        or runtime.authority_provenance is None
         or any(
             source.parent_identity is None or source.file_identity is None
             for source in runtime.authority_sources
@@ -338,6 +352,7 @@ def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
         raise
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         _fail("screening runtime provenance changed before read-only reuse", exc)
+    _recheck_authority_repository(runtime)
     if len(runtime.folds) != len(runtime.manifest.children):
         _fail("screening runtime fold inventory is incomplete")
     for fold, child in zip(runtime.folds, runtime.manifest.children, strict=True):
@@ -409,6 +424,66 @@ def _reject_symlink_chain(path: Path, *, require_exists: bool = True) -> Path:
     if require_exists and not os.path.lexists(target):
         _fail(f"screening runtime path does not exist: {target}")
     return target
+
+
+def _directory_identity(path: Path) -> tuple[int, int]:
+    """Capture a directory identity through a descriptor, without path reads."""
+
+    try:
+        directory_fd = secure_fs.open_directory_chain(path)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail("screening runtime repository cannot be securely opened", exc)
+    try:
+        return secure_fs.directory_identity(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _assert_authority_source_paths(
+    sources: tuple[AuthoritySourceSnapshot, ...], authority_repository: Path
+) -> None:
+    """Ensure frozen authority files are inside the pinned source checkout."""
+
+    try:
+        authority_root = _reject_symlink_chain(authority_repository).resolve(strict=True)
+        for source in sources:
+            source_path = _reject_symlink_chain(source.path).resolve(strict=True)
+            source_path.relative_to(authority_root)
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        _fail("screening authority source is outside the pinned authority checkout", exc)
+
+
+def _recheck_authority_repository(runtime: ScreeningRuntime) -> None:
+    """Recheck authority checkout identity, cleanliness, and provenance."""
+
+    authority_repository = runtime.authority_repository
+    authority_provenance = runtime.authority_provenance
+    if authority_repository is None or authority_provenance is None:
+        _fail("screening runtime is missing authority repository provenance")
+    try:
+        current_repository = _reject_symlink_chain(authority_repository).resolve(strict=True)
+        if current_repository != authority_repository:
+            _fail("screening authority repository path changed after runtime load")
+        if runtime.authority_repository_identity is None:
+            _fail("screening runtime is missing authority repository identity")
+        if _directory_identity(current_repository) != runtime.authority_repository_identity:
+            _fail("screening authority repository identity changed after runtime load")
+        # canonical_screening_repository binds the authority path to the source
+        # checkout that supplied this module's authority constants and plan.
+        canonical_screening_repository(current_repository, authority_root=ROOT)
+        if current_repository != runtime.repository:
+            captured = capture_system_provenance(current_repository, runtime.device_policy)
+            if provenance_identity_sha256(captured) != provenance_identity_sha256(authority_provenance):
+                _fail("screening authority provenance changed after runtime load")
+            if captured.git_dirty or captured.git_diff_sha256 is not None:
+                _fail("screening authority repository is dirty")
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        _fail("screening authority repository provenance changed after runtime load", exc)
+    _assert_authority_source_paths(runtime.authority_sources, current_repository)
 
 
 def _safe_basename(value: str, *, label: str) -> None:
@@ -1136,6 +1211,7 @@ def load_screening_runtime(
     *,
     manifest_bytes_sha256: str,
     provenance: SystemProvenance | None = None,
+    authority_repository: str | Path | None = None,
 ) -> ScreeningRuntime:
     """Load and validate the exact six-fold development screening inventory."""
 
@@ -1147,11 +1223,24 @@ def load_screening_runtime(
     root = _reject_symlink_chain(Path(raw_root))
     repository_path = _reject_symlink_chain(Path(repository)).resolve(strict=True)
     try:
-        repository_path = canonical_screening_repository(
-            repository_path, authority_root=ROOT
-        )
+        if authority_repository is None:
+            # Legacy Phase 2 callers use one checkout for both roles.
+            authority_repository_path = canonical_screening_repository(
+                repository_path, authority_root=ROOT
+            )
+        else:
+            # The historical checkout remains the manifest/provenance source;
+            # the explicit authority checkout must be the source tree that
+            # supplied this module and its frozen authority constants.
+            authority_repository_path = _reject_symlink_chain(
+                Path(authority_repository)
+            ).resolve(strict=True)
+            canonical_screening_repository(
+                authority_repository_path, authority_root=ROOT
+            )
     except TrainingDataArtifactError as exc:
         _fail(str(exc), exc)
+    authority_repository_identity = _directory_identity(authority_repository_path)
     manifest_bytes, manifest, manifest_parent_identity, manifest_file_identity = _manifest_bytes(
         committed, manifest_bytes_sha256
     )
@@ -1174,6 +1263,7 @@ def load_screening_runtime(
     finally:
         os.close(root_fd)
     authority_sources = _authority_sources(manifest)
+    _assert_authority_source_paths(authority_sources, authority_repository_path)
     try:
         plan = build_screening_plan()
         validate_screening_plan(plan)
@@ -1188,6 +1278,17 @@ def load_screening_runtime(
     )
     apply_runtime_policy(configs[0].device_policy)
     captured_provenance = capture_system_provenance(repository_path, configs[0].device_policy)
+    if authority_repository_path == repository_path:
+        authority_provenance = captured_provenance
+    else:
+        try:
+            authority_provenance = capture_system_provenance(
+                authority_repository_path, configs[0].device_policy
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            _fail("cannot capture authority repository provenance", exc)
+        if authority_provenance.git_dirty or authority_provenance.git_diff_sha256 is not None:
+            _fail("authority repository must be clean")
     try:
         validate_screening_provenance(
             manifest.provenance,
@@ -1251,6 +1352,8 @@ def load_screening_runtime(
         folds,
         result_namespace_snapshot,
     )
+    if _directory_identity(authority_repository_path) != authority_repository_identity:
+        _fail("screening authority repository identity changed during runtime load")
     return ScreeningRuntime(
         manifest_path=committed,
         raw_root=root,
@@ -1267,6 +1370,9 @@ def load_screening_runtime(
         manifest_parent_identity=manifest_parent_identity,
         manifest_file_identity=manifest_file_identity,
         result_namespace_snapshot=result_namespace_snapshot,
+        authority_repository=authority_repository_path,
+        authority_repository_identity=authority_repository_identity,
+        authority_provenance=authority_provenance,
     )
 
 

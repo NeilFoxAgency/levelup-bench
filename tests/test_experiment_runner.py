@@ -1319,6 +1319,161 @@ def test_prepared_initialization_uses_supplied_provenance_without_recapture(
         ExperimentRunner(store).execute(_payload)
 
 
+def test_required_readonly_namespaces_require_unique_safe_components(
+    tmp_path: Path,
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    with pytest.raises(ArtifactValidationError, match="safe direct-child"):
+        RunStore(
+            tmp_path / "unsafe",
+            config,
+            repository=tmp_path,
+            required_readonly_namespaces=("models/../escape",),
+        )
+    with pytest.raises(ArtifactValidationError, match="unique"):
+        RunStore(
+            tmp_path / "duplicate",
+            config,
+            repository=tmp_path,
+            required_readonly_namespaces=("models", "models"),
+        )
+    with pytest.raises(ArtifactValidationError, match="safe direct-child"):
+        RunStore(
+            tmp_path / "reserved",
+            config,
+            repository=tmp_path,
+            required_readonly_namespaces=("units",),
+        )
+
+
+def test_prepared_initialization_pins_required_namespace_and_post_read_replacement(
+    tmp_path: Path,
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    store = RunStore(
+        tmp_path,
+        config,
+        repository=tmp_path,
+        required_readonly_namespaces=("models",),
+    )
+    store.run_dir.mkdir(parents=True)
+    store.units_dir.mkdir()
+    store.attempts_dir.mkdir()
+    (store.run_dir / "models").mkdir()
+    store.initialize_prepared(_provenance())
+
+    assert store._required_namespace_identities is not None
+    with store._open_pinned_namespaces() as namespaces:
+        assert set(namespaces) == {"models"}
+        assert os.fstat(namespaces["models"]).st_ino == os.stat(store.run_dir / "models").st_ino
+
+    original = store.run_dir / "models"
+    detached = store.run_dir / "models-detached"
+    external = tmp_path / "external-models"
+    external.mkdir()
+    original.rename(detached)
+    original.symlink_to(external, target_is_directory=True)
+    with pytest.raises(ArtifactValidationError, match="models"):
+        with store._open_pinned_namespaces():
+            pass
+    assert store._execution_ready is False
+
+
+def test_required_namespace_missing_or_symlinked_fails_prepared_initialization(
+    tmp_path: Path,
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    for mode in ("missing", "symlink"):
+        root = tmp_path / mode
+        store = RunStore(
+            root,
+            config,
+            repository=tmp_path,
+            required_readonly_namespaces=("models",),
+        )
+        store.run_dir.mkdir(parents=True)
+        store.units_dir.mkdir()
+        store.attempts_dir.mkdir()
+        if mode == "symlink":
+            target = tmp_path / f"{mode}-target"
+            target.mkdir()
+            (store.run_dir / "models").symlink_to(target, target_is_directory=True)
+        with pytest.raises(ArtifactValidationError, match="models|namespace"):
+            store.initialize_prepared(_provenance())
+        assert store._required_namespace_identities is None
+
+
+def test_required_namespace_activation_failure_relocks_every_store(tmp_path: Path) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    stores: list[RunStore] = []
+    for index in range(2):
+        store_config = config
+        if index:
+            changed = config.model_dump(mode="json")
+            changed["method_revision"] = "test-v2"
+            store_config = ExperimentConfig.model_validate(changed)
+        store = RunStore(
+            tmp_path / f"store-{index}",
+            store_config,
+            repository=tmp_path,
+            required_readonly_namespaces=("models",),
+        )
+        store.run_dir.mkdir(parents=True)
+        store.units_dir.mkdir()
+        store.attempts_dir.mkdir()
+        (store.run_dir / "models").mkdir()
+        store.initialize_prepared(_provenance())
+        stores.append(store)
+    RunStore._activate_prepared_batch(tuple(stores), _provenance())
+    assert all(store._execution_ready for store in stores)
+    (stores[1].run_dir / "models").rename(stores[1].run_dir / "models-detached")
+    with pytest.raises(ArtifactValidationError, match="models|namespace"):
+        RunStore._activate_prepared_batch(tuple(stores), _provenance())
+    assert all(not store._execution_ready for store in stores)
+    assert all(store._result_directory_identities is None for store in stores)
+
+
+def test_required_namespace_activation_closes_earlier_fd_on_later_open_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(conditions=1, tasks=1, replicates=1)
+    store = RunStore(
+        tmp_path,
+        config,
+        repository=tmp_path,
+        required_readonly_namespaces=("models-a", "models-b"),
+    )
+    store.run_dir.mkdir(parents=True)
+    store.units_dir.mkdir()
+    store.attempts_dir.mkdir()
+    (store.run_dir / "models-a").mkdir()
+    (store.run_dir / "models-b").mkdir()
+    store.initialize_prepared(_provenance())
+
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_open_child_directory"]
+    )
+    real_open = storage_module._open_child_directory
+    opened_first: list[int] = []
+
+    def fail_second_namespace(parent_fd: int, name: str) -> int:
+        if name == "models-b":
+            raise ArtifactValidationError("forced later namespace failure")
+        descriptor = real_open(parent_fd, name)
+        if name == "models-a":
+            opened_first.append(descriptor)
+        return descriptor
+
+    monkeypatch.setattr(storage_module, "_open_child_directory", fail_second_namespace)
+    with pytest.raises(ArtifactValidationError, match="forced later"):
+        RunStore._activate_prepared_batch((store,), _provenance())
+
+    assert len(opened_first) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened_first[0])
+    assert not store._execution_ready
+
+
 def test_prepared_initialization_fails_if_supplied_provenance_disappears(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

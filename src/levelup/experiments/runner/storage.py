@@ -420,7 +420,26 @@ class RunStore:
         *,
         repository: str | Path,
         shared_artifacts: tuple[PlannedSharedArtifact, ...] = (),
+        required_readonly_namespaces: tuple[str, ...] = (),
     ) -> None:
+        if not isinstance(required_readonly_namespaces, tuple):
+            raise ArtifactValidationError(
+                "required_readonly_namespaces must be a tuple of safe components"
+            )
+        for namespace in required_readonly_namespaces:
+            if (
+                not isinstance(namespace, str)
+                or not namespace
+                or namespace in {".", "..", "units", "attempts"}
+                or "/" in namespace
+                or "\\" in namespace
+                or "\x00" in namespace
+            ):
+                raise ArtifactValidationError(
+                    "required_readonly_namespaces must contain safe direct-child names"
+                )
+        if len(required_readonly_namespaces) != len(set(required_readonly_namespaces)):
+            raise ArtifactValidationError("required_readonly_namespaces must be unique")
         self.config = config
         self.config_sha256 = scientific_config_sha256(config)
         self.run_id = run_id_for(config)
@@ -429,6 +448,7 @@ class RunStore:
         self.units_dir = self.run_dir / "units"
         self.attempts_dir = self.run_dir / "attempts"
         self.aggregate_path = self.run_dir / "aggregate.json"
+        self.required_readonly_namespaces = required_readonly_namespaces
         self.expected = plan_expected_units(config)
         self.expected_shared = ExpectedSharedArtifacts(
             run_id=self.run_id,
@@ -439,14 +459,16 @@ class RunStore:
         self._validate_shared_plan()
         self._execution_ready = False
         self._result_directory_identities: dict[str, tuple[int, int]] | None = None
+        self._required_namespace_identities: dict[str, tuple[int, int]] | None = None
 
     def _capture_result_directory_identities(self) -> dict[str, tuple[int, int]]:
-        """Pin the run directory and its two direct result namespaces."""
+        """Pin the run directory and all configured direct child namespaces."""
 
         run_fd = _open_directory_chain(self.run_dir)
         identities = {"run": _directory_identity(run_fd)}
         try:
-            for namespace in ("units", "attempts"):
+            namespaces = ("units", "attempts", *self.required_readonly_namespaces)
+            for namespace in dict.fromkeys(namespaces):
                 namespace_fd = _open_child_directory(run_fd, namespace)
                 try:
                     identities[namespace] = _directory_identity(namespace_fd)
@@ -455,6 +477,16 @@ class RunStore:
         finally:
             os.close(run_fd)
         return identities
+
+    def _capture_required_namespace_identities(self) -> dict[str, tuple[int, int]]:
+        identities = self._capture_result_directory_identities()
+        return {
+            "run": identities["run"],
+            **{
+                namespace: identities[namespace]
+                for namespace in self.required_readonly_namespaces
+            },
+        }
 
     @contextmanager
     def _open_result_namespace(self, namespace: str) -> Iterator[tuple[int, int]]:
@@ -465,6 +497,9 @@ class RunStore:
         expected = self._result_directory_identities
         if expected is None:
             raise ArtifactValidationError("result directories have not been initialized")
+        required_expected = self._required_namespace_identities
+        if required_expected is None and self.required_readonly_namespaces:
+            raise ArtifactValidationError("required namespace identities have not been initialized")
         run_fd = _open_directory_chain(self.run_dir)
         try:
             if _directory_identity(run_fd) != expected["run"]:
@@ -502,6 +537,62 @@ class RunStore:
             os.close(current_fd)
         if current_identity != self._result_directory_identities["run"]:
             raise ArtifactValidationError("run directory identity changed after shared-artifact read")
+
+    @contextmanager
+    def _open_pinned_namespaces(self) -> Iterator[dict[str, int]]:
+        """Yield required namespace descriptors with pre/post identity checks.
+
+        The yielded descriptors are anchored below one safely-opened run
+        directory.  They are closed exactly once before textual paths are
+        reopened for a post-read identity check, so callers never access a
+        replacement namespace through a path resolution race.
+        """
+
+        expected = self._result_directory_identities
+        if expected is None:
+            raise ArtifactValidationError("result directories have not been initialized")
+        required_expected = self._required_namespace_identities
+        if required_expected is None and self.required_readonly_namespaces:
+            raise ArtifactValidationError(
+                "required namespace identities have not been initialized"
+            )
+        stack = ExitStack()
+        stack.__enter__()
+        namespace_fds: dict[str, int] = {}
+        try:
+            run_fd = _open_directory_chain(self.run_dir)
+            stack.callback(os.close, run_fd)
+            if _directory_identity(run_fd) != expected["run"]:
+                raise ArtifactValidationError("run directory identity changed")
+            for namespace in self.required_readonly_namespaces:
+                namespace_fd = _open_child_directory(run_fd, namespace)
+                stack.callback(os.close, namespace_fd)
+                expected_identity = (
+                    required_expected[namespace]
+                    if required_expected is not None
+                    else expected[namespace]
+                )
+                if _directory_identity(namespace_fd) != expected_identity:
+                    raise ArtifactValidationError(
+                        f"{namespace} directory identity changed"
+                    )
+                namespace_fds[namespace] = namespace_fd
+            yield namespace_fds
+        finally:
+            stack.close()
+            current = self._capture_required_namespace_identities()
+            if current.get("run") != expected["run"]:
+                raise ArtifactValidationError("run directory identity changed after namespace read")
+            for namespace in self.required_readonly_namespaces:
+                expected_identity = (
+                    required_expected[namespace]
+                    if required_expected is not None
+                    else expected[namespace]
+                )
+                if current[namespace] != expected_identity:
+                    raise ArtifactValidationError(
+                        f"{namespace} directory identity changed after namespace read"
+                    )
 
     def _assert_result_namespace_current(self, namespace: str) -> None:
         # Re-open the current textual path after each operation.  The work was
@@ -553,16 +644,31 @@ class RunStore:
         for store in provided:
             if isinstance(store, cls):
                 store._execution_ready = False
+
+        def relock() -> None:
+            for store in provided:
+                if isinstance(store, cls):
+                    store._execution_ready = False
+                    store._result_directory_identities = None
+                    store._required_namespace_identities = None
+
         if not provided:
             raise ArtifactValidationError("prepared store batch cannot be empty")
         if any(not isinstance(store, cls) for store in provided):
+            relock()
             raise ArtifactValidationError("prepared batch contains a non-RunStore")
         if not isinstance(provenance, SystemProvenance):
+            relock()
             raise ArtifactValidationError("prepared batch provenance is invalid")
-        provenance = _revalidate_instance(provenance, SystemProvenance)
+        try:
+            provenance = _revalidate_instance(provenance, SystemProvenance)
+        except BaseException:
+            relock()
+            raise
 
         run_ids = [store.run_id for store in provided]
         if len(run_ids) != len(set(run_ids)):
+            relock()
             raise ArtifactValidationError("prepared batch contains duplicate run IDs")
 
         stack = ExitStack()
@@ -578,6 +684,11 @@ class RunStore:
                 stack.callback(os.close, units_fd)
                 attempts_fd = _open_child_directory(run_fd, "attempts")
                 stack.callback(os.close, attempts_fd)
+                required_fds: list[int] = []
+                for namespace in store.required_readonly_namespaces:
+                    required_fd = _open_child_directory(run_fd, namespace)
+                    stack.callback(os.close, required_fd)
+                    required_fds.append(required_fd)
                 run_fds.append(run_fd)
                 canonical_paths.append(Path(os.path.abspath(store.run_dir)))
                 result_identities.append(
@@ -585,6 +696,14 @@ class RunStore:
                         "run": _directory_identity(run_fd),
                         "units": _directory_identity(units_fd),
                         "attempts": _directory_identity(attempts_fd),
+                        **{
+                            namespace: _directory_identity(required_fd)
+                            for namespace, required_fd in zip(
+                                store.required_readonly_namespaces,
+                                required_fds,
+                                strict=True,
+                            )
+                        },
                     }
                 )
             if len(canonical_paths) != len(set(canonical_paths)):
@@ -638,9 +757,14 @@ class RunStore:
                     )
             for store, identities in zip(provided, result_identities, strict=True):
                 store._result_directory_identities = identities
+                store._required_namespace_identities = {
+                    namespace: identities[namespace]
+                    for namespace in store.required_readonly_namespaces
+                }
                 store._execution_ready = True
         except BaseException:
             stack.close()
+            relock()
             raise
         stack.close()
 
@@ -699,6 +823,7 @@ class RunStore:
         """Create immutable config/unit plans and first-run provenance."""
 
         self._execution_ready = False
+        self._required_namespace_identities = None
         resolved_device = apply_runtime_policy(self.config.device_policy) if for_execution else None
 
         self.units_dir.mkdir(parents=True, exist_ok=True)
@@ -768,6 +893,10 @@ class RunStore:
         if self._capture_result_directory_identities() != prepared_identities:
             raise ArtifactValidationError("result directory identity changed during initialization")
         self._result_directory_identities = prepared_identities
+        self._required_namespace_identities = {
+            namespace: prepared_identities[namespace]
+            for namespace in self.required_readonly_namespaces
+        }
         self._execution_ready = for_execution
 
     def initialize_prepared(self, provenance: SystemProvenance) -> None:
@@ -795,10 +924,19 @@ class RunStore:
             stack.callback(os.close, units_fd)
             attempts_fd = _open_child_directory(run_fd, "attempts")
             stack.callback(os.close, attempts_fd)
+            required_fds: dict[str, int] = {}
+            for namespace in self.required_readonly_namespaces:
+                required_fd = _open_child_directory(run_fd, namespace)
+                stack.callback(os.close, required_fd)
+                required_fds[namespace] = required_fd
             identities = {
                 "run": _directory_identity(run_fd),
                 "units": _directory_identity(units_fd),
                 "attempts": _directory_identity(attempts_fd),
+                **{
+                    namespace: _directory_identity(required_fd)
+                    for namespace, required_fd in required_fds.items()
+                },
             }
 
             canonical_values = (
@@ -836,7 +974,14 @@ class RunStore:
                     "prepared result directory identity changed after prior initialization"
                 )
             self._result_directory_identities = identities
+            self._required_namespace_identities = {
+                namespace: identities[namespace]
+                for namespace in self.required_readonly_namespaces
+            }
         except BaseException:
+            self._execution_ready = False
+            self._result_directory_identities = None
+            self._required_namespace_identities = None
             stack.close()
             raise
         stack.close()

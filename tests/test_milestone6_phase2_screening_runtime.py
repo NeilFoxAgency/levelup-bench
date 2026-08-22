@@ -244,6 +244,93 @@ def test_runtime_rejects_repository_distinct_from_authority_checkout(
         )
 
 
+def _dual_repository_fixture(monkeypatch, tmp_path):
+    """Build a tiny fixture with historical and current authority checkouts."""
+
+    committed, raw_root, source, body, _config = _fixture(monkeypatch, tmp_path)
+    historical = tmp_path / "historical-screening"
+    historical_manifest = historical / "experiments" / "milestone6_phase2_screening_readiness.json"
+    historical_manifest.parent.mkdir(parents=True)
+    historical_manifest.write_bytes(body)
+    authority = tmp_path / "current-authority"
+    authority.mkdir()
+    authority_source = authority / "protocol.json"
+    authority_source.write_bytes(source.read_bytes())
+    monkeypatch.setattr(runtime, "ROOT", authority)
+    authority_bytes, parent_identity, file_identity = runtime._read_pinned_file(
+        authority_source, label="authority protocol"
+    )
+    snapshot = runtime.AuthoritySourceSnapshot(
+        "protocol",
+        authority_source,
+        authority_bytes,
+        hashlib.sha256(authority_bytes).hexdigest(),
+        parent_identity,
+        file_identity,
+    )
+    monkeypatch.setattr(runtime, "_authority_sources", lambda _manifest: (snapshot,))
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    handle = runtime.load_screening_runtime(
+        historical_manifest,
+        raw_root,
+        historical,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+        authority_repository=authority,
+    )
+    return handle, historical, authority, body
+
+
+def test_explicit_dual_repositories_bind_independent_authority_checkout(
+    monkeypatch, tmp_path
+):
+    handle, historical, authority, _body = _dual_repository_fixture(monkeypatch, tmp_path)
+    assert handle.repository == historical
+    assert handle.authority_repository == authority
+    assert handle.authority_repository_identity == runtime._directory_identity(authority)
+    assert handle.authority_provenance == PROVENANCE
+    runtime._recheck_authority_repository(handle)
+
+
+def test_authority_repository_identity_substitution_fails_closed(monkeypatch, tmp_path):
+    handle, _historical, authority, _body = _dual_repository_fixture(monkeypatch, tmp_path)
+    moved = authority.with_name("authority-moved")
+    authority.rename(moved)
+    authority.mkdir()
+    with pytest.raises(TrainingDataArtifactError, match="authority repository identity"):
+        runtime._recheck_authority_repository(handle)
+
+
+def test_authority_provenance_drift_is_checked_independently(monkeypatch, tmp_path):
+    handle, historical, authority, _body = _dual_repository_fixture(monkeypatch, tmp_path)
+    changed = PROVENANCE.model_copy(update={"git_dirty": True, "git_diff_sha256": "b" * 64})
+
+    def capture(repository, _policy):
+        return changed if Path(repository) == authority else PROVENANCE
+
+    monkeypatch.setattr(runtime, "capture_system_provenance", capture)
+    with pytest.raises(TrainingDataArtifactError, match="authority provenance"):
+        runtime._recheck_authority_repository(handle)
+
+
+def test_explicit_authority_symlink_is_rejected_before_source_reads(monkeypatch, tmp_path):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    link = tmp_path / "authority-link"
+    link.symlink_to(authority, target_is_directory=True)
+    with pytest.raises(TrainingDataArtifactError, match="contains a symlink"):
+        runtime.load_screening_runtime(
+            committed,
+            raw_root,
+            tmp_path,
+            manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+            provenance=PROVENANCE,
+            authority_repository=link,
+        )
+
+
 def test_supplied_provenance_still_applies_and_captures_once(monkeypatch, tmp_path):
     committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
     policy_calls: list[str] = []
@@ -387,6 +474,10 @@ def test_runtime_load_and_recheck_accept_exact_artifact_publication_child(
         "capture_system_provenance",
         lambda *_args: captures.append("capture") or current,
     )
+    # This fixture keeps its synthetic authority source outside the temporary
+    # git repository. Source-containment behavior is covered by the dedicated
+    # dual-repository tests; this test isolates the publication-child rule.
+    monkeypatch.setattr(runtime, "_assert_authority_source_paths", lambda *_args: None)
     from levelup.experiments.milestone6_phase2_screening_provenance import (
         validate_screening_provenance,
     )
@@ -524,6 +615,7 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
     # Use the real tree/authority recheck for this test; the fixture's fake
     # inventory and activation boundary remain isolated.
     monkeypatch.undo()
+    monkeypatch.setattr(runtime, "ROOT", tmp_path)
     monkeypatch.setattr(runtime, "validate_screening_provenance", lambda *_args, **_kwargs: None)
     manifest = _Manifest()
     monkeypatch.setattr(
@@ -584,6 +676,9 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
         child_identities=child_identities,
         manifest_parent_identity=manifest_parent_identity,
         manifest_file_identity=manifest_file_identity,
+        authority_repository=tmp_path,
+        authority_repository_identity=runtime._directory_identity(tmp_path),
+        authority_provenance=PROVENANCE,
     )
     marker.write_bytes(b"tampered")
     with pytest.raises(TrainingDataArtifactError, match="tree changed"):
