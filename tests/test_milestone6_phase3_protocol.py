@@ -4,6 +4,10 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
+from levelup.experiments.milestone6_phase3_protocol import load_phase3_protocol
+
 ROOT = Path(__file__).parents[1]
 PROTOCOL_PATH = ROOT / "configs/milestone6/phase3_representation_ladder.json"
 
@@ -206,3 +210,46 @@ def test_phase3_shuffle_seed_and_diagnostic_channels_cannot_select() -> None:
         "claim thresholds",
     ):
         assert forbidden_change in diagnostics["cannot_change"]
+
+
+def test_typed_phase3_loader_accepts_only_complete_frozen_contract() -> None:
+    snapshot = load_phase3_protocol()
+    assert snapshot.path == PROTOCOL_PATH.resolve()
+    assert snapshot.sha256 == _sha256(PROTOCOL_PATH)
+    assert tuple(key for key, _ in snapshot.authority_bytes) == (
+        "development_protocol",
+        "development_tasks",
+        "phase2_candidates",
+        "phase2_selection_lock",
+    )
+    assert snapshot.payload["development_matrix"]["new_units"] == 11520
+
+
+def test_typed_phase3_loader_rejects_authority_and_final_drift(tmp_path: Path) -> None:
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    payload = _load(PROTOCOL_PATH)
+    for row in payload["authority"].values():
+        if not isinstance(row, dict) or "path" not in row:
+            continue
+        source = ROOT / row["path"]
+        target = repository / row["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(source.read_bytes())
+    protocol = repository / "phase3.json"
+    protocol.write_text(json.dumps(payload))
+    assert load_phase3_protocol(protocol, repository=repository).payload[
+        "final_family_access"
+    ] is False
+
+    payload["final_family_access"] = True
+    protocol.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="final-family access"):
+        load_phase3_protocol(protocol, repository=repository)
+
+    payload["final_family_access"] = False
+    protocol.write_text(json.dumps(payload))
+    authority_path = repository / payload["authority"]["development_tasks"]["path"]
+    authority_path.write_bytes(authority_path.read_bytes() + b"\n")
+    with pytest.raises(ValueError, match="development_tasks changed"):
+        load_phase3_protocol(protocol, repository=repository)
