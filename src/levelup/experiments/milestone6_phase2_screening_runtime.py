@@ -68,6 +68,8 @@ from levelup.experiments.runner.training_data_artifacts import (
     open_training_data_reader,
 )
 
+FileIdentity = tuple[int, int, int, int, int]
+
 
 def load_screening_data_inventory(
     config: ExperimentConfig,
@@ -148,7 +150,7 @@ class AuthoritySourceSnapshot:
     content: bytes
     sha256: str
     parent_identity: tuple[int, int]
-    file_identity: tuple[int, int]
+    file_identity: FileIdentity
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +184,7 @@ class ScreeningRuntime:
     raw_root_identity: tuple[int, int]
     child_identities: tuple[tuple[str, tuple[int, int]], ...]
     manifest_parent_identity: tuple[int, int]
-    manifest_file_identity: tuple[int, int]
+    manifest_file_identity: FileIdentity
 
     @property
     def authority_bytes_by_path(self) -> tuple[tuple[Path, bytes], ...]:
@@ -316,8 +318,8 @@ def _read_pinned_file(
     *,
     label: str,
     expected_parent_identity: tuple[int, int] | None = None,
-    expected_file_identity: tuple[int, int] | None = None,
-) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
+    expected_file_identity: FileIdentity | None = None,
+) -> tuple[bytes, tuple[int, int], FileIdentity]:
     """Read a regular file relative to one pinned parent directory."""
 
     target = _reject_symlink_chain(path)
@@ -336,7 +338,17 @@ def _read_pinned_file(
             observed = os.fstat(file_fd)
             if not stat.S_ISREG(observed.st_mode):
                 _fail(f"screening runtime {label} must be a regular file")
-            file_identity = (observed.st_dev, observed.st_ino)
+            # Device/inode alone is insufficient because filesystems may
+            # immediately reuse an inode after unlink/recreate.  Preserve
+            # nanosecond metadata and size so same-byte replacement remains
+            # observable without weakening the retained-descriptor read.
+            file_identity = (
+                observed.st_dev,
+                observed.st_ino,
+                observed.st_ctime_ns,
+                observed.st_mtime_ns,
+                observed.st_size,
+            )
             if expected_file_identity is not None and file_identity != expected_file_identity:
                 _fail(f"screening runtime {label} identity changed")
             chunks: list[bytes] = []
@@ -357,7 +369,7 @@ def _read_pinned_file(
 
 def _manifest_bytes(
     path: Path, pin: str
-) -> tuple[bytes, ScreeningReadinessManifest, tuple[int, int], tuple[int, int]]:
+) -> tuple[bytes, ScreeningReadinessManifest, tuple[int, int], FileIdentity]:
     content, parent_identity, file_identity = _read_pinned_file(path, label="committed manifest")
     try:
         value = json.loads(content)
@@ -603,7 +615,7 @@ def _recheck_manifest_and_tree(
     raw_root_identity: tuple[int, int],
     child_identities: tuple[tuple[str, tuple[int, int]], ...],
     manifest_parent_identity: tuple[int, int],
-    manifest_file_identity: tuple[int, int],
+    manifest_file_identity: FileIdentity,
 ) -> None:
     current_manifest, _current_parent_identity, _current_file_identity = _read_pinned_file(
         manifest_path,
