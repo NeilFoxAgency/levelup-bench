@@ -38,9 +38,9 @@ def _sha(value: str) -> str:
 
 def _patch_fake_task_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
-        "levelup.experiments.milestone6_phase3_anchor._canonical_task_ids_by_family",
+        "levelup.experiments.milestone6_phase3_anchor._canonical_tasks_by_family",
         lambda: {
-            family: tuple(f"{family}-task-{index}" for index in range(8))
+            family: tuple((f"{family}-task-{index}", index) for index in range(8))
             for family in FAMILIES
         },
     )
@@ -124,7 +124,9 @@ def _runtime() -> tuple[SimpleNamespace, dict[str, bytes]]:
                 split=SimpleNamespace(
                     final_tasks=(),
                     validation_tasks=tuple(
-                        SimpleNamespace(task_id=f"{family}-task-{index}")
+                        SimpleNamespace(
+                            task_id=f"{family}-task-{index}", task_index=index
+                        )
                         for index in range(8)
                     ),
                 ),

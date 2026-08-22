@@ -392,14 +392,24 @@ def _unit_rows(
         if local != EXPECTED_UNITS_PER_FOLD:
             raise AnchorManifestError("each Phase 2 fold must contain exactly 960 B2/C unit results")
         validation_tasks = tuple(getattr(config.split, "validation_tasks", ()))
-        task_ids = tuple(getattr(task, "task_id", None) for task in validation_tasks)
-        if len(task_ids) != 8 or any(not isinstance(task_id, str) for task_id in task_ids):
+        task_rows = tuple(
+            (getattr(task, "task_id", None), getattr(task, "task_index", None))
+            for task in validation_tasks
+        )
+        if (
+            len(task_rows) != 8
+            or len(set(task_rows)) != 8
+            or any(
+                not isinstance(task_id, str) or not isinstance(task_index, int)
+                for task_id, task_index in task_rows
+            )
+        ):
             raise AnchorManifestError("Phase 2 fold validation-task matrix drifted")
         expected_local = {
             (base, candidate_tuple_id, task_id, task_index, replicate)
             for base in ANCHOR_BASES
             for candidate_tuple_id in CANDIDATE_TUPLE_IDS
-            for task_index, task_id in enumerate(task_ids)
+            for task_id, task_index in task_rows
             for replicate in range(5)
         }
         observed_local = {
@@ -465,21 +475,23 @@ def _lineage(runtime: Any, protocol: Phase3ProtocolSnapshot) -> dict[str, Any]:
     }
 
 
-def _canonical_task_ids_by_family() -> dict[str, tuple[str, ...]]:
+def _canonical_tasks_by_family() -> dict[str, tuple[tuple[str, int], ...]]:
     from levelup.experiments.milestone6_phase2_screening import (
         screening_child_configs,
     )
 
     configs = screening_child_configs()
-    rows: dict[str, tuple[str, ...]] = {}
+    rows: dict[str, tuple[tuple[str, int], ...]] = {}
     for config in configs:
         family = str(config.parameters["heldout_family_id"])
         if config.split.final_tasks:
             raise AnchorManifestError("canonical anchor config contains final tasks")
-        task_ids = tuple(task.task_id for task in config.split.validation_tasks)
-        if len(task_ids) != 8 or len(set(task_ids)) != 8:
+        tasks = tuple(
+            (task.task_id, task.task_index) for task in config.split.validation_tasks
+        )
+        if len(tasks) != 8 or len(set(tasks)) != 8:
             raise AnchorManifestError("canonical anchor validation tasks drifted")
-        rows[family] = task_ids
+        rows[family] = tasks
     if tuple(rows) != FAMILIES:
         raise AnchorManifestError("canonical anchor family order drifted")
     return rows
@@ -652,7 +664,6 @@ def validate_phase3_anchor_manifest(
             or row.get("candidate_tuple_id") not in CANDIDATE_TUPLE_IDS
             or row.get("phase") != "validation"
             or row.get("replicate") not in range(5)
-            or row.get("task_index") not in range(8)
         ):
             raise AnchorManifestError("anchor unit contains a non-B2/C or non-validation result")
         if (
@@ -665,12 +676,13 @@ def validate_phase3_anchor_manifest(
             or row["result_bytes"] < 1
         ):
             raise AnchorManifestError("anchor unit row identity is malformed")
+    expected_tasks = _canonical_tasks_by_family()
     expected_unit_matrix = {
         (family, base, candidate_tuple_id, task_index, replicate)
         for family in FAMILIES
         for base in ANCHOR_BASES
         for candidate_tuple_id in CANDIDATE_TUPLE_IDS
-        for task_index in range(8)
+        for _, task_index in expected_tasks[family]
         for replicate in range(5)
     }
     observed_unit_matrix = {
@@ -685,9 +697,12 @@ def validate_phase3_anchor_manifest(
     }
     if observed_unit_matrix != expected_unit_matrix:
         raise AnchorManifestError("anchor unit matrix is incomplete or extra")
-    expected_task_ids = _canonical_task_ids_by_family()
+    expected_task_ids = {
+        family: {task_index: task_id for task_id, task_index in tasks}
+        for family, tasks in expected_tasks.items()
+    }
     for row in units:
-        if row["task_id"] != expected_task_ids[row["family_id"]][row["task_index"]]:
+        if row["task_id"] != expected_task_ids[row["family_id"]].get(row["task_index"]):
             raise AnchorManifestError("anchor unit task identity drifted")
     rebuilt = build_phase3_anchor_manifest(
         runtime,
