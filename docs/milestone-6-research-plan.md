@@ -572,3 +572,10 @@ This is not Milestone 6 final method selection. Final families remain locked and
 result does not support claims about transition information beyond state, history/sequence beyond
 transitions, or explicit frontier-to-optimum pairing; those comparisons remain deferred until
 their named same-data, capacity-matched conditions are frozen.
+
+The Phase 3 representation comparison is now frozen in
+[`docs/milestone-6-phase-3-representation-plan.md`](milestone-6-phase-3-representation-plan.md).
+It names a state/availability control with transition outcomes removed, the historical C
+state-transition representation, a four-step causal-history GRU, and an architecture-identical
+order-shuffled control. It reuses the exact Phase 2 optimum evidence and locked B2/C anchors; no
+frontier pairing or final-family access is authorized by that freeze.

@@ -20,6 +20,7 @@ The repository now contains durable research context so implementation work does
 - [`docs/research-history.md`](docs/research-history.md) - what Milestones 1-5 actually established and what failed,
 - [`docs/research-methodology.md`](docs/research-methodology.md) - experimental-integrity rules and final-set discipline,
 - [`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md) - the immediate state-conditioned, sequence-aware research program,
+- [`docs/milestone-6-phase-3-representation-plan.md`](docs/milestone-6-phase-3-representation-plan.md) - the frozen same-data transition/history/order ladder after Phase 2 screening,
 - [`docs/prior-art-and-reuse.md`](docs/prior-art-and-reuse.md) - public benchmark/tool repositories to inspect instead of reinventing mature infrastructure,
 - [`docs/speedrun-tas-roadmap.md`](docs/speedrun-tas-roadmap.md) - the path from synthetic worlds to exact speedrun/TAS trajectories,
 - [`docs/metrics-and-reporting.md`](docs/metrics-and-reporting.md) - gap closure, reliability, sample efficiency, and cognitive-cost conventions,

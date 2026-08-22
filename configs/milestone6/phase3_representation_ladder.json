@@ -1,0 +1,260 @@
+{
+  "schema_version": "milestone6.phase3_representation_ladder.v1",
+  "status": "frozen-before-phase3-comparative-development-results",
+  "scope": "known-development-only",
+  "freeze_record": {
+    "frozen_at_local_date": "2026-08-22",
+    "timing": "after the locked Phase 2 development result and before any Phase 3 comparative result",
+    "phase2_results_used_for_diagnosis": true,
+    "phase3_comparative_results_inspected": false,
+    "reason": "separate transition-outcome, causal-history, and sequence-order effects after the current Markov state-transition scorer failed robustly on development Heat"
+  },
+  "authority": {
+    "development_protocol": {"path": "configs/milestone6/development_protocol.json", "sha256": "7e6911c120db091e2b250f7a91520dd5f81a481cb4a19662eeae858c7da1c059"},
+    "development_tasks": {"path": "configs/milestone6/development_tasks.json", "sha256": "20f6606bd2150d808b18f011976bbf7c8298627e1cc01eeb67f653eacba9731f"},
+    "phase2_candidates": {"path": "configs/milestone6/phase2_screening_candidates.json", "sha256": "f3c3b4c239df54de4ed5c675f21a846253102e54d822023d782c941542c19f69"},
+    "phase2_selection_lock": {
+      "path": "configs/milestone6/phase2_screening_selection.json",
+      "sha256": "499910276af4359ce3c295933c4ae81293d8a23434f712e310921d05b626f06c",
+      "analysis_sha256": "d13dda63152e23548dd636c1679674e35cdad83dc2a4e2dee84998ee5df95d1b"
+    },
+    "freeze_git_commit_sha": "c169016eb87c484ab90bd796116a7f107cf35c93"
+  },
+  "scientific_questions": {
+    "state_conditioning": {
+      "comparison": "B2-global-listwise-optimum versus T-markov-state-transition-listwise-optimum",
+      "status": "answered_for_the_phase2_representation_by_the_locked_phase2_result",
+      "claim_scope": "adding the five current-observation scalars to the same global empirical action-transition summaries did not improve the frozen robust development criterion"
+    },
+    "transition_outcomes": {
+      "comparison": "S-state-availability-listwise-optimum versus T-markov-state-transition-listwise-optimum",
+      "claim_scope": "observed after-state, delta, elapsed-effect, and completion information beyond current state plus action-specific pre-state and availability statistics"
+    },
+    "causal_history": {
+      "comparison": "T-markov-state-transition-listwise-optimum and H0-null-history-transition-listwise-optimum versus H4-causal-history-transition-listwise-optimum",
+      "claim_scope": "access to the preceding four learner-observable transitions beyond both the historical Markov scorer and an architecture-identical null-history recurrent control"
+    },
+    "sequence_order": {
+      "comparison": "H4-shuffled-history-transition-listwise-optimum versus H4-causal-history-transition-listwise-optimum",
+      "claim_scope": "the order of the same preceding transition multiset, not mere access to additional transition records"
+    },
+    "explicit_pairing": {"status": "deferred", "claims_before_D1_F_gate": "forbidden"}
+  },
+  "development_matrix": {
+    "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+    "fold_kind": "leave-one-family-out",
+    "training_tasks_per_nonheld_family": 8,
+    "heldout_tasks_per_family": 8,
+    "replicates": [0, 1, 2, 3, 4],
+    "tasks_per_condition_tuple": 240,
+    "phase2_anchor_conditions": 2,
+    "new_conditions": 4,
+    "candidate_tuples_per_condition": 12,
+    "existing_anchor_units": 5760,
+    "new_units": 11520,
+    "combined_comparison_units": 17280,
+    "canonical_evidence_artifacts": 30,
+    "existing_anchor_views": 60,
+    "new_views": 120,
+    "combined_views": 180,
+    "existing_anchor_models": 240,
+    "new_models": 480,
+    "combined_models": 720
+  },
+  "seed_policy": {
+    "inherit_non_history_seeds_from": "milestone6.development.v1",
+    "model_base": 6100000,
+    "probe_base": 6200000,
+    "search_base": 6300000,
+    "data_order_base": 6400000,
+    "history_shuffle_base": 6700000,
+    "formula": "base + family_order_index * 10000 + replicate * 100000 + task_index where a task component applies",
+    "condition_pairing": "all conditions use identical model, probe, search, data-order, family, task and replicate identities",
+    "history_shuffle_derivation": "SHA-256 of canonical JSON [history_shuffle_base, fold_id, replicate, task_id, phase, trace_or_episode_id, decision_index]; convert the first eight digest bytes to an unsigned integer and select modulo the lexicographically enumerated derangements for window lengths 2-4; never use process-randomized hash()",
+    "permutation_map_canonical_bytes": "UTF-8 JSON with sort_keys=true, separators=(',', ':'), allow_nan=false, and no trailing newline; the value is an ordered list of records {fold_id, replicate, task_id, phase, trace_or_episode_id, decision_index, input_transition_indices, permuted_transition_indices} sorted lexicographically by the first six identity fields",
+    "shuffle_identity": "bind each training-view permutation-map SHA-256 to the view and model identities and each search-unit permutation-map SHA-256 to the unit identity"
+  },
+  "canonical_evidence_reuse": {
+    "source": "the exact 30 Phase 2 optimum-trajectory and affordance evidence artifacts bound by the Phase 2 readiness and result snapshots",
+    "regeneration": "forbidden",
+    "new_training_evidence_probe_or_reference_charge": 0,
+    "allowed_difference": "deterministic condition-bound representation views only",
+    "trajectory_access": "optimum trajectories only; no frontier trajectory or cross-trajectory pairing enters S, T, H0, H4, or H4-shuffled",
+    "phase2_anchor_reuse": "reuse locked B2 and C/T models and outcomes after exact lineage validation; do not rerun or retune them",
+    "anchor_lineage_gate": {
+      "phase2_readiness_manifest_sha256": "0e4d1ec55546c307c167f9907a4703935f3c86ada9d25209eccc2ff3efc37950",
+      "phase2_readiness_manifest_bytes_sha256": "ee2cd37c0981b459237bc8691511ed6e048863cdcf5aa04bc7f0713726ef1109",
+      "phase2_result_namespace_snapshot_sha256": "0e1d67b5362ac97a8506f7c419a5927c3b785a7a42b07365dc6076e27d5ab0b9",
+      "required_anchor_manifest": "before Phase 3 execution, commit an identity-only manifest enumerating the exact 240 B2/C model owners and 5,760 B2/C unit result IDs and byte digests from the descriptor-validated Phase 2 runtime; it must contain no new aggregate or final data",
+      "T_alias_semantics": "T is an analysis-only alias of historical C; it cannot create a new view, model, search, or outcome artifact",
+      "parity_checks": "fail unless every T consumer resolves to the exact historical C view/model/unit ID and digest and the recomputed representation tensor, logits, candidate-generation SHA-256, typed outcome fields, and result bytes match; any mismatch forbids anchor reuse and Phase 3 execution"
+    }
+  },
+  "conditions": [
+    {
+      "condition_id": "B2-global-listwise-optimum",
+      "role": "strong_optimum_imitation_anchor",
+      "source": "locked_phase2",
+      "representation": "49-channel global empirical action-transition summary without current state",
+      "trainable_parameters": 3601
+    },
+    {
+      "condition_id": "T-markov-state-transition-listwise-optimum",
+      "historical_condition_id": "C-state-conditioned-listwise-optimum",
+      "role": "markov_transition_anchor",
+      "source": "locked_phase2",
+      "representation": "five current-state scalars plus the full 49-channel empirical action-transition summary",
+      "trainable_parameters": 3841,
+      "bitwise_parity_requirement": "the T representation, model, logits, generation, and selected Phase 2 outcomes must remain identical to historical C"
+    },
+    {
+      "condition_id": "S-state-availability-listwise-optimum",
+      "role": "transition_outcome_destroyed_control",
+      "source": "new_phase3",
+      "representation": {
+        "current_state": "retain all five current-state scalars",
+        "transition_feature_order": ["before_progress", "before_remaining", "before_resource", "before_pressure", "progress_delta", "elapsed_delta", "resource_delta", "pressure_delta", "after_resource", "after_pressure", "completed", "before_available_count"],
+        "summary_layout": "mean[0:12], std[12:24], min[24:36], max[36:48], coverage[48]",
+        "retained_indices_per_summary_block": [0, 1, 2, 3, 11],
+        "zeroed_indices_per_summary_block": [4, 5, 6, 7, 8, 9, 10],
+        "coverage_index": 48,
+        "coverage_treatment": "retained as an action-availability/sampling-support statistic and reported diagnostically; it is not treated as an observed candidate outcome",
+        "claim_limit": "tests explicit measured candidate-outcome channels conditional on the same probe visitation and coverage data; it does not claim that prior trajectory state visitation or coverage is causally independent of earlier actions",
+        "input_width": 54
+      },
+      "trainable_parameters": 3841
+    },
+    {
+      "condition_id": "H0-null-history-transition-listwise-optimum",
+      "role": "architecture_matched_no_history_control",
+      "source": "new_phase3",
+      "representation": {
+        "current_candidate": "the exact T 54-channel candidate row",
+        "history": "a fixed all-zero 12-channel null token sequence whose length exactly equals min(4, the number of preceding transitions available to H4) for that same decision",
+        "learner_visible_prior_transitions": 0,
+        "reset": "recompute the null window from zero GRU state independently for every decision; never carry a persistent hidden state"
+      },
+      "architecture": {"recurrent": "single-layer GRU", "history_input_width": 12, "history_hidden_width": 8, "history_length": 4, "head_input_width": 62, "head_hidden_widths": [40, 20]},
+      "trainable_parameters": 3889
+    },
+    {
+      "condition_id": "H4-causal-history-transition-listwise-optimum",
+      "role": "ordered_history_condition",
+      "source": "new_phase3",
+      "representation": {
+        "current_candidate": "the exact T 54-channel candidate row",
+        "history": "up to the four immediately preceding learner-observable 12-channel transitions from the same episode, oldest to newest",
+        "causality": "no current selected action, future transition, evaluator field, optimum threshold, task/family ID, or hidden state",
+        "training_reset": "empty recurrent state at each reference trajectory start",
+        "decision_evaluation": "at every decision, rebuild the preceding length-at-most-four window and run it from zero GRU state; never carry a persistent hidden state between decisions",
+        "search_reset": "each candidate episode starts with an empty window; heldout probe transitions never enter candidate history"
+      },
+      "architecture": {"recurrent": "single-layer GRU", "history_input_width": 12, "history_hidden_width": 8, "history_length": 4, "head_input_width": 62, "head_hidden_widths": [40, 20]},
+      "trainable_parameters": 3889
+    },
+    {
+      "condition_id": "H4-shuffled-history-transition-listwise-optimum",
+      "role": "sequence_order_destroyed_control",
+      "source": "new_phase3",
+      "representation": "identical to H4 except order is independently permuted within each causal preceding-history window",
+      "control_semantics": {
+        "same_multiset": true,
+        "future_transitions": false,
+        "self_or_duplicate_insertion": false,
+        "permutation": "seeded index derangement for every window of length 2-4; no index remains in its original position",
+        "decision_evaluation": "recompute each permuted length-at-most-four causal window from zero GRU state independently for every decision",
+        "length_zero_or_one": "unchanged and reported",
+        "training_and_search": "apply the frozen deterministic shuffle at both training and candidate generation",
+        "effective_change_definition": "the ordered 12-channel transition tensor differs byte-for-byte after permutation; a deranged index map over duplicate transition vectors may be map-nonidentity but tensor-ineffective",
+        "sequence_claim_coverage_gate": "at least 0.80 of length-2-or-more windows must have an effective tensor-order change separately in training and heldout search; otherwise sequence-order claims are forbidden without changing the run",
+        "required_reporting": ["eligible_windows", "map_nonidentity_windows", "effective_tensor_changed_windows", "duplicate_vector_no_effect_windows", "unchanged_short_windows", "training_permutation_map_sha256", "per_unit_search_permutation_map_sha256"]
+      },
+      "architecture": "identical_to_H4",
+      "trainable_parameters": 3889
+    }
+  ],
+  "candidate_tuples": [
+    {"tuple_id": "lr0p003-e120-t0p6", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e120-t0p9", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e120-t1p2", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p003-e180-t0p6", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e180-t0p9", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e180-t1p2", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e120-t0p6", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e120-t0p9", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e120-t1p2", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e180-t0p6", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e180-t0p9", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e180-t1p2", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 1.2}
+  ],
+  "artifact_sharing_and_cost_ownership": {
+    "evidence_identity": "reuse the exact Phase 2 canonical evidence key and digest for each fold and replicate",
+    "view_identity": "condition_id, evidence key and digest, representation schema and transformation SHA-256, data-order seed, and training permutation-map SHA-256 where applicable",
+    "model_identity": "condition_id, fold_id, replicate, training_tuple_id, view identity, model seed, learning rate, epochs, optimizer, and architecture/capacity spec SHA-256",
+    "search_temperature_in_model_identity": false,
+    "temperature_reuse": "one model owner is reused unchanged by the three search-temperature consumers of the same condition, fold, replicate, and training_tuple_id",
+    "selected_tuple_cost_scope": "sum exactly 30 unique model-owner reports for the selected condition and training_tuple_id: six folds times five replicates; never multiply by eight heldout tasks or three temperatures",
+    "new_model_owners_per_condition": 120,
+    "new_model_owners_total": 480,
+    "unit_local_training": 0,
+    "required_fail_closed_checks": ["duplicate owner", "missing owner", "extra owner", "owner digest drift", "temperature-specific retraining", "cross-condition owner reuse"]
+  },
+  "fixed_training_and_search": {
+    "objective": "optimum-only listwise next-action imitation",
+    "examples": "one causal decision example per optimum transition; identical identities, labels, count, order, and batches across S, T, H0, H4, and H4-shuffled",
+    "optimizer": "adam",
+    "weight_decay": 0.0001,
+    "device": "cpu",
+    "torch_threads": 1,
+    "processes": 1,
+    "probe_actions_per_task": 64,
+    "probe_coverage_target_samples_per_alias": 8,
+    "probe_actions_per_attempt": 16,
+    "candidate_episodes_per_task": 150,
+    "adaptation_actions_per_task": 2048,
+    "maximum_actions_per_candidate_episode": 64,
+    "exact_optimum_affects_search_control_flow": false,
+    "oracle_timing": "after the complete fixed candidate batch and independent replay"
+  },
+  "capacity_matching": {
+    "symmetric_parameter_tolerance_fraction": 0.1,
+    "counts": {"B2": 3601, "S": 3841, "T": 3841, "H0": 3889, "H4": 3889, "H4_shuffled": 3889},
+    "maximum_pairwise_fraction": 0.0740550269992286,
+    "same_data_controls": "S and T use the same MLP exactly; H0, H4, and H4-shuffled are architecture-identical and execute the same recurrent-step count per matched decision; all learned conditions use identical examples, labels, optimizer, update count, batches, inference and search budgets",
+    "strong_B2_floor": "B2 retains the complete Phase 2 candidate grid, examples, optimizer updates, probes, candidate episodes, interaction budget, and selected result; it is never capacity-, training-, or search-restricted to favor H4",
+    "required_reporting": ["trainable_parameters", "optimizer_steps", "forward_passes", "recurrent_steps", "training_wall_seconds", "search_wall_seconds"]
+  },
+  "selection_rule": {
+    "scope": "independently select one numeric tuple within each new S, H0, H4, and H4-shuffled condition; reuse the independently locked B2 and T selections; no cross-condition elimination",
+    "endpoint_adaptation_actions": 2048,
+    "failure_sentinel": 2049,
+    "primary_metric": "minimum_family_exact_optimum_success_rate",
+    "success_tolerance_absolute": 0.05,
+    "steps": [
+      "maximize minimum-family exact-optimum success rate",
+      "retain tuples within 0.05 absolute of that condition's best minimum-family success rate",
+      "minimize worst-family median restricted interactions",
+      "minimize macro-average family median restricted interactions",
+      "minimize summed unique model-owner optimizer steps, then forward passes, then recurrent steps",
+      "choose ascending numeric tuple (learning_rate, training_epochs, search_temperature)"
+    ],
+    "family_aggregation": "compute within family first, then equal-weight families",
+    "restricted_interactions": "paid heldout probes plus candidate-generation actions through the first post-hoc exact candidate; failures use 2049",
+    "excluded_channels": ["evidence preparation", "model training", "candidate replay", "oracle calls", "resets", "forward passes", "recurrent steps", "wall time"],
+    "changes_after_phase3_results": "forbidden"
+  },
+  "claim_and_advancement_rule": {
+    "robust_primary_gain": "a selected left-to-right condition must improve minimum-family success by more than 0.05 absolute",
+    "within_tolerance": "differences of at most 0.05 cannot support a robust success claim; frozen median tie-breaks may support only an efficiency statement",
+    "transition_claim": "requires selected T to beat selected S under robust_primary_gain",
+    "history_access_claim": "requires selected H4 to beat both selected T and selected H0 under robust_primary_gain",
+    "sequence_order_claim": "requires selected H4 to beat selected H4-shuffled under robust_primary_gain and the shuffled control to pass its predeclared effective-change coverage gate",
+    "H4_advancement_to_paired_objectives": "requires the dual-control history-access gate and the sequence-order gate, no development-family success drop greater than 0.05 versus selected B2, and H4 minimum-family success no more than 0.05 below selected B2",
+    "failed_gate": "retain B2 as the strong reference, preserve the negative result, diagnose on development only, and do not unlock final families"
+  },
+  "diagnostics": {
+    "non_selection_only": ["Heat pressure-cap decision logits", "state-action coverage", "unknown-affordance rate", "label frequency", "history length actually available", "shuffle realized-change rate"],
+    "cannot_change": "candidate eligibility, selection rule, capacity rule, budgets, seeds, history length, architecture, or claim thresholds"
+  },
+  "final_family_access": false
+}

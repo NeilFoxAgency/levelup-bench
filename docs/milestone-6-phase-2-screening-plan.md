@@ -155,3 +155,26 @@ These are development findings, not Milestone 6 final method selection. No final
 unlocked or accessed, and no claims about transition information, history/sequence information, or
 frontier-to-optimum pairing are made. A future final-family evaluation would require a separately
 frozen method and protocol.
+
+## Development-only Heat diagnosis
+
+After the result lock was committed, the complete selected and matched-tuple development evidence
+was used for diagnosis. This did not change the Phase 2 candidate set or selection rule. Every C
+Heat median remained at the 2,049 failure sentinel. Across all 12 tuples, B2 Heat success averaged
+0.325 while C averaged approximately 0.0146; C lost the matched Heat success comparison every
+time. C's sparse Heat successes were confined to the lower learning rate and did not indicate an
+epoch or temperature setting that repaired the failure.
+
+Heat exposes pressure in the learner-visible state and is Markov on that surface. The selected C
+policy nevertheless tended to prefer a no-progress step at full pressure over the utility action
+that clears pressure and unlocks another burst. This is evidence of a learned decision failure,
+not proof that hidden history is required. Plausible mechanisms include cross-family pressure
+gating, inadequate coverage of rare state/action combinations, and the current one-decision
+listwise objective failing to represent a delayed setup payoff. Those are hypotheses to test, not
+post-hoc selection criteria.
+
+The next comparison is frozen separately in
+[`docs/milestone-6-phase-3-representation-plan.md`](milestone-6-phase-3-representation-plan.md).
+It preserves B2 and historical C/T, destroys transition outcomes without destroying action-specific
+pre-state availability, and adds both ordered and order-shuffled causal-history conditions. Final
+families remain locked.
