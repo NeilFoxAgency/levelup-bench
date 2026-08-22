@@ -9,6 +9,7 @@ to the already frozen Phase 2 B2 unit seeds and task identities.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
@@ -42,6 +43,7 @@ TRAINING_TUPLE_IDS = (
 )
 PHASE = "validation"
 SCHEMA_VERSION = "milestone6.phase3.logical-plan.v1"
+PLAN_LOCK_SCHEMA_VERSION = "milestone6.phase3.plan-lock.v1"
 _VALIDATED_PLAN_TOKEN = object()
 
 
@@ -427,6 +429,80 @@ def _dataclass_json(value: Any) -> Any:
     if isinstance(value, list):
         return [_dataclass_json(item) for item in value]
     return value
+
+
+def _plan_body(plan: Phase3Plan) -> dict[str, Any]:
+    return {
+        "schema_version": plan.schema_version,
+        "protocol_sha256": plan.protocol_sha256,
+        "authority_hashes": dict(plan.authority_hashes),
+        "family_order": list(plan.family_order),
+        "replicates": list(plan.replicates),
+        "condition_ids": list(plan.condition_ids),
+        "candidate_tuple_ids": list(plan.candidate_tuple_ids),
+        "views": [_dataclass_json(item) for item in plan.views],
+        "model_owners": [_dataclass_json(item) for item in plan.model_owners],
+        "units": [_dataclass_json(item) for item in plan.units],
+        "final_family_access": plan.final_family_access,
+    }
+
+
+def _plan_lock_body(plan: Phase3Plan) -> dict[str, Any]:
+    return {
+        "schema_version": PLAN_LOCK_SCHEMA_VERSION,
+        "scope": "known-development-only",
+        "final_family_access": False,
+        "plan_id": plan.plan_id,
+        "protocol_sha256": plan.protocol_sha256,
+        "authority_hashes": dict(plan.authority_hashes),
+        "family_order": list(plan.family_order),
+        "replicates": list(plan.replicates),
+        "condition_ids": list(plan.condition_ids),
+        "candidate_tuple_ids": list(plan.candidate_tuple_ids),
+        "counts": {
+            "views": len(plan.views),
+            "model_owners": len(plan.model_owners),
+            "units": len(plan.units),
+        },
+        "view_ids_sha256": _sha256_json([item.view_id for item in plan.views]),
+        "model_owner_ids_sha256": _sha256_json(
+            [item.owner_id for item in plan.model_owners]
+        ),
+        "unit_ids_sha256": _sha256_json(list(plan.unit_ids)),
+    }
+
+
+def canonical_phase3_plan_lock_bytes(plan: Phase3Plan) -> bytes:
+    """Serialize a compact commit-worthy lock for the complete logical matrix."""
+
+    if _sha256_json(_plan_body(plan)) != plan.plan_id:
+        raise ValueError("Phase 3 plan identity differs from its canonical body")
+    body = _plan_lock_body(plan)
+    return canonical_json_bytes(
+        {**body, "plan_lock_sha256": _sha256_json(body)}
+    )
+
+
+def validate_phase3_plan_lock_bytes(content: bytes) -> Phase3Plan:
+    """Validate compact lock bytes by rebuilding every frozen plan identity."""
+
+    if not isinstance(content, bytes) or not content:
+        raise ValueError("Phase 3 plan lock bytes are missing")
+    try:
+        payload = json.loads(content)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Phase 3 plan lock bytes are not valid JSON") from exc
+    if not isinstance(payload, dict) or canonical_json_bytes(payload) != content:
+        raise ValueError("Phase 3 plan lock bytes are not canonical")
+    supplied = payload.get("plan_lock_sha256")
+    unsigned = dict(payload)
+    unsigned.pop("plan_lock_sha256", None)
+    if not isinstance(supplied, str) or _sha256_json(unsigned) != supplied:
+        raise ValueError("Phase 3 plan lock self-hash mismatch")
+    canonical = build_phase3_plan()
+    if canonical_phase3_plan_lock_bytes(canonical) != content:
+        raise ValueError("Phase 3 plan lock differs from the frozen authority")
+    return canonical
 
 
 def validate_phase3_plan(

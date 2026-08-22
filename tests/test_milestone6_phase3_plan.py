@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 
 import pytest
@@ -17,8 +19,11 @@ from levelup.experiments.milestone6_phase3_plan import (
     ValidatedPhase3Plan,
     bind_validated_phase3_plan,
     build_phase3_plan,
+    canonical_phase3_plan_lock_bytes,
     validate_phase3_plan,
+    validate_phase3_plan_lock_bytes,
 )
+from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.storage import plan_expected_units
 
 
@@ -141,3 +146,19 @@ def test_validated_plan_gate_requires_exact_unit_membership() -> None:
     )
     with pytest.raises(ValueError, match="validated frozen plan"):
         authority.require_unit(changed)
+
+
+def test_canonical_plan_lock_rejects_rehashed_semantic_substitution() -> None:
+    plan = build_phase3_plan()
+    content = canonical_phase3_plan_lock_bytes(plan)
+    assert validate_phase3_plan_lock_bytes(content) == plan
+
+    payload = json.loads(content)
+    payload["unit_ids_sha256"] = "0" * 64
+    unsigned = dict(payload)
+    unsigned.pop("plan_lock_sha256")
+    payload["plan_lock_sha256"] = hashlib.sha256(
+        canonical_json_bytes(unsigned)
+    ).hexdigest()
+    with pytest.raises(ValueError, match="frozen authority"):
+        validate_phase3_plan_lock_bytes(canonical_json_bytes(payload))
