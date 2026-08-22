@@ -15,6 +15,7 @@ from levelup.experiments.milestone6_phase3_anchor import (
     _conditions_by_id,
     build_phase3_anchor_manifest,
     validate_phase3_anchor_manifest,
+    validate_phase3_anchor_manifest_bytes,
 )
 from levelup.experiments.milestone6_phase3_protocol import (
     Phase3ProtocolSnapshot,
@@ -259,6 +260,24 @@ def test_anchor_manifest_is_exact_and_deterministic(monkeypatch: pytest.MonkeyPa
         ).canonical_bytes
         == first.canonical_bytes
     )
+    assert (
+        validate_phase3_anchor_manifest_bytes(
+            first.canonical_bytes,
+            runtime=runtime,
+            protocol=protocol,
+            result_bytes_reader=reader,
+            _allow_test_reader=True,
+        ).anchor_manifest_sha256
+        == first.anchor_manifest_sha256
+    )
+    with pytest.raises(AnchorManifestError, match="not canonical"):
+        validate_phase3_anchor_manifest_bytes(
+            first.canonical_bytes + b"\n",
+            runtime=runtime,
+            protocol=protocol,
+            result_bytes_reader=reader,
+            _allow_test_reader=True,
+        )
 
 
 def test_anchor_manifest_rejects_drift_and_execution_ready_store(

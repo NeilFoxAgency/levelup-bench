@@ -724,6 +724,35 @@ def validate_phase3_anchor_manifest(
     return Phase3AnchorManifest(body=body, canonical_bytes=canonical, anchor_manifest_sha256=supplied)
 
 
+def validate_phase3_anchor_manifest_bytes(
+    content: bytes,
+    *,
+    runtime: Any,
+    protocol: Phase3ProtocolSnapshot | None = None,
+    protocol_path: str | Path = PHASE3_PROTOCOL_PATH,
+    result_bytes_reader: ResultBytesReader | None = None,
+    _allow_test_reader: bool = False,
+) -> Phase3AnchorManifest:
+    """Validate immutable canonical bytes supplied by a descriptor-pinned loader."""
+
+    if not isinstance(content, bytes) or not content:
+        raise AnchorManifestError("anchor manifest bytes are missing")
+    try:
+        body = json.loads(content)
+    except (TypeError, ValueError) as exc:
+        raise AnchorManifestError("anchor manifest bytes are not valid JSON") from exc
+    if not isinstance(body, dict) or canonical_json_bytes(body) != content:
+        raise AnchorManifestError("anchor manifest bytes are not canonical")
+    return validate_phase3_anchor_manifest(
+        body,
+        runtime=runtime,
+        protocol=protocol,
+        protocol_path=protocol_path,
+        result_bytes_reader=result_bytes_reader,
+        _allow_test_reader=_allow_test_reader,
+    )
+
+
 # Descriptive aliases for callers that use “create” or “anchor” terminology.
 create_phase3_anchor_manifest = build_phase3_anchor_manifest
 validate_anchor_manifest = validate_phase3_anchor_manifest
@@ -736,4 +765,5 @@ __all__ = [
     "create_phase3_anchor_manifest",
     "validate_anchor_manifest",
     "validate_phase3_anchor_manifest",
+    "validate_phase3_anchor_manifest_bytes",
 ]
