@@ -11,9 +11,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Iterator, Mapping, Protocol
 
 from levelup.experiments.milestone6_phase3_protocol import (
     FAMILIES,
@@ -215,9 +216,14 @@ def _require_development_runtime(runtime: Any) -> tuple[Any, ...]:
     return folds
 
 
-def _default_result_bytes_reader(store: Any, unit_id: str) -> bytes:
-    """Read one unit result from the store's descriptor-pinned namespace."""
-
+@contextmanager
+def _fold_result_bytes_reader(
+    store: Any,
+    test_reader: ResultBytesReader | None,
+) -> Iterator[Callable[[str], bytes]]:
+    if test_reader is not None:
+        yield lambda unit_id: test_reader(store, unit_id)
+        return
     opener = getattr(store, "_open_result_namespace", None)
     if not callable(opener):
         raise AnchorManifestError(
@@ -225,12 +231,14 @@ def _default_result_bytes_reader(store: Any, unit_id: str) -> bytes:
         )
     try:
         with opener("units") as (_, namespace_fd):
-            return secure_fs.read_bytes_at(namespace_fd, f"{unit_id}.json")
+            yield lambda unit_id: secure_fs.read_bytes_at(
+                namespace_fd, f"{unit_id}.json"
+            )
     except (OSError, RuntimeError, TypeError, ValueError, secure_fs.SecureFilesystemError) as exc:
-        raise AnchorManifestError("cannot read a pinned Phase 2 unit result") from exc
+        raise AnchorManifestError("cannot read pinned Phase 2 unit results") from exc
 
 
-def _validate_unit_bytes(raw: bytes, unit_id: str) -> None:
+def _validate_unit_bytes(raw: bytes, unit_id: str, planned: Any, store: Any) -> None:
     if not isinstance(raw, bytes) or not raw:
         raise AnchorManifestError("unit result bytes are missing or not immutable bytes")
     try:
@@ -239,6 +247,14 @@ def _validate_unit_bytes(raw: bytes, unit_id: str) -> None:
         raise AnchorManifestError("Phase 2 unit result bytes are not a typed UnitRecord") from exc
     if record.unit_id != unit_id or record.status != "completed":
         raise AnchorManifestError("Phase 2 unit result bytes do not match their unit ID")
+    if (
+        record.run_id != getattr(store, "run_id", None)
+        or record.config_sha256 != getattr(store, "config_sha256", None)
+        or record.key != planned.key
+        or record.seeds != planned.seeds
+        or record.exposure_manifest_sha256 != planned.exposure_manifest_sha256
+    ):
+        raise AnchorManifestError("Phase 2 unit result lineage differs from its plan")
     if raw != canonical_json_bytes(record.model_dump(mode="json")) + b"\n":
         raise AnchorManifestError("Phase 2 unit result bytes are not canonical")
 
@@ -337,7 +353,7 @@ def _model_owner_rows(folds: tuple[Any, ...]) -> list[dict[str, Any]]:
 
 def _unit_rows(
     folds: tuple[Any, ...],
-    result_bytes_reader: ResultBytesReader,
+    result_bytes_reader: ResultBytesReader | None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -348,47 +364,39 @@ def _unit_rows(
         expected = getattr(getattr(store, "expected", None), "units", None)
         if not isinstance(expected, tuple):
             expected = tuple(expected or ())
-        records = tuple(store.completed_records())
-        records_by_id = {getattr(record, "unit_id", None): record for record in records}
-        if len(records_by_id) != len(records):
-            raise AnchorManifestError("Phase 2 completed-unit inventory contains duplicates")
         local = 0
-        for planned in expected:
-            unit_id = getattr(planned, "unit_id", None)
-            condition_id = getattr(getattr(planned, "key", None), "condition_id", None)
-            condition_identity = condition_map.get(condition_id)
-            if condition_identity is None:
-                continue
-            base, candidate_tuple_id = condition_identity
-            if not isinstance(unit_id, str) or unit_id in seen:
-                raise AnchorManifestError("duplicate or malformed Phase 2 anchor unit ID")
-            record = records_by_id.get(unit_id)
-            if record is None:
-                raise AnchorManifestError("Phase 2 anchor unit result is missing")
-            raw = result_bytes_reader(store, unit_id)
-            _validate_unit_bytes(raw, unit_id)
-            if getattr(record, "unit_id", None) != unit_id:
-                raise AnchorManifestError("typed and raw Phase 2 unit IDs differ")
-            seen.add(unit_id)
-            local += 1
-            key = planned.key
-            rows.append(
-                {
-                    "unit_id": unit_id,
-                    "result_id": unit_id,
-                    "run_id": str(getattr(store, "run_id", "")),
-                    "family_id": str(fold.family_id),
-                    "base_condition_id": base,
-                    "candidate_tuple_id": candidate_tuple_id,
-                    "condition_id": str(condition_id),
-                    "task_id": str(getattr(key, "task_id", "")),
-                    "task_index": int(getattr(key, "task_index", -1)),
-                    "replicate": int(getattr(key, "replicate", -1)),
-                    "phase": str(getattr(key, "phase", "")),
-                    "result_bytes": len(raw),
-                    "result_bytes_sha256": _sha256(raw),
-                }
-            )
+        with _fold_result_bytes_reader(store, result_bytes_reader) as read_result:
+            for planned in expected:
+                unit_id = getattr(planned, "unit_id", None)
+                condition_id = getattr(getattr(planned, "key", None), "condition_id", None)
+                condition_identity = condition_map.get(condition_id)
+                if condition_identity is None:
+                    continue
+                base, candidate_tuple_id = condition_identity
+                if not isinstance(unit_id, str) or unit_id in seen:
+                    raise AnchorManifestError("duplicate or malformed Phase 2 anchor unit ID")
+                raw = read_result(unit_id)
+                _validate_unit_bytes(raw, unit_id, planned, store)
+                seen.add(unit_id)
+                local += 1
+                key = planned.key
+                rows.append(
+                    {
+                        "unit_id": unit_id,
+                        "result_id": unit_id,
+                        "run_id": str(getattr(store, "run_id", "")),
+                        "family_id": str(fold.family_id),
+                        "base_condition_id": base,
+                        "candidate_tuple_id": candidate_tuple_id,
+                        "condition_id": str(condition_id),
+                        "task_id": str(getattr(key, "task_id", "")),
+                        "task_index": int(getattr(key, "task_index", -1)),
+                        "replicate": int(getattr(key, "replicate", -1)),
+                        "phase": str(getattr(key, "phase", "")),
+                        "result_bytes": len(raw),
+                        "result_bytes_sha256": _sha256(raw),
+                    }
+                )
         if local != EXPECTED_UNITS_PER_FOLD:
             raise AnchorManifestError("each Phase 2 fold must contain exactly 960 B2/C unit results")
         validation_tasks = tuple(getattr(config.split, "validation_tasks", ()))
@@ -557,9 +565,8 @@ def build_phase3_anchor_manifest(
         raise AnchorManifestError("Phase 3 protocol permits final-family access")
     if result_bytes_reader is not None and not _allow_test_reader:
         raise AnchorManifestError("custom result-byte readers are test-only")
-    reader = result_bytes_reader or _default_result_bytes_reader
     owners = _model_owner_rows(folds)
-    units = _unit_rows(folds, reader)
+    units = _unit_rows(folds, result_bytes_reader)
     lineage = _lineage(runtime, snapshot)
     for key, value in lineage.items():
         if key.endswith("sha256"):

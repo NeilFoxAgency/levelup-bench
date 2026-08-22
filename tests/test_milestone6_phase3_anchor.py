@@ -28,7 +28,9 @@ BASES = (
 TUPLES = ("lr0p003-e120", "lr0p003-e180", "lr0p01-e120", "lr0p01-e180")
 
 
-def _skip_unit_validation(_raw: bytes, _unit_id: str) -> None:
+def _skip_unit_validation(
+    _raw: bytes, _unit_id: str, _planned: object, _store: object
+) -> None:
     return None
 
 
