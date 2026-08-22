@@ -35,6 +35,11 @@ These files are historical scientific records. Do not overwrite them because a l
   merge commit invalidates the readiness gate and requires regeneration. The
   raw run tree remains ignored, while the manifest preserves its own byte and
   preparation-lineage identities.
+- `configs/milestone6/phase2_screening_selection.json` is the compact, deterministic
+  development-result selection lock. It binds the ignored aggregate by analysis, script,
+  authority, readiness, and result-snapshot digests; it is not a final-evaluation reference.
+  The Phase 2 post-screening finding is that selected C does not advance over selected B2 on the
+  frozen robust development criterion, while B2 remains a strong reference baseline.
 
 ## Artifact layers
 

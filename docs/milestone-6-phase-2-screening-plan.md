@@ -130,3 +130,28 @@ The runtime authority loader pins the exact reviewed SHA-256 digests of the deve
 screening manifest, and development-task manifest in code, then revalidates their cross-links and
 development-only structure. Any further pre-result amendment therefore requires an explicit code
 change and fresh review; cross-file edits that merely update one another's hashes fail closed.
+
+## Post-screening development result (append-only)
+
+The frozen plan above was not changed after comparative development results became available. The
+audited aggregate is recorded by the deterministic selection lock
+[`configs/milestone6/phase2_screening_selection.json`](../configs/milestone6/phase2_screening_selection.json),
+bound to analysis SHA-256 `d13dda63152e23548dd636c1679674e35cdad83dc2a4e2dee84998ee5df95d1b`,
+result snapshot `0e1d67b5362ac97a8506f7c419a5927c3b785a7a42b07365dc6076e27d5ab0b9`, and readiness
+manifest bytes `ee2cd37c0981b459237bc8691511ed6e048863cdcf5aa04bc7f0713726ef1109`. The full
+development aggregate remains an ignored local artifact under `runs/`; it is not promoted to
+`experiments/`.
+
+The within-condition numeric selections are B1 `lr0p003-e120-t0p6`, B2
+`lr0p003-e120-t1p2`, and C `lr0p003-e120-t1p2`. Their minimum-family success rates are 0.300,
+0.400, and 0.075; their macro median restricted interactions are 1206.0833, 658.3333, and
+617.4167, respectively. Thus C does not advance over B2 on the frozen robust development
+criterion. C improves the macro median but loses the primary minimum-family success criterion:
+across all 12 B2/C tuples, C loses primary minimum-family success every time and improves the
+macro median only once. Combo improves under C's selected tuple, while Heat collapses from 0.400
+to 0.075. B2 remains a strong reference baseline and is not removed.
+
+These are development findings, not Milestone 6 final method selection. No final family was
+unlocked or accessed, and no claims about transition information, history/sequence information, or
+frontier-to-optimum pairing are made. A future final-family evaluation would require a separately
+frozen method and protocol.

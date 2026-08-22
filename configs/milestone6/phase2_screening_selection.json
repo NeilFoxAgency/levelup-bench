@@ -1,0 +1,93 @@
+{
+  "schema_version": "milestone6.phase2.selection-lock.v1",
+  "status": "development-result-lock",
+  "scientific_boundary": {
+    "development_only": true,
+    "final_family_access": false,
+    "final_method_selection": false,
+    "claims_deferred": ["transition_information", "history_or_sequence", "frontier_optimum_pairing"]
+  },
+  "analysis": {
+    "analysis_sha256": "d13dda63152e23548dd636c1679674e35cdad83dc2a4e2dee84998ee5df95d1b",
+    "analysis_file_sha256": "7ba1ef4b41c0d840e53455d4d7ea1ccaf64f1d08d7e2c443a327aeab6d58bee7",
+    "script_sha256": "7545b7c0a813504b6733813bd5c2cf6d30651b1517ae4b6fcc03ed2d5adb2267",
+    "integrated_source_sha256": "597ae8b01b9f4ba413ae440cdb749fec0c54f61ace4ec80302db10e36e0634da",
+    "result_namespace_snapshot_sha256": "0e1d67b5362ac97a8506f7c419a5927c3b785a7a42b07365dc6076e27d5ab0b9",
+    "raw_location": "runs/milestone6/phase2-screening-analysis-4e29dec.json",
+    "raw_aggregate_policy": "ignored_local_artifact"
+  },
+  "authority": {
+    "protocol_sha256": "7e6911c120db091e2b250f7a91520dd5f81a481cb4a19662eeae858c7da1c059",
+    "screening_candidates_sha256": "f3c3b4c239df54de4ed5c675f21a846253102e54d822023d782c941542c19f69",
+    "task_manifest_sha256": "20f6606bd2150d808b18f011976bbf7c8298627e1cc01eeb67f653eacba9731f",
+    "readiness_manifest_sha256": "0e4d1ec55546c307c167f9907a4703935f3c86ada9d25209eccc2ff3efc37950",
+    "readiness_manifest_bytes_sha256": "ee2cd37c0981b459237bc8691511ed6e048863cdcf5aa04bc7f0713726ef1109",
+    "source_git_commit_sha": "9daa444e35a5e40a766b2c83278cd72768fc0822",
+    "source_provenance_sha256": "eb4fde98df1cd35e7123f0f5198cffc0f3b9e5c3e77e1b125ac6c03d6c0aee55",
+    "prepared_tree_sha256": "31d18f8cae52c4e3eebdcec73ff224b63cca0df69dabad18a7a71c8d1e6e6d8b"
+  },
+  "matrix": {
+    "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+    "families": 6,
+    "variants": 38,
+    "units": 9120,
+    "units_per_variant": 240,
+    "evidence_artifacts": 30,
+    "representation_views": 90,
+    "models": 360,
+    "shared_artifact_slots": 480
+  },
+  "selection_rule": {
+    "primary_metric": "minimum_family_exact_optimum_success_rate",
+    "endpoint_actions": 2048,
+    "failure_sentinel": 2049,
+    "inclusive_success_tolerance": 0.05,
+    "tie_break_order": [
+      "worst_family_median_restricted_interactions",
+      "macro_average_family_median_restricted_interactions",
+      "summed_unique_optimizer_steps",
+      "summed_unique_forward_passes",
+      "numeric_learning_rate_epochs_temperature"
+    ],
+    "scope": "independent_numeric_tuple_selection_within_B1_B2_C"
+  },
+  "selected": {
+    "B1-clean-global-optimum-frequency": {
+      "candidate_tuple_id": "lr0p003-e120-t0p6",
+      "minimum_family_exact_optimum_success_rate": 0.3,
+      "macro_average_family_median_restricted_interactions": 1206.0833333333333,
+      "worst_family_median_restricted_interactions": 2049.0,
+      "optimizer_steps": 3600,
+      "forward_passes": 3600
+    },
+    "B2-global-listwise-optimum": {
+      "candidate_tuple_id": "lr0p003-e120-t1p2",
+      "minimum_family_exact_optimum_success_rate": 0.4,
+      "macro_average_family_median_restricted_interactions": 658.3333333333334,
+      "worst_family_median_restricted_interactions": 2049.0,
+      "optimizer_steps": 3600,
+      "forward_passes": 927000
+    },
+    "C-state-conditioned-listwise-optimum": {
+      "candidate_tuple_id": "lr0p003-e120-t1p2",
+      "minimum_family_exact_optimum_success_rate": 0.075,
+      "macro_average_family_median_restricted_interactions": 617.4166666666666,
+      "worst_family_median_restricted_interactions": 2049.0,
+      "optimizer_steps": 3600,
+      "forward_passes": 927000
+    }
+  },
+  "comparison": {
+    "primary_statement": "C does not advance over B2 on the frozen robust development criterion; B2 remains a strong reference baseline and is not removed.",
+    "b2_vs_c": {
+      "C_min_family_success": 0.075,
+      "B2_min_family_success": 0.4,
+      "C_macro_median_restricted_interactions": 617.4166666666666,
+      "B2_macro_median_restricted_interactions": 658.3333333333334,
+      "combo_direction": "improves",
+      "heat_direction": "collapses_from_0.4_to_0.075",
+      "tuples_C_loses_primary_min_success": 12,
+      "tuples_C_improves_macro_median": 1
+    }
+  }
+}

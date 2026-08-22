@@ -550,3 +550,25 @@ After Milestone 6, begin the emulator milestone if most of the following are tru
 - and at least one improvement-aware method has a plausible transferable advantage or a clearly characterized limitation worth testing on richer data.
 
 The emulator step should then preserve the same scientific contract rather than becoming a separate ad hoc gaming project.
+
+## Post-screening development record (append-only)
+
+The Phase 2 development aggregate has now been audited and locked without changing the frozen
+selection protocol above. The machine-readable record is
+[`configs/milestone6/phase2_screening_selection.json`](../configs/milestone6/phase2_screening_selection.json),
+which binds the aggregate, authority files, readiness bytes, and descriptor-relative result
+snapshot. The complete aggregate remains ignored under `runs/` under the artifact policy.
+
+Within-condition numeric selection chose B1 `lr0p003-e120-t0p6`, B2
+`lr0p003-e120-t1p2`, and C `lr0p003-e120-t1p2`. The selected minimum-family exact-optimum
+success rates were B1 0.300, B2 0.400, and C 0.075. The corresponding macro medians of
+restricted interactions were 1206.0833, 658.3333, and 617.4167. C therefore does not advance
+over B2 on the frozen robust development criterion, despite its lower macro median. Across all
+12 B2/C tuples, C loses the primary minimum-family success criterion every time and improves the
+macro median only once. Combo improves under C's selected tuple, but Heat collapses from 0.400 to
+0.075. B2 remains a strong reference baseline and is not removed.
+
+This is not Milestone 6 final method selection. Final families remain locked and unaccessed. The
+result does not support claims about transition information beyond state, history/sequence beyond
+transitions, or explicit frontier-to-optimum pairing; those comparisons remain deferred until
+their named same-data, capacity-matched conditions are frozen.
