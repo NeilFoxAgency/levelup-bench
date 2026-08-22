@@ -29,7 +29,9 @@ from levelup.experiments.runner.training_data_artifacts import (
 )
 from levelup.learning.state_conditioned import (
     DecisionExample,
+    HistoryConditionedScorer,
     HistoryDecisionExample,
+    StateConditionedScorer,
     TrainingReport,
     TrainingSpec,
     causal_history_optimum_examples,
@@ -51,6 +53,8 @@ S_PARAMETERS = 3_841
 HISTORY_PARAMETERS = 3_889
 WEIGHT_DECAY = 0.0001
 _HEX = frozenset("0123456789abcdef")
+_PHASE3_VIEW_PREPARATION_TOKEN = object()
+_PHASE3_MODEL_PREPARATION_TOKEN = object()
 
 
 class Phase3ModelPreparationError(ValueError):
@@ -79,7 +83,7 @@ class HistoryShuffleDiagnostics:
         return self.eligible_windows > 0 and self.effective_change_fraction >= 0.80
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Phase3ViewPreparation:
     view: Phase3View
     evidence_payload_sha256: str
@@ -90,21 +94,247 @@ class Phase3ViewPreparation:
     transition_examples: tuple[DecisionExample, ...]
     history_shuffle: HistoryShuffleDiagnostics | None = None
     representation_identity_sha256: str = ""
+    authority_validated: bool = False
+    _construction_token: object | None = None
+
+    def __init__(
+        self,
+        *,
+        view: Phase3View,
+        evidence_payload_sha256: str,
+        evidence_payload_bytes: int,
+        sample_task_ids: tuple[str, ...],
+        examples: tuple[DecisionExample, ...] | tuple[HistoryDecisionExample, ...],
+        transition_examples: tuple[DecisionExample, ...],
+        authority_validated: bool,
+        history_shuffle: HistoryShuffleDiagnostics | None = None,
+        representation_identity_sha256: str = "",
+        _construction_token: object | None = None,
+    ) -> None:
+        if _construction_token is not _PHASE3_VIEW_PREPARATION_TOKEN:
+            raise Phase3ModelPreparationError(
+                "prepared views require the canonical Phase 3 view builder"
+            )
+        object.__setattr__(self, "view", view)
+        object.__setattr__(self, "evidence_payload_sha256", evidence_payload_sha256)
+        object.__setattr__(self, "evidence_payload_bytes", evidence_payload_bytes)
+        object.__setattr__(self, "sample_task_ids", sample_task_ids)
+        object.__setattr__(self, "examples", examples)
+        object.__setattr__(self, "transition_examples", transition_examples)
+        object.__setattr__(self, "history_shuffle", history_shuffle)
+        object.__setattr__(
+            self, "representation_identity_sha256", representation_identity_sha256
+        )
+        object.__setattr__(self, "authority_validated", authority_validated)
+        object.__setattr__(self, "_construction_token", _construction_token)
 
 
-@dataclass(frozen=True, slots=True)
+def validate_phase3_view_preparation(
+    prepared: Any, *, require_authority: bool = True
+) -> None:
+    """Reject view wrappers not produced by the canonical evidence boundary."""
+
+    if (
+        not isinstance(prepared, Phase3ViewPreparation)
+        or prepared._construction_token is not _PHASE3_VIEW_PREPARATION_TOKEN
+    ):
+        raise Phase3ModelPreparationError(
+            "model training requires a canonical prepared Phase 3 view"
+        )
+    if require_authority and not prepared.authority_validated:
+        raise Phase3ModelPreparationError(
+            "model training requires frozen view authority"
+        )
+    _require_sha(prepared.evidence_payload_sha256, "evidence payload identity")
+    _require_sha(
+        prepared.representation_identity_sha256, "representation identity"
+    )
+    if prepared.evidence_payload_bytes < 1:
+        raise Phase3ModelPreparationError("evidence payload byte count is invalid")
+    if prepared.sample_task_ids != prepared.view.training_task_ids:
+        raise Phase3ModelPreparationError("prepared view task order differs")
+    if len(prepared.examples) != len(prepared.transition_examples):
+        raise Phase3ModelPreparationError("prepared view example count differs")
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class Phase3ModelPreparation:
     owner: Phase3ModelOwner
     view: Phase3ViewPreparation
     model: torch.nn.Module
     report: TrainingReport
     training_spec: TrainingSpec
+    model_state_sha256: str
     model_identity_sha256: str
     search_temperature_ids: tuple[str, ...]
+    authority_validated: bool
+    _construction_token: object
+
+    def __init__(
+        self,
+        *,
+        owner: Phase3ModelOwner,
+        view: Phase3ViewPreparation,
+        model: torch.nn.Module,
+        report: TrainingReport,
+        training_spec: TrainingSpec,
+        model_state_sha256: str,
+        model_identity_sha256: str,
+        search_temperature_ids: tuple[str, ...],
+        authority_validated: bool,
+        _construction_token: object | None = None,
+    ) -> None:
+        if _construction_token is not _PHASE3_MODEL_PREPARATION_TOKEN:
+            raise Phase3ModelPreparationError(
+                "prepared models require the canonical Phase 3 trainer"
+            )
+        object.__setattr__(self, "owner", owner)
+        object.__setattr__(self, "view", view)
+        object.__setattr__(self, "model", model)
+        object.__setattr__(self, "report", report)
+        object.__setattr__(self, "training_spec", training_spec)
+        object.__setattr__(self, "model_state_sha256", model_state_sha256)
+        object.__setattr__(self, "model_identity_sha256", model_identity_sha256)
+        object.__setattr__(self, "search_temperature_ids", search_temperature_ids)
+        object.__setattr__(self, "authority_validated", authority_validated)
+        object.__setattr__(self, "_construction_token", _construction_token)
+
+
+def validate_phase3_model_preparation(
+    prepared: Any, *, require_authority: bool = True
+) -> None:
+    """Reject wrappers not produced by the canonical in-memory trainer."""
+
+    if (
+        not isinstance(prepared, Phase3ModelPreparation)
+        or prepared._construction_token is not _PHASE3_MODEL_PREPARATION_TOKEN
+    ):
+        raise Phase3ModelPreparationError(
+            "production generation requires a canonical prepared Phase 3 model"
+        )
+    if require_authority and not prepared.authority_validated:
+        raise Phase3ModelPreparationError(
+            "production generation requires frozen plan authority"
+        )
+    owner = prepared.owner
+    view = prepared.view
+    expected_parameters = (
+        S_PARAMETERS if owner.condition_id == S_CONDITION else HISTORY_PARAMETERS
+    )
+    expected_type = (
+        StateConditionedScorer
+        if owner.condition_id == S_CONDITION
+        else HistoryConditionedScorer
+    )
+    if owner.condition_id not in {S_CONDITION, *HISTORY_CONDITIONS}:
+        raise Phase3ModelPreparationError("prepared model condition is unknown")
+    if type(prepared.model) is not expected_type:
+        raise Phase3ModelPreparationError("prepared model architecture differs")
+    if (
+        owner.view_id != view.view.view_id
+        or owner.condition_id != view.view.condition_id
+        or (owner.fold_id, owner.heldout_family, owner.replicate)
+        != (view.view.fold_id, view.view.heldout_family, view.view.replicate)
+        or prepared.search_temperature_ids != owner.search_temperature_ids
+    ):
+        raise Phase3ModelPreparationError("prepared model owner/view lineage differs")
+    if prepared.training_spec != TrainingSpec(
+        epochs=owner.training_epochs,
+        learning_rate=owner.learning_rate,
+        weight_decay=WEIGHT_DECAY,
+    ):
+        raise Phase3ModelPreparationError("prepared model training spec differs")
+    actual_parameters = sum(parameter.numel() for parameter in prepared.model.parameters())
+    if (
+        actual_parameters != expected_parameters
+        or prepared.report.trainable_parameters != expected_parameters
+        or prepared.report.training_examples != len(view.examples)
+        or prepared.report.optimizer_steps != owner.training_epochs
+        or prepared.report.forward_passes
+        != owner.training_epochs * len(view.examples)
+    ):
+        raise Phase3ModelPreparationError("prepared model accounting differs")
+    expected_recurrent_steps = owner.training_epochs * sum(
+        int(example.history_features.shape[0])
+        for example in view.examples
+        if isinstance(example, HistoryDecisionExample)
+    )
+    if prepared.report.recurrent_steps != expected_recurrent_steps:
+        raise Phase3ModelPreparationError("prepared model recurrent accounting differs")
+    observed_state_sha256 = _model_state_sha256(prepared.model)
+    if prepared.model_state_sha256 != observed_state_sha256:
+        raise Phase3ModelPreparationError("prepared model state differs")
+    if prepared.model_identity_sha256 != _model_identity_sha256(
+        owner, view, model_state_sha256=observed_state_sha256
+    ):
+        raise Phase3ModelPreparationError("prepared model identity differs")
+
+
+def _model_identity_sha256(
+    owner: Phase3ModelOwner,
+    prepared_view: Phase3ViewPreparation,
+    *,
+    model_state_sha256: str,
+) -> str:
+    expected_parameters = (
+        S_PARAMETERS if owner.condition_id == S_CONDITION else HISTORY_PARAMETERS
+    )
+    architecture_id = (
+        "state-availability-mlp-v1"
+        if owner.condition_id == S_CONDITION
+        else "causal-history-gru-mlp-v1"
+    )
+    return _digest(
+        {
+            "owner_id": owner.owner_id,
+            "condition_id": owner.condition_id,
+            "view_id": owner.view_id,
+            "evidence_payload_sha256": prepared_view.evidence_payload_sha256,
+            "representation_identity_sha256": (
+                prepared_view.representation_identity_sha256
+            ),
+            "history_permutation_map_sha256": (
+                prepared_view.history_shuffle.permutation_map_sha256
+                if prepared_view.history_shuffle is not None
+                else None
+            ),
+            "model_seed": owner.model_seed,
+            "training_tuple_id": owner.training_tuple_id,
+            "learning_rate": owner.learning_rate,
+            "training_epochs": owner.training_epochs,
+            "optimizer": "adam",
+            "weight_decay": WEIGHT_DECAY,
+            "architecture_id": architecture_id,
+            "trainable_parameters": expected_parameters,
+            "model_state_sha256": model_state_sha256,
+        }
+    )
 
 
 def _digest(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _model_state_sha256(model: torch.nn.Module) -> str:
+    """Hash exact ordered tensor metadata and bytes without serialization noise."""
+
+    digest = hashlib.sha256()
+    state = model.state_dict()
+    for name in sorted(state):
+        tensor = state[name].detach().cpu().contiguous()
+        header = canonical_json_bytes(
+            {
+                "name": name,
+                "dtype": str(tensor.dtype),
+                "shape": list(tensor.shape),
+            }
+        )
+        raw = tensor.numpy().tobytes(order="C")
+        digest.update(len(header).to_bytes(8, "big"))
+        digest.update(header)
+        digest.update(len(raw).to_bytes(8, "big"))
+        digest.update(raw)
+    return digest.hexdigest()
 
 
 def _require_sha(value: Any, label: str) -> str:
@@ -337,6 +567,8 @@ def prepare_phase3_view(
         transition_examples=transition,
         history_shuffle=shuffle,
         representation_identity_sha256=view.representation_sha256,
+        authority_validated=not _allow_test_identity,
+        _construction_token=_PHASE3_VIEW_PREPARATION_TOKEN,
     )
 
 
@@ -349,6 +581,9 @@ def prepare_phase3_model(
 ) -> Phase3ModelPreparation:
     """Train one frozen owner; its three search temperatures share this model."""
 
+    validate_phase3_view_preparation(
+        prepared_view, require_authority=not _allow_test_identity
+    )
     _require_plan_owner(plan, owner, allow_test_identity=_allow_test_identity)
     if owner.view_id != prepared_view.view.view_id:
         raise Phase3ModelPreparationError("model owner view identity differs")
@@ -413,17 +648,11 @@ def prepare_phase3_model(
     )
     if report.recurrent_steps != expected_recurrent_steps:
         raise Phase3ModelPreparationError("model recurrent accounting drifted")
-    model_identity = _digest(
-        {
-            "owner_id": owner.owner_id,
-            "condition_id": owner.condition_id,
-            "view_id": owner.view_id,
-            "model_seed": owner.model_seed,
-            "training_tuple_id": owner.training_tuple_id,
-            "learning_rate": owner.learning_rate,
-            "training_epochs": owner.training_epochs,
-            "weight_decay": WEIGHT_DECAY,
-        }
+    model_state_sha256 = _model_state_sha256(model)
+    model_identity = _model_identity_sha256(
+        owner,
+        prepared_view,
+        model_state_sha256=model_state_sha256,
     )
     return Phase3ModelPreparation(
         owner=owner,
@@ -431,8 +660,13 @@ def prepare_phase3_model(
         model=model,
         report=report,
         training_spec=training,
+        model_state_sha256=model_state_sha256,
         model_identity_sha256=model_identity,
         search_temperature_ids=owner.search_temperature_ids,
+        authority_validated=(
+            prepared_view.authority_validated and not _allow_test_identity
+        ),
+        _construction_token=_PHASE3_MODEL_PREPARATION_TOKEN,
     )
 
 
@@ -454,4 +688,6 @@ __all__ = [
     "prepare_phase3_model",
     "prepare_phase3_view",
     "train_phase3_model",
+    "validate_phase3_model_preparation",
+    "validate_phase3_view_preparation",
 ]

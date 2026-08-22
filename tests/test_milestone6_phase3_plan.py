@@ -14,6 +14,8 @@ from levelup.experiments.milestone6_phase3_plan import (
     NEW_CONDITIONS,
     REPLICATES,
     TRAINING_TUPLE_IDS,
+    ValidatedPhase3Plan,
+    bind_validated_phase3_plan,
     build_phase3_plan,
     validate_phase3_plan,
 )
@@ -123,3 +125,19 @@ def test_phase3_plan_is_deterministic() -> None:
     assert first.views == second.views
     assert first.model_owners == second.model_owners
     assert first.units == second.units
+
+
+def test_validated_plan_gate_requires_exact_unit_membership() -> None:
+    plan = build_phase3_plan()
+    with pytest.raises(ValueError, match="canonical plan gate"):
+        ValidatedPhase3Plan(plan, {})
+    authority = bind_validated_phase3_plan(plan)
+    authority.require_unit(plan.units[0])
+    changed = replace(
+        plan.units[0],
+        unit=plan.units[0].unit.model_copy(
+            update={"exposure_manifest_sha256": "0" * 64}
+        ),
+    )
+    with pytest.raises(ValueError, match="validated frozen plan"):
+        authority.require_unit(changed)

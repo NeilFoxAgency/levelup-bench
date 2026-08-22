@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from typing import Any, Iterable
+from types import MappingProxyType
+from typing import Any, Iterable, Mapping
 
 from levelup.experiments.milestone6_phase2_screening import (
     B2,
@@ -41,6 +42,7 @@ TRAINING_TUPLE_IDS = (
 )
 PHASE = "validation"
 SCHEMA_VERSION = "milestone6.phase3.logical-plan.v1"
+_VALIDATED_PLAN_TOKEN = object()
 
 
 def _sha256_json(value: Any) -> str:
@@ -165,6 +167,35 @@ class Phase3Plan:
     @property
     def expected_units(self) -> tuple[PlannedUnit, ...]:
         return tuple(item.unit for item in self.units)
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ValidatedPhase3Plan:
+    """Opaque one-time validation gate used by execution boundaries."""
+
+    plan: Phase3Plan
+    _units_by_id: Mapping[str, Phase3PlannedUnit]
+    _construction_token: object
+
+    def __init__(
+        self,
+        plan: Phase3Plan,
+        units_by_id: Mapping[str, Phase3PlannedUnit],
+        *,
+        _construction_token: object | None = None,
+    ) -> None:
+        if _construction_token is not _VALIDATED_PLAN_TOKEN:
+            raise ValueError("validated Phase 3 plans require the canonical plan gate")
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "_units_by_id", MappingProxyType(dict(units_by_id)))
+        object.__setattr__(self, "_construction_token", _construction_token)
+
+    def require_unit(self, planned_unit: Phase3PlannedUnit) -> None:
+        if self._construction_token is not _VALIDATED_PLAN_TOKEN:
+            raise ValueError("Phase 3 plan authority is not canonical")
+        expected = self._units_by_id.get(planned_unit.unit.unit_id)
+        if expected is None or expected != planned_unit:
+            raise ValueError("Phase 3 unit differs from the validated frozen plan")
 
 
 def _canonical_phase2_inputs(
@@ -440,6 +471,25 @@ def validate_phase3_plan(
     canonical = _make_plan(snapshot, configs)
     if plan != canonical:
         raise ValueError("Phase 3 plan differs from the complete frozen authority")
+
+
+def bind_validated_phase3_plan(
+    plan: Phase3Plan,
+    *,
+    protocol: Phase3ProtocolSnapshot | None = None,
+    child_configs: Iterable[ExperimentConfig] | None = None,
+) -> ValidatedPhase3Plan:
+    """Validate the full authority once and return an opaque execution index."""
+
+    validate_phase3_plan(plan, protocol=protocol, child_configs=child_configs)
+    units = {item.unit.unit_id: item for item in plan.units}
+    if len(units) != len(plan.units):
+        raise ValueError("Phase 3 validated plan unit identities are duplicated")
+    return ValidatedPhase3Plan(
+        plan,
+        units,
+        _construction_token=_VALIDATED_PLAN_TOKEN,
+    )
 
 
 def build_phase3_plan(

@@ -4,6 +4,7 @@ import hashlib
 from dataclasses import replace
 
 import pytest
+import torch
 
 from levelup.experiments.milestone6_phase3_models import (
     H0_CONDITION,
@@ -11,9 +12,11 @@ from levelup.experiments.milestone6_phase3_models import (
     H4_SHUFFLED_CONDITION,
     S_CONDITION,
     HistoryShuffleDiagnostics,
+    Phase3ModelPreparation,
     Phase3ModelPreparationError,
     prepare_phase3_model,
     prepare_phase3_view,
+    validate_phase3_model_preparation,
 )
 from levelup.experiments.milestone6_phase3_plan import Phase3ModelOwner, Phase3View
 from levelup.experiments.runner.config import canonical_json_bytes
@@ -25,6 +28,7 @@ from levelup.experiments.runner.training_data_artifacts import (
     TrainingDataPayload,
     TrainingDataSample,
 )
+from levelup.learning.state_conditioned import TrainingReport, TrainingSpec
 
 
 def _payload() -> tuple[TrainingDataPayload, bytes, dict[str, object]]:
@@ -191,6 +195,47 @@ def test_production_view_requires_frozen_plan_authority() -> None:
             _view(S_CONDITION),
             payload_bytes=encoded,
         )
+
+
+def test_prepared_model_cannot_be_forged_or_promoted_from_test_authority() -> None:
+    with pytest.raises(Phase3ModelPreparationError, match="canonical Phase 3 trainer"):
+        Phase3ModelPreparation(
+            owner=_owner(_view(S_CONDITION)),
+            view=None,  # type: ignore[arg-type]
+            model=torch.nn.Identity(),
+            report=TrainingReport(0, 0, 0, 0),
+            training_spec=TrainingSpec(1, 0.003),
+            model_state_sha256="a" * 64,
+            model_identity_sha256="a" * 64,
+            search_temperature_ids=("one", "two", "three"),
+            authority_validated=True,
+        )
+
+    payload, encoded, manifest = _payload()
+    view = _view(S_CONDITION)
+    prepared_view = prepare_phase3_view(
+        payload,
+        manifest,
+        view,
+        payload_bytes=encoded,
+        _allow_test_identity=True,
+    )
+    assert prepared_view.authority_validated is False
+    with pytest.raises(Phase3ModelPreparationError, match="frozen view authority"):
+        prepare_phase3_model(prepared_view, _owner(view))
+    prepared_model = prepare_phase3_model(
+        prepared_view,
+        _owner(view),
+        _allow_test_identity=True,
+    )
+    assert prepared_model.authority_validated is False
+    with pytest.raises(Phase3ModelPreparationError, match="frozen plan authority"):
+        validate_phase3_model_preparation(prepared_model)
+    validate_phase3_model_preparation(prepared_model, require_authority=False)
+    with torch.no_grad():
+        next(prepared_model.model.parameters()).add_(1.0)
+    with pytest.raises(Phase3ModelPreparationError, match="model state differs"):
+        validate_phase3_model_preparation(prepared_model, require_authority=False)
 
 
 def test_empty_shuffle_coverage_is_not_claim_eligible() -> None:
