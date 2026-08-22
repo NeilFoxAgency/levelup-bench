@@ -96,7 +96,7 @@ def _base_condition(condition: Any) -> str | None:
     params = getattr(condition, "parameters", {})
     if isinstance(params, Mapping):
         base = params.get("base_condition_id")
-        if isinstance(base, str):
+        if base in ANCHOR_BASES:
             return base
     condition_id = getattr(condition, "condition_id", None)
     if not isinstance(condition_id, str):

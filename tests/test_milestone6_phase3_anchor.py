@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from levelup.experiments.milestone6_phase2_screening import screening_child_configs
 from levelup.experiments.milestone6_phase3_anchor import (
     CANDIDATE_TUPLE_IDS,
     AnchorManifestError,
+    _conditions_by_id,
     build_phase3_anchor_manifest,
     validate_phase3_anchor_manifest,
 )
@@ -332,3 +334,10 @@ def test_anchor_manifest_rejects_wrong_frozen_runtime_lineage(
             result_bytes_reader=reader,
             _allow_test_reader=True,
         )
+
+
+def test_anchor_condition_grid_ignores_non_anchor_learners() -> None:
+    config = screening_child_configs()[0]
+    rows = _conditions_by_id(config)
+    assert len(rows) == 24
+    assert {base for base, _ in rows.values()} == set(BASES)
