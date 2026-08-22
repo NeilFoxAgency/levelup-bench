@@ -20,6 +20,7 @@ from levelup.experiments.milestone6_phase3_plan import (
     bind_validated_phase3_plan,
     build_phase3_plan,
     canonical_phase3_plan_lock_bytes,
+    load_committed_phase3_plan_lock_bytes,
     validate_phase3_plan,
     validate_phase3_plan_lock_bytes,
 )
@@ -162,3 +163,13 @@ def test_canonical_plan_lock_rejects_rehashed_semantic_substitution() -> None:
     ).hexdigest()
     with pytest.raises(ValueError, match="frozen authority"):
         validate_phase3_plan_lock_bytes(canonical_json_bytes(payload))
+
+
+def test_committed_phase3_plan_lock_is_exact() -> None:
+    content = load_committed_phase3_plan_lock_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        "58ed9935fc0dceb2d6d55fb55422f725e9a085aa41b9fb699afc6af90a28c81b"
+    )
+    assert json.loads(content)["plan_lock_sha256"] == (
+        "dbd8e8a5e4d50098211198fa3664ac44171ad57cad63f2e8cd8b13834545b02c"
+    )

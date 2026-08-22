@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,9 @@ from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import UnitRecord
 
 SCHEMA_VERSION = "milestone6.phase3.anchor.v1"
+PHASE3_ANCHOR_MANIFEST_PATH = PHASE3_PROTOCOL_PATH.with_name(
+    "phase3_anchor_manifest.json"
+)
 ANCHOR_BASES = (
     "B2-global-listwise-optimum",
     "C-state-conditioned-listwise-optimum",
@@ -53,6 +57,7 @@ CANDIDATE_TUPLE_IDS = tuple(
     for temperature in ("t0p6", "t0p9", "t1p2")
 )
 _HEX64 = frozenset("0123456789abcdef")
+_ANCHOR_MANIFEST_TOKEN = object()
 
 
 class ResultBytesReader(Protocol):
@@ -445,13 +450,31 @@ def _unit_rows(
     )))
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class Phase3AnchorManifest:
     """Canonical identity-only manifest and its self-hash."""
 
     body: dict[str, Any]
     canonical_bytes: bytes
     anchor_manifest_sha256: str
+    _construction_token: object
+
+    def __init__(
+        self,
+        *,
+        body: dict[str, Any],
+        canonical_bytes: bytes,
+        anchor_manifest_sha256: str,
+        _construction_token: object | None = None,
+    ) -> None:
+        if _construction_token is not _ANCHOR_MANIFEST_TOKEN:
+            raise AnchorManifestError(
+                "anchor manifests require the canonical Phase 2 runtime gate"
+            )
+        object.__setattr__(self, "body", body)
+        object.__setattr__(self, "canonical_bytes", canonical_bytes)
+        object.__setattr__(self, "anchor_manifest_sha256", anchor_manifest_sha256)
+        object.__setattr__(self, "_construction_token", _construction_token)
 
     @property
     def sha256(self) -> str:
@@ -459,6 +482,44 @@ class Phase3AnchorManifest:
 
     def model_dump(self) -> dict[str, Any]:
         return dict(self.body)
+
+
+def require_phase3_anchor_manifest(manifest: Any) -> Phase3AnchorManifest:
+    """Require an object produced by the descriptor-validated anchor boundary."""
+
+    unsigned = dict(getattr(manifest, "body", {}))
+    supplied = unsigned.pop("anchor_manifest_sha256", None)
+    if (
+        not isinstance(manifest, Phase3AnchorManifest)
+        or manifest._construction_token is not _ANCHOR_MANIFEST_TOKEN
+        or canonical_json_bytes(manifest.body) != manifest.canonical_bytes
+        or supplied != manifest.anchor_manifest_sha256
+        or _sha256(canonical_json_bytes(unsigned)) != supplied
+    ):
+        raise AnchorManifestError("Phase 3 anchor authority is not canonical")
+    return manifest
+
+
+def load_committed_phase3_anchor_manifest_bytes(
+    path: str | Path = PHASE3_ANCHOR_MANIFEST_PATH,
+) -> bytes:
+    """Read the committed anchor authority through a symlink-safe descriptor."""
+
+    target = Path(path).absolute()
+    try:
+        parent_fd = secure_fs.open_directory_chain(target.parent)
+        try:
+            content = secure_fs.read_bytes_at(parent_fd, target.name)
+        finally:
+            os.close(parent_fd)
+        value = json.loads(content)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise AnchorManifestError(
+            "committed Phase 3 anchor authority cannot be read safely"
+        ) from exc
+    if not isinstance(value, dict) or canonical_json_bytes(value) != content:
+        raise AnchorManifestError("committed Phase 3 anchor authority is not canonical")
+    return content
 
 
 def _lineage(runtime: Any, protocol: Phase3ProtocolSnapshot) -> dict[str, Any]:
@@ -601,7 +662,12 @@ def build_phase3_anchor_manifest(
     digest = _sha256(canonical_json_bytes(body))
     body["anchor_manifest_sha256"] = digest
     payload = canonical_json_bytes(body)
-    return Phase3AnchorManifest(body=body, canonical_bytes=payload, anchor_manifest_sha256=digest)
+    return Phase3AnchorManifest(
+        body=body,
+        canonical_bytes=payload,
+        anchor_manifest_sha256=digest,
+        _construction_token=_ANCHOR_MANIFEST_TOKEN,
+    )
 
 
 def validate_phase3_anchor_manifest(
@@ -721,7 +787,12 @@ def validate_phase3_anchor_manifest(
     if rebuilt.canonical_bytes != canonical_json_bytes(body):
         raise AnchorManifestError("anchor manifest drifted from the locked runtime")
     canonical = canonical_json_bytes(body)
-    return Phase3AnchorManifest(body=body, canonical_bytes=canonical, anchor_manifest_sha256=supplied)
+    return Phase3AnchorManifest(
+        body=body,
+        canonical_bytes=canonical,
+        anchor_manifest_sha256=supplied,
+        _construction_token=_ANCHOR_MANIFEST_TOKEN,
+    )
 
 
 def validate_phase3_anchor_manifest_bytes(
@@ -763,6 +834,8 @@ __all__ = [
     "ResultBytesReader",
     "build_phase3_anchor_manifest",
     "create_phase3_anchor_manifest",
+    "load_committed_phase3_anchor_manifest_bytes",
+    "require_phase3_anchor_manifest",
     "validate_anchor_manifest",
     "validate_phase3_anchor_manifest",
     "validate_phase3_anchor_manifest_bytes",

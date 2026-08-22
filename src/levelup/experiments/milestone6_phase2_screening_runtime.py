@@ -299,6 +299,96 @@ class ScreeningRuntime:
             raise
 
 
+def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
+    """Revalidate a loaded runtime without activating any execution gate."""
+
+    if not isinstance(runtime, ScreeningRuntime):
+        _fail("read-only screening recheck requires a loaded ScreeningRuntime")
+    if runtime.manifest_path != runtime.repository / CANONICAL_READINESS_PATH:
+        _fail("read-only screening reuse requires the canonical committed manifest")
+    if (
+        runtime.raw_root_identity is None
+        or not runtime.child_identities
+        or runtime.manifest_parent_identity is None
+        or runtime.manifest_file_identity is None
+        or any(
+            source.parent_identity is None or source.file_identity is None
+            for source in runtime.authority_sources
+        )
+    ):
+        _fail("read-only screening reuse is missing pinned filesystem identities")
+    current_authority_sources = _authority_sources(runtime.manifest)
+    if current_authority_sources != runtime.authority_sources:
+        _fail("read-only screening authority sources differ from the loaded runtime")
+    if runtime.manifest_bytes != (
+        canonical_json_bytes(runtime.manifest.model_dump(mode="json")) + b"\n"
+    ):
+        _fail("screening runtime manifest bytes are not canonical")
+    if runtime.manifest.provenance != runtime.provenance:
+        _fail("screening runtime provenance differs from its manifest")
+    try:
+        captured = capture_system_provenance(runtime.repository, runtime.device_policy)
+        validate_screening_provenance(
+            runtime.provenance,
+            captured,
+            repository=runtime.repository,
+            manifest_bytes=runtime.manifest_bytes,
+        )
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        _fail("screening runtime provenance changed before read-only reuse", exc)
+    if len(runtime.folds) != len(runtime.manifest.children):
+        _fail("screening runtime fold inventory is incomplete")
+    for fold, child in zip(runtime.folds, runtime.manifest.children, strict=True):
+        canonical_data_keys = build_screening_data_keys(fold.config, runtime.provenance)
+        if fold.data_keys != canonical_data_keys:
+            _fail("screening runtime data keys differ from canonical authority")
+        canonical_model_keys = build_screening_model_keys(
+            fold.config,
+            fold.data_keys,
+            fold.data.manifests,
+        )
+        if fold.model_keys != canonical_model_keys:
+            _fail("screening runtime model keys differ from canonical authority")
+        canonical_shared = build_screening_shared_plan(
+            fold.config,
+            fold.data_keys,
+            fold.data.manifests,
+            fold.model_keys,
+        )
+        if fold.shared_plan != canonical_shared:
+            _fail("screening runtime shared plan differs from canonical authority")
+        if (
+            _child_manifest(
+                fold.config,
+                fold.data_keys,
+                fold.data,
+                fold.model_keys,
+                fold.models,
+                fold.shared_plan,
+                runtime.provenance,
+            )
+            != child
+        ):
+            _fail("screening runtime child inventory differs from readiness authority")
+    _assert_global_inventory(runtime.manifest, runtime.folds)
+    _recheck_manifest_and_tree(
+        runtime.manifest_path,
+        runtime.raw_root,
+        runtime.manifest_bytes,
+        runtime.manifest,
+        runtime.authority_sources,
+        runtime.tree_sha256,
+        runtime.raw_root_identity,
+        runtime.child_identities,
+        runtime.manifest_parent_identity,
+        runtime.manifest_file_identity,
+        (),
+        (),
+    )
+
+
 def _fail(message: str, exc: BaseException | None = None) -> None:
     if exc is None:
         raise TrainingDataArtifactError(message)
@@ -1184,6 +1274,7 @@ __all__ = [
     "AuthoritySourceSnapshot",
     "ScreeningRuntime",
     "ScreeningRuntimeFold",
+    "recheck_screening_runtime_readonly",
     "load_screening_runtime",
     "load_screening_data_inventory",
     "load_screening_model_inventory",

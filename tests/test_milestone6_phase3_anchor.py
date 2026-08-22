@@ -12,8 +12,10 @@ from levelup.experiments.milestone6_phase2_screening import screening_child_conf
 from levelup.experiments.milestone6_phase3_anchor import (
     CANDIDATE_TUPLE_IDS,
     AnchorManifestError,
+    Phase3AnchorManifest,
     _conditions_by_id,
     build_phase3_anchor_manifest,
+    load_committed_phase3_anchor_manifest_bytes,
     validate_phase3_anchor_manifest,
     validate_phase3_anchor_manifest_bytes,
 )
@@ -29,6 +31,22 @@ BASES = (
     "C-state-conditioned-listwise-optimum",
 )
 TUPLES = ("lr0p003-e120", "lr0p003-e180", "lr0p01-e120", "lr0p01-e180")
+
+
+def test_anchor_manifest_cannot_be_constructed_without_validated_runtime_gate() -> None:
+    with pytest.raises(AnchorManifestError, match="canonical Phase 2 runtime gate"):
+        Phase3AnchorManifest(
+            body={},
+            canonical_bytes=b"{}",
+            anchor_manifest_sha256="a" * 64,
+        )
+
+
+def test_committed_anchor_authority_is_canonical_and_exact() -> None:
+    content = load_committed_phase3_anchor_manifest_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        "8e8e1650f1c6a2e9cc8b92bcbdc0849a4ad352d050cfa4b22954ba80fe89b254"
+    )
 
 
 def _skip_unit_validation(

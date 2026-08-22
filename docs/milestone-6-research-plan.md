@@ -579,3 +579,19 @@ It names a state/availability control with transition outcomes removed, the hist
 state-transition representation, a four-step causal-history GRU, and an architecture-identical
 order-shuffled control. It reuses the exact Phase 2 optimum evidence and locked B2/C anchors; no
 frontier pairing or final-family access is authorized by that freeze.
+
+The Phase 3 preparation authority is split into explicit, non-executable layers. The compact
+[`phase3_plan_lock.json`](../configs/milestone6/phase3_plan_lock.json) binds all 120 views, 480 model
+owners, and 11,520 development units. The
+[`phase3_anchor_manifest.json`](../configs/milestone6/phase3_anchor_manifest.json) binds the exact
+Phase 2 B2/C model and unit-result identities without adding new execution. The development-only
+[`phase3_evidence_lock.json`](../configs/milestone6/phase3_evidence_lock.json) then binds the 30 condition-independent typed evidence manifests and
+their descriptor-reloaded cost records to that plan and anchor. It contains no learner payloads,
+outcomes, aggregates, or final-family material.
+
+The current Phase 3 artifact envelope is deliberately schema-only and records
+`execution_authorized=false`. It cannot authorize a development run. Execution remains blocked
+until all 480 actual model artifacts and reports are persisted, descriptor-reloaded, recomputed
+against the exact evidence-derived views, and accepted by a separate opaque model-artifact
+authority. In particular, caller-supplied tensor hashes or uniformly rehashed recurrent-step
+counts are not accepted as execution evidence.

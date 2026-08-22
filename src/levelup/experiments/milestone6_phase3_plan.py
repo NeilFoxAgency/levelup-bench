@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 
@@ -21,9 +23,11 @@ from levelup.experiments.milestone6_phase2_screening import (
 from levelup.experiments.milestone6_phase3_protocol import (
     FAMILIES,
     NEW_CONDITIONS,
+    PHASE3_PROTOCOL_PATH,
     Phase3ProtocolSnapshot,
     load_phase3_protocol,
 )
+from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import (
     ExperimentConfig,
     canonical_json_bytes,
@@ -44,6 +48,7 @@ TRAINING_TUPLE_IDS = (
 PHASE = "validation"
 SCHEMA_VERSION = "milestone6.phase3.logical-plan.v1"
 PLAN_LOCK_SCHEMA_VERSION = "milestone6.phase3.plan-lock.v1"
+PHASE3_PLAN_LOCK_PATH = PHASE3_PROTOCOL_PATH.with_name("phase3_plan_lock.json")
 _VALIDATED_PLAN_TOKEN = object()
 
 
@@ -503,6 +508,26 @@ def validate_phase3_plan_lock_bytes(content: bytes) -> Phase3Plan:
     if canonical_phase3_plan_lock_bytes(canonical) != content:
         raise ValueError("Phase 3 plan lock differs from the frozen authority")
     return canonical
+
+
+def load_committed_phase3_plan_lock_bytes(
+    path: str | os.PathLike[str] = PHASE3_PLAN_LOCK_PATH,
+) -> bytes:
+    """Descriptor-read and validate the committed logical-plan authority."""
+
+    target = Path(path).absolute()
+    try:
+        parent_fd = secure_fs.open_directory_chain(target.parent)
+        try:
+            content = secure_fs.read_bytes_at(parent_fd, target.name)
+        finally:
+            os.close(parent_fd)
+        validate_phase3_plan_lock_bytes(content)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "committed Phase 3 plan authority cannot be read safely"
+        ) from exc
+    return content
 
 
 def validate_phase3_plan(

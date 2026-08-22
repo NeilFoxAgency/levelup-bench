@@ -180,6 +180,42 @@ def _fixture(
     return committed, raw_root, source, body, config
 
 
+def _readonly_fixture_handle(monkeypatch, tmp_path):
+    """Load a small fixture handle with the typed fold fields recheck reads."""
+
+    committed, raw_root, _source, body, config = _fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    data_keys = object()
+    model_keys = object()
+    shared_plan = object()
+    monkeypatch.setattr(runtime, "build_screening_data_keys", lambda *_args: data_keys)
+    monkeypatch.setattr(runtime, "build_screening_model_keys", lambda *_args: model_keys)
+    monkeypatch.setattr(runtime, "build_screening_shared_plan", lambda *_args: shared_plan)
+    monkeypatch.setattr(runtime, "_assert_global_inventory", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_recheck_manifest_and_tree", lambda *_args: None)
+    handle = runtime.load_screening_runtime(
+        committed,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    child = handle.manifest.children[0]
+    monkeypatch.setattr(runtime, "_child_manifest", lambda *_args: child)
+    fold = runtime.ScreeningRuntimeFold(
+        family_id="plain",
+        config=config,
+        store=handle.folds[0].store,
+        data_keys=data_keys,
+        data=SimpleNamespace(manifests={}),
+        model_keys=model_keys,
+        models=object(),
+        shared_plan=shared_plan,
+    )
+    return replace(handle, folds=(fold,)), body
+
+
 def test_manifest_byte_pin_is_checked_before_loading(monkeypatch, tmp_path):
     committed, raw_root, _source, _body, _config = _fixture(monkeypatch, tmp_path)
     with pytest.raises(TrainingDataArtifactError, match="supplied pin"):
@@ -660,6 +696,45 @@ def test_recheck_rejects_same_byte_committed_manifest_replacement(monkeypatch, t
     committed.write_bytes(body)
     with pytest.raises(TrainingDataArtifactError, match="committed manifest identity changed"):
         handle.recheck_before_execution()
+
+
+def test_readonly_recheck_keeps_execution_gates_closed(monkeypatch, tmp_path):
+    handle, _body = _readonly_fixture_handle(monkeypatch, tmp_path)
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
+
+    runtime.recheck_screening_runtime_readonly(handle)
+
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
+
+
+def test_readonly_recheck_rejects_canonical_data_key_mutation(monkeypatch, tmp_path):
+    handle, _body = _readonly_fixture_handle(monkeypatch, tmp_path)
+    mutated_fold = replace(handle.folds[0], data_keys=object())
+    mutated = replace(handle, folds=(mutated_fold,))
+
+    with pytest.raises(TrainingDataArtifactError, match="data keys differ"):
+        runtime.recheck_screening_runtime_readonly(mutated)
+    assert mutated_fold.store._execution_ready is False
+
+
+def test_readonly_recheck_rejects_child_inventory_mutation(monkeypatch, tmp_path):
+    handle, _body = _readonly_fixture_handle(monkeypatch, tmp_path)
+    mutated_manifest = _Manifest(handle.provenance)
+    mutated_manifest.children = ()
+    mutated = replace(handle, manifest=mutated_manifest)
+
+    with pytest.raises(TrainingDataArtifactError, match="fold inventory is incomplete"):
+        runtime.recheck_screening_runtime_readonly(mutated)
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
+
+
+def test_readonly_recheck_rejects_manifest_canonical_drift(monkeypatch, tmp_path):
+    handle, body = _readonly_fixture_handle(monkeypatch, tmp_path)
+    mutated = replace(handle, manifest_bytes=body + b" ")
+
+    with pytest.raises(TrainingDataArtifactError, match="manifest bytes are not canonical"):
+        runtime.recheck_screening_runtime_readonly(mutated)
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
 
 
 def test_mutable_result_entries_do_not_change_prepared_tree_digest(tmp_path):
