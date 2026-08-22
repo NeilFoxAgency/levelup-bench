@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from collections import Counter
 from datetime import UTC, datetime
 
@@ -19,10 +20,13 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     build_screening_data_keys,
     build_screening_model_keys,
     build_screening_shared_plan,
+    load_screening_data_inventory,
+    load_screening_data_inventory_at,
     materialize_screening_data,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import SystemProvenance
+from levelup.experiments.runner.secure_fs import open_directory_chain
 from levelup.experiments.runner.storage import (
     ArtifactValidationError,
     RunStore,
@@ -592,3 +596,67 @@ def test_run_store_rejects_shared_owner_consumer_tampering(tamper: str, tmp_path
             repository=tmp_path,
             shared_artifacts=artifacts,
         )
+
+
+def test_fd_screening_data_inventory_matches_path_inventory(tmp_path) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    materialized = materialize_screening_data(config, data_keys, tmp_path)
+
+    path_loaded = load_screening_data_inventory(config, data_keys, tmp_path)
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        fd_loaded = load_screening_data_inventory_at(config, data_keys, run_fd)
+    finally:
+        os.close(run_fd)
+
+    assert path_loaded == materialized == fd_loaded
+
+
+def test_fd_screening_data_inventory_ignores_replaced_run_tree_and_path_loaders(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    materialized = materialize_screening_data(config, data_keys, tmp_path / "run")
+    original = tmp_path / "run"
+    run_fd = open_directory_chain(original)
+    try:
+        detached = tmp_path / "detached-run"
+        os.rename(original, detached)
+        replacement = tmp_path / "run"
+        replacement.mkdir()
+        sentinel = replacement / "external-sentinel"
+        sentinel.write_text("must never be read", encoding="utf-8")
+        for namespace in (
+            "screening-data-intents",
+            "training-data-evidence-costs",
+            "training-data-view-costs",
+            "training-data-artifact-keys",
+            "training-data-evidence",
+            "training-data-artifacts",
+        ):
+            child = replacement / namespace
+            child.mkdir()
+            (child / "external-sentinel").write_text(
+                "must never be read", encoding="utf-8"
+            )
+
+        def unexpected_path_loader(*args, **kwargs):
+            raise AssertionError("fd inventory must not call a path loader")
+
+        for name in (
+            "load_training_data_artifact",
+            "load_training_data_evidence",
+            "load_training_data_evidence_cost",
+            "load_training_data_view_cost",
+        ):
+            monkeypatch.setattr(preparation_module, name, unexpected_path_loader)
+
+        loaded = load_screening_data_inventory_at(config, data_keys, run_fd)
+    finally:
+        os.close(run_fd)
+
+    assert loaded == materialized
+    assert sentinel.read_text(encoding="utf-8") == "must never be read"

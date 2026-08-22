@@ -14,10 +14,12 @@ import os
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import levelup.experiments.runner.secure_fs as secure_fs
 from levelup.experiments.milestone6_baselines import (
     build_clean_optimum_training_sample,
 )
@@ -57,6 +59,7 @@ from levelup.experiments.runner.storage import (
 )
 from levelup.experiments.runner.training_artifacts import TrainingArtifactKey
 from levelup.experiments.runner.training_data_artifacts import (
+    PinnedTrainingDataReader,
     TrainingDataArtifactError,
     TrainingDataArtifactKey,
     TrainingDataArtifactManifest,
@@ -66,8 +69,11 @@ from levelup.experiments.runner.training_data_artifacts import (
     evidence_key_for,
     load_training_data_artifact,
     load_training_data_evidence,
+    load_training_data_evidence_bundle_from_at,
     load_training_data_evidence_cost,
+    load_training_data_view_bundle_from_at,
     load_training_data_view_cost,
+    open_training_data_reader,
     sanitize_clean_optimum_samples,
     write_training_data_artifact,
 )
@@ -777,6 +783,80 @@ def _require_readonly_namespace(
                 )
 
 
+def _validate_namespace_fd(
+    directory_fd: int,
+    expected_names: set[str] | None = None,
+    *,
+    entry_kind: str,
+    label: str,
+) -> tuple[str, ...]:
+    """Enumerate one already-pinned namespace without resolving a pathname."""
+
+    entries: list[str] = []
+    try:
+        with os.scandir(directory_fd) as iterator:
+            for entry in iterator:
+                if entry.is_symlink():
+                    raise TrainingDataArtifactError(
+                        f"{label} namespace contains a symlink"
+                    )
+                is_file = entry.is_file(follow_symlinks=False)
+                is_directory = entry.is_dir(follow_symlinks=False)
+                if (entry_kind == "file" and not is_file) or (
+                    entry_kind == "directory" and not is_directory
+                ):
+                    raise TrainingDataArtifactError(
+                        f"{label} namespace contains an unsafe entry"
+                    )
+                entries.append(entry.name)
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise TrainingDataArtifactError(
+            f"{label} namespace cannot be read"
+        ) from exc
+    observed = tuple(sorted(entries))
+    if expected_names is not None and set(observed) != expected_names:
+        raise TrainingDataArtifactError(f"{label} namespace inventory drifted")
+    return observed
+
+
+def _open_screening_namespace_at(
+    run_fd: int,
+    name: str,
+    *,
+    expected_names: set[str] | None = None,
+    entry_kind: str,
+) -> int:
+    """Open and validate one direct child namespace, retaining its descriptor."""
+
+    try:
+        directory_fd = secure_fs.open_child_directory(run_fd, name)
+    except secure_fs.SecureFilesystemError as exc:
+        raise TrainingDataArtifactError(
+            f"screening data {name} namespace is missing or unsafe"
+        ) from exc
+    try:
+        _validate_namespace_fd(
+            directory_fd,
+            expected_names,
+            entry_kind=entry_kind,
+            label=f"screening data {name}",
+        )
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd
+
+
+@contextmanager
+def _descriptor_context(directory_fd: int):
+    try:
+        yield directory_fd
+    finally:
+        os.close(directory_fd)
+
+
 def _validate_evidence_accounting(
     config: ExperimentConfig,
     payload: TrainingDataPayload,
@@ -939,6 +1019,156 @@ def load_screening_data_inventory(
         evidence_cost_ids=evidence_cost_ids,
         view_cost_ids=view_cost_ids,
     )
+
+
+def load_screening_data_inventory_at(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    run_fd: int,
+    *,
+    reader: PinnedTrainingDataReader | None = None,
+    intent_fd: int | None = None,
+) -> MaterializedScreeningData:
+    """Load the complete screening data inventory from one pinned run descriptor.
+
+    All names below are resolved relative to ``run_fd`` or to a namespace
+    descriptor retained for the duration of this function.  In particular, this
+    entry point never reconstructs a run path and never calls a path-based
+    training-data loader.
+    """
+
+    validate_screening_child_config(config)
+    if config.split.final_tasks:
+        raise ValueError("screening data inventory cannot receive final tasks")
+    if data_keys != build_screening_data_keys(config, data_keys.provenance):
+        raise ValueError("screening data inventory received noncanonical data keys")
+    if len(data_keys.evidence) != 5 or len(data_keys.views) != 15:
+        raise TrainingDataArtifactError("screening data inventory is not exactly 5+15")
+    try:
+        secure_fs.directory_identity(run_fd)
+    except secure_fs.SecureFilesystemError as exc:
+        raise TrainingDataArtifactError(
+            "screening data inventory root descriptor is unsafe"
+        ) from exc
+
+    expected_intents = {
+        f"{key.key_id}.json" for key in data_keys.evidence.values()
+    }
+    expected_evidence_costs = set(expected_intents)
+    expected_view_costs = {
+        f"{key.key_id}.json" for key in data_keys.views.values()
+    }
+    expected_view_keys = set(expected_view_costs)
+
+    if (reader is None) != (intent_fd is None):
+        raise TrainingDataArtifactError(
+            "screening data retained reader and intent fd must be supplied together"
+        )
+    with ExitStack() as descriptors:
+        if intent_fd is None:
+            intent_fd = descriptors.enter_context(
+                _descriptor_context(
+                    _open_screening_namespace_at(
+                        run_fd,
+                        "screening-data-intents",
+                        expected_names=expected_intents,
+                        entry_kind="file",
+                    )
+                )
+            )
+        else:
+            _validate_namespace_fd(
+                intent_fd,
+                expected_intents,
+                entry_kind="file",
+                label="screening data screening-data-intents",
+            )
+        if reader is None:
+            reader = descriptors.enter_context(open_training_data_reader(run_fd))
+        _validate_namespace_fd(
+            reader.evidence_costs_fd,
+            expected_evidence_costs,
+            entry_kind="file",
+            label="screening data training-data-evidence-costs",
+        )
+        _validate_namespace_fd(
+            reader.view_costs_fd,
+            expected_view_costs,
+            entry_kind="file",
+            label="screening data training-data-view-costs",
+        )
+        _validate_namespace_fd(
+            reader.view_keys_fd,
+            expected_view_keys,
+            entry_kind="file",
+            label="screening data training-data-artifact-keys",
+        )
+        for replicate, key in data_keys.evidence.items():
+            intent_name = f"{key.key_id}.json"
+            try:
+                intent_bytes = secure_fs.read_bytes_at(intent_fd, intent_name)
+            except secure_fs.SecureFilesystemError as exc:
+                raise TrainingDataArtifactError(
+                    "screening data intent cannot be read safely"
+                ) from exc
+            if intent_bytes != canonical_json_bytes(
+                _intent_body(config, data_keys, replicate)
+            ):
+                raise TrainingDataArtifactError("screening data intent content drifted")
+
+        evidence: dict[int, TrainingDataEvidenceManifest] = {}
+        views: dict[tuple[str, int], TrainingDataArtifactManifest] = {}
+        evidence_cost_ids: dict[int, str] = {}
+        view_cost_ids: dict[tuple[str, int], str] = {}
+        evidence_payloads: dict[int, TrainingDataPayload] = {}
+        evidence_artifact_ids: set[str] = set()
+        view_artifact_ids: set[str] = set()
+        for replicate, key in data_keys.evidence.items():
+            cost, manifest, payload = load_training_data_evidence_bundle_from_at(
+                reader, key
+            )
+            if cost.artifact_id != manifest.evidence_id:
+                raise TrainingDataArtifactError("screening evidence cost lineage drifted")
+            evidence[replicate] = manifest
+            evidence_payloads[replicate] = payload
+            evidence_cost_ids[replicate] = cost.cost_id
+            evidence_artifact_ids.add(manifest.evidence_id)
+            _validate_evidence_accounting(config, payload, cost.accounting)
+        for identity, key in data_keys.views.items():
+            cost, manifest, _ = load_training_data_view_bundle_from_at(reader, key)
+            if cost.artifact_id != manifest.artifact_id:
+                raise TrainingDataArtifactError("screening view cost lineage drifted")
+            if cost.accounting != TrainingPreparationAccounting(
+                serialization=PhaseAccounting(calls=1)
+            ):
+                raise TrainingDataArtifactError("screening view accounting is not canonical")
+            views[identity] = manifest
+            view_cost_ids[identity] = cost.cost_id
+            view_artifact_ids.add(manifest.artifact_id)
+
+        manifests = ScreeningDataManifests(evidence=evidence, views=views)
+        if set(evidence_payloads) != set(data_keys.evidence):
+            raise TrainingDataArtifactError(
+                "screening evidence payload inventory is incomplete"
+            )
+        _validate_data_manifests(data_keys, manifests)
+        _validate_namespace_fd(
+            reader.evidence_root_fd,
+            evidence_artifact_ids,
+            entry_kind="directory",
+            label="screening data training-data-evidence",
+        )
+        _validate_namespace_fd(
+            reader.artifact_root_fd,
+            view_artifact_ids,
+            entry_kind="directory",
+            label="screening data training-data-artifacts",
+        )
+        return MaterializedScreeningData(
+            manifests=manifests,
+            evidence_cost_ids=evidence_cost_ids,
+            view_cost_ids=view_cost_ids,
+        )
 
 
 def materialize_screening_data(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -96,10 +97,16 @@ def _fixture(monkeypatch, tmp_path):
         )
 
     validation_calls = []
+
+    @contextmanager
+    def opened_reader(*_args):
+        yield object()
+
     store = SimpleNamespace(
         run_id="fold-run",
         run_dir=tmp_path,
-        validate_shared_reference_set=lambda unit, refs: validation_calls.append(refs),
+        _open_pinned_run=opened_reader,
+        _validate_shared_reference_set_at=lambda _run_fd, _unit, refs, **_kwargs: validation_calls.append(refs),
     )
     fold = SimpleNamespace(
         family_id="plain",
@@ -157,15 +164,18 @@ def _fixture(monkeypatch, tmp_path):
     monkeypatch.setattr(artifacts, "candidate_for_condition", candidate_for)
     loader_calls = []
 
-    def load_index(root, key):
-        return SimpleNamespace(artifact_id=model_artifact_id)
+    def load_bundle(_reader, _key, *, model_factory):
+        loader_calls.append(model_artifact_id)
+        return (
+            torch.nn.Linear(1, 1).eval(),
+            model_manifest,
+            SimpleNamespace(artifact_id=model_artifact_id),
+            model_cost,
+        )
 
-    def load_model(root, artifact_id, *, expected_key, model_factory):
-        loader_calls.append(artifact_id)
-        return torch.nn.Linear(1, 1).eval(), model_manifest
-
-    monkeypatch.setattr(artifacts, "load_training_key_index", load_index)
-    monkeypatch.setattr(artifacts, "load_training_model", load_model)
+    monkeypatch.setattr(artifacts, "open_training_data_reader", opened_reader)
+    monkeypatch.setattr(artifacts, "open_training_artifact_reader", opened_reader)
+    monkeypatch.setattr(artifacts, "load_training_bundle_from_at", load_bundle)
     return fold, planned, condition, validation_calls, loader_calls, condition_ids, base, tuple_id
 
 

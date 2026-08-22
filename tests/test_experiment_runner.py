@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import threading
 from collections.abc import Callable
@@ -1291,6 +1292,67 @@ def test_read_only_initialization_cannot_execute_units(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="for_execution=True"):
         ExperimentRunner(store).execute(_payload)
+
+
+def test_prepared_initialization_uses_supplied_provenance_without_recapture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RunStore(
+        tmp_path,
+        _config(conditions=1, tasks=1, replicates=1),
+        repository=tmp_path,
+    )
+    store.units_dir.mkdir(parents=True)
+    store.attempts_dir.mkdir()
+    supplied = _provenance()
+    monkeypatch.setattr(
+        "levelup.experiments.runner.storage.capture_system_provenance",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("prepared initialization recaptured provenance")
+        ),
+    )
+
+    store.initialize_prepared(supplied)
+
+    assert store.load_provenance() == supplied
+    with pytest.raises(RuntimeError, match="for_execution=True"):
+        ExperimentRunner(store).execute(_payload)
+
+
+def test_prepared_initialization_fails_if_supplied_provenance_disappears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = RunStore(
+        tmp_path,
+        _config(conditions=1, tasks=1, replicates=1),
+        repository=tmp_path,
+    )
+    store.units_dir.mkdir(parents=True)
+    store.attempts_dir.mkdir()
+    storage_module = __import__(
+        "levelup.experiments.runner.storage", fromlist=["_exclusive_write_json_at"]
+    )
+    publish = storage_module._exclusive_write_json_at
+
+    def remove_provenance_after_publish(
+        run_fd: int, namespace_fd: int, name: str, value: object
+    ) -> bool:
+        published = publish(run_fd, namespace_fd, name, value)
+        if name == "provenance.json":
+            os.unlink(name, dir_fd=namespace_fd)
+        return published
+
+    monkeypatch.setattr(storage_module, "_exclusive_write_json_at", remove_provenance_after_publish)
+    monkeypatch.setattr(
+        storage_module,
+        "capture_system_provenance",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("missing prepared provenance was silently recaptured")
+        ),
+    )
+
+    with pytest.raises(ArtifactValidationError, match="provenance"):
+        store.initialize_prepared(_provenance())
 
 
 def test_dirty_provenance_hash_includes_untracked_contents(tmp_path: Path) -> None:

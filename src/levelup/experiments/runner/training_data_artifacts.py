@@ -16,9 +16,10 @@ import re
 import shutil
 import tempfile
 from collections.abc import Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -26,6 +27,12 @@ from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import (
     PhaseAccounting,
     TrainingPreparationAccounting,
+)
+from levelup.experiments.runner.secure_fs import (
+    load_json_at,
+    open_child_directory,
+    read_bytes_at,
+    regular_entries_at,
 )
 
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
@@ -35,6 +42,41 @@ _CANONICAL_SANITIZED_DATA_TOKEN = object()
 
 class TrainingDataArtifactError(RuntimeError):
     """Raised for invalid, incomplete, or conflicting persisted data."""
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedTrainingDataReader:
+    """Descriptors for one immutable training-data lineage read."""
+
+    evidence_costs_fd: int
+    view_costs_fd: int
+    view_keys_fd: int
+    evidence_root_fd: int
+    artifact_root_fd: int
+
+
+@contextmanager
+def open_training_data_reader(run_fd: int) -> Iterator[PinnedTrainingDataReader]:
+    """Pin every training-data namespace used by one validation transaction."""
+
+    with ExitStack() as stack:
+        try:
+            descriptors: dict[str, int] = {}
+            for field, name in (
+                ("evidence_costs_fd", "training-data-evidence-costs"),
+                ("view_costs_fd", "training-data-view-costs"),
+                ("view_keys_fd", "training-data-artifact-keys"),
+                ("evidence_root_fd", "training-data-evidence"),
+                ("artifact_root_fd", "training-data-artifacts"),
+            ):
+                descriptor = open_child_directory(run_fd, name)
+                stack.callback(os.close, descriptor)
+                descriptors[field] = descriptor
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise TrainingDataArtifactError(
+                "training-data namespaces contain a symlink or cannot be securely pinned"
+            ) from exc
+        yield PinnedTrainingDataReader(**descriptors)
 
 
 HASH = Field(pattern=r"^[0-9a-f]{64}$")
@@ -627,6 +669,79 @@ def _load_evidence(
     return evidence_manifest, payload
 
 
+def _validate_loaded_from_at(
+    artifact_root_fd: int, artifact_id: str
+) -> TrainingDataArtifactManifest:
+    """Validate a view manifest below one already-pinned artifact namespace."""
+
+    if not HEX64.fullmatch(artifact_id):
+        raise TrainingDataArtifactError("invalid training-data artifact ID")
+    artifact_fd: int | None = None
+    try:
+        artifact_fd = open_child_directory(artifact_root_fd, artifact_id)
+        if set(regular_entries_at(artifact_fd)) != {"manifest.json"}:
+            raise TrainingDataArtifactError("training-data view has unexpected files")
+        manifest = _validate_model(
+            TrainingDataArtifactManifest,
+            load_json_at(artifact_fd, "manifest.json"),
+            "training-data manifest",
+        )
+        assert isinstance(manifest, TrainingDataArtifactManifest)
+        if manifest.artifact_id != artifact_id:
+            raise TrainingDataArtifactError("training-data manifest identity mismatch")
+        return manifest
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise TrainingDataArtifactError("invalid training-data view storage") from exc
+    finally:
+        if artifact_fd is not None:
+            os.close(artifact_fd)
+
+
+def _load_evidence_from_at(
+    evidence_root_fd: int,
+    evidence_id: str,
+) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
+    """Load evidence bytes below one already-pinned evidence namespace."""
+
+    if not HEX64.fullmatch(evidence_id):
+        raise TrainingDataArtifactError("invalid evidence ID")
+    evidence_fd: int | None = None
+    try:
+        evidence_fd = open_child_directory(evidence_root_fd, evidence_id)
+        if set(regular_entries_at(evidence_fd)) != {"manifest.json", "samples.json"}:
+            raise TrainingDataArtifactError("training-data evidence has unexpected files")
+        evidence_manifest = _validate_model(
+            TrainingDataEvidenceManifest,
+            load_json_at(evidence_fd, "manifest.json"),
+            "training-data evidence manifest",
+        )
+        assert isinstance(evidence_manifest, TrainingDataEvidenceManifest)
+        payload_bytes = read_bytes_at(evidence_fd, "samples.json")
+        try:
+            payload = TrainingDataPayload.model_validate(json.loads(payload_bytes))
+        except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise TrainingDataArtifactError("invalid training-data evidence payload") from exc
+        observed_hash = hashlib.sha256(payload_bytes).hexdigest()
+        observed_tasks = tuple(sample.task_id for sample in payload.samples)
+        if (
+            evidence_manifest.evidence_id != evidence_id
+            or evidence_manifest.payload_sha256 != observed_hash
+            or evidence_manifest.payload_bytes != len(payload_bytes)
+            or evidence_manifest.sample_task_ids != observed_tasks
+        ):
+            raise TrainingDataArtifactError("training-data evidence integrity mismatch")
+        return evidence_manifest, payload
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise TrainingDataArtifactError("invalid training-data evidence storage") from exc
+    finally:
+        if evidence_fd is not None:
+            os.close(evidence_fd)
+
+
 def write_training_data_artifact(
     root: str | Path,
     key: TrainingDataArtifactKey,
@@ -800,6 +915,34 @@ def load_training_data_evidence(
     return manifest, payload
 
 
+def load_training_data_evidence_at(
+    run_fd: int,
+    evidence_id: str,
+    *,
+    expected_key: TrainingDataEvidenceKey,
+) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
+    """Fd-root variant of :func:`load_training_data_evidence`."""
+
+    with open_training_data_reader(run_fd) as reader:
+        return load_training_data_evidence_from_at(
+            reader, evidence_id, expected_key=expected_key
+        )
+
+
+def load_training_data_evidence_from_at(
+    reader: PinnedTrainingDataReader,
+    evidence_id: str,
+    *,
+    expected_key: TrainingDataEvidenceKey,
+) -> tuple[TrainingDataEvidenceManifest, TrainingDataPayload]:
+    """Load one evidence artifact through a retained namespace bundle."""
+
+    manifest, payload = _load_evidence_from_at(reader.evidence_root_fd, evidence_id)
+    if manifest.key != expected_key or manifest.evidence_key_id != expected_key.key_id:
+        raise TrainingDataArtifactError("training-data evidence key mismatch")
+    return manifest, payload
+
+
 def load_training_data_evidence_cost(
     root: str | Path,
     expected_key: TrainingDataEvidenceKey | str,
@@ -824,6 +967,62 @@ def load_training_data_evidence_cost(
         raise TrainingDataArtifactError("training-data evidence cost key mismatch")
     load_training_data_evidence(root_path, record.artifact_id, expected_key=record.key)
     return record
+
+
+def load_training_data_evidence_cost_at(
+    run_fd: int,
+    expected_key: TrainingDataEvidenceKey | str,
+) -> TrainingDataEvidenceCostRecord:
+    """Load and validate an evidence cost without resolving the run path again."""
+
+    with open_training_data_reader(run_fd) as reader:
+        return load_training_data_evidence_cost_from_at(reader, expected_key)
+
+
+def load_training_data_evidence_cost_from_at(
+    reader: PinnedTrainingDataReader,
+    expected_key: TrainingDataEvidenceKey | str,
+) -> TrainingDataEvidenceCostRecord:
+    """Load a cost and its evidence through one retained namespace bundle."""
+
+    record, _, _ = load_training_data_evidence_bundle_from_at(reader, expected_key)
+    return record
+
+
+def load_training_data_evidence_bundle_from_at(
+    reader: PinnedTrainingDataReader,
+    expected_key: TrainingDataEvidenceKey | str,
+) -> tuple[
+    TrainingDataEvidenceCostRecord,
+    TrainingDataEvidenceManifest,
+    TrainingDataPayload,
+]:
+    """Load one evidence cost/manifest/payload exactly once under pinned fds."""
+
+    key_id = (
+        expected_key.key_id if isinstance(expected_key, TrainingDataEvidenceKey) else expected_key
+    )
+    if not HEX64.fullmatch(key_id):
+        raise TrainingDataArtifactError("invalid training-data evidence cost key")
+    try:
+        record = _validate_model(
+            TrainingDataEvidenceCostRecord,
+            load_json_at(reader.evidence_costs_fd, f"{key_id}.json"),
+            "training-data evidence cost",
+        )
+        assert isinstance(record, TrainingDataEvidenceCostRecord)
+        if record.key_id != key_id or (
+            isinstance(expected_key, TrainingDataEvidenceKey) and record.key != expected_key
+        ):
+            raise TrainingDataArtifactError("training-data evidence cost key mismatch")
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise TrainingDataArtifactError("invalid training-data evidence cost storage") from exc
+    manifest, payload = load_training_data_evidence_from_at(
+        reader, record.artifact_id, expected_key=record.key
+    )
+    return record, manifest, payload
 
 
 def load_training_data_view_cost(
@@ -856,6 +1055,66 @@ def load_training_data_view_cost(
     return record
 
 
+def load_training_data_view_cost_at(
+    run_fd: int,
+    expected_key: TrainingDataArtifactKey | str,
+) -> TrainingDataViewCostRecord:
+    """Load and validate a view cost through an anchored run descriptor."""
+
+    with open_training_data_reader(run_fd) as reader:
+        return load_training_data_view_cost_from_at(reader, expected_key)
+
+
+def load_training_data_view_cost_from_at(
+    reader: PinnedTrainingDataReader,
+    expected_key: TrainingDataArtifactKey | str,
+) -> TrainingDataViewCostRecord:
+    """Load a view cost and its lineage through retained namespace fds."""
+
+    record, _, _ = load_training_data_view_bundle_from_at(reader, expected_key)
+    return record
+
+
+def load_training_data_view_bundle_from_at(
+    reader: PinnedTrainingDataReader,
+    expected_key: TrainingDataArtifactKey | str,
+) -> tuple[
+    TrainingDataViewCostRecord,
+    TrainingDataArtifactManifest,
+    TrainingDataPayload,
+]:
+    """Load one view cost/manifest/payload exactly once under pinned fds."""
+
+    key_id = (
+        expected_key.key_id if isinstance(expected_key, TrainingDataArtifactKey) else expected_key
+    )
+    if not HEX64.fullmatch(key_id):
+        raise TrainingDataArtifactError("invalid training-data view cost key")
+    try:
+        record = _validate_model(
+            TrainingDataViewCostRecord,
+            load_json_at(reader.view_costs_fd, f"{key_id}.json"),
+            "training-data view cost",
+        )
+        assert isinstance(record, TrainingDataViewCostRecord)
+        if record.key_id != key_id or (
+            isinstance(expected_key, TrainingDataArtifactKey) and record.key != expected_key
+        ):
+            raise TrainingDataArtifactError("training-data view cost key mismatch")
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise TrainingDataArtifactError("invalid training-data view cost storage") from exc
+    manifest, payload = load_training_data_artifact_from_at(
+        reader,
+        record.artifact_id,
+        expected_key=record.key,
+    )
+    if manifest.artifact_id != record.artifact_id:
+        raise TrainingDataArtifactError("training-data view cost artifact mismatch")
+    return record, manifest, payload
+
+
 def load_training_data_artifact(
     root: str | Path,
     artifact_id: str | None = None,
@@ -883,6 +1142,61 @@ def load_training_data_artifact(
         raise TrainingDataArtifactError("artifact ID or expected key is required")
     manifest = _validate_loaded(root_path, artifact_id)
     evidence_manifest, payload = _load_evidence(root_path, manifest.evidence_id)
+    if (
+        evidence_manifest.key != evidence_key_for(manifest.key)
+        or manifest.payload_sha256 != evidence_manifest.payload_sha256
+        or manifest.payload_bytes != evidence_manifest.payload_bytes
+        or manifest.sample_task_ids != evidence_manifest.sample_task_ids
+    ):
+        raise TrainingDataArtifactError("training-data view/evidence mismatch")
+    if expected_key is not None and manifest.key != expected_key:
+        raise TrainingDataArtifactError("training-data key mismatch")
+    return manifest, payload
+
+
+def load_training_data_artifact_at(
+    run_fd: int,
+    artifact_id: str | None = None,
+    *,
+    expected_key: TrainingDataArtifactKey | None = None,
+) -> tuple[TrainingDataArtifactManifest, TrainingDataPayload]:
+    """Load a condition-bound view without any path-based filesystem access."""
+
+    with open_training_data_reader(run_fd) as reader:
+        return load_training_data_artifact_from_at(
+            reader, artifact_id, expected_key=expected_key
+        )
+
+
+def load_training_data_artifact_from_at(
+    reader: PinnedTrainingDataReader,
+    artifact_id: str | None = None,
+    *,
+    expected_key: TrainingDataArtifactKey | None = None,
+) -> tuple[TrainingDataArtifactManifest, TrainingDataPayload]:
+    """Load one view/evidence lineage through retained namespace descriptors."""
+
+    if expected_key is not None:
+        try:
+            index = _validate_model(
+                TrainingDataKeyIndex,
+                load_json_at(reader.view_keys_fd, f"{expected_key.key_id}.json"),
+                "training-data key index",
+            )
+            assert isinstance(index, TrainingDataKeyIndex)
+            if index.key != expected_key or index.key_id != expected_key.key_id:
+                raise TrainingDataArtifactError("training-data key index mismatch")
+            artifact_id = index.artifact_id
+        except TrainingDataArtifactError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise TrainingDataArtifactError("invalid training-data key index storage") from exc
+    if artifact_id is None:
+        raise TrainingDataArtifactError("artifact ID or expected key is required")
+    manifest = _validate_loaded_from_at(reader.artifact_root_fd, artifact_id)
+    evidence_manifest, payload = _load_evidence_from_at(
+        reader.evidence_root_fd, manifest.evidence_id
+    )
     if (
         evidence_manifest.key != evidence_key_for(manifest.key)
         or manifest.payload_sha256 != evidence_manifest.payload_sha256

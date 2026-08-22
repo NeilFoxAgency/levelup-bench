@@ -12,6 +12,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -36,9 +38,8 @@ from levelup.experiments.milestone6_phase2_screening_readiness import (
     ScreeningReadinessChild,
     ScreeningReadinessManifest,
     _child_manifest,
-    _validate_child_top_level,
-    load_screening_readiness_manifest,
 )
+from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import (
     DevicePolicy,
     ExperimentConfig,
@@ -61,7 +62,11 @@ from levelup.experiments.runner.storage import (
     plan_expected_units,
     provenance_identity_sha256,
 )
-from levelup.experiments.runner.training_data_artifacts import TrainingDataArtifactError
+from levelup.experiments.runner.training_artifacts import open_training_artifact_reader
+from levelup.experiments.runner.training_data_artifacts import (
+    TrainingDataArtifactError,
+    open_training_data_reader,
+)
 
 
 def load_screening_data_inventory(
@@ -94,6 +99,38 @@ def load_screening_model_inventory(
     return loader(config, data_keys, data, model_keys, run_dir)
 
 
+def load_screening_data_inventory_at(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    run_fd: int,
+    **retained: Any,
+) -> MaterializedScreeningData:
+    """Late-bound adapter for the descriptor-relative data inventory API."""
+
+    from levelup.experiments.milestone6_phase2_screening_preparation import (
+        load_screening_data_inventory_at as loader,
+    )
+
+    return loader(config, data_keys, run_fd, **retained)
+
+
+def load_screening_model_inventory_at(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    data: MaterializedScreeningData,
+    model_keys: ScreeningModelKeys,
+    run_fd: int,
+    **retained: Any,
+) -> MaterializedScreeningModels:
+    """Late-bound adapter for the descriptor-relative model inventory API."""
+
+    from levelup.experiments.milestone6_phase2_screening_models import (
+        load_screening_model_inventory_at as loader,
+    )
+
+    return loader(config, data_keys, data, model_keys, run_fd, **retained)
+
+
 def _activate_prepared_batch(
     stores: tuple[RunStore, ...], provenance: SystemProvenance
 ) -> None:
@@ -110,6 +147,8 @@ class AuthoritySourceSnapshot:
     path: Path
     content: bytes
     sha256: str
+    parent_identity: tuple[int, int]
+    file_identity: tuple[int, int]
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +179,10 @@ class ScreeningRuntime:
     provenance: SystemProvenance
     folds: tuple[ScreeningRuntimeFold, ...]
     tree_sha256: str
+    raw_root_identity: tuple[int, int]
+    child_identities: tuple[tuple[str, tuple[int, int]], ...]
+    manifest_parent_identity: tuple[int, int]
+    manifest_file_identity: tuple[int, int]
 
     @property
     def authority_bytes_by_path(self) -> tuple[tuple[Path, bytes], ...]:
@@ -156,6 +199,17 @@ class ScreeningRuntime:
     def recheck_before_execution(self) -> None:
         """Reconfirm all authority, then transactionally open execution gates."""
 
+        if (
+            self.raw_root_identity is None
+            or not self.child_identities
+            or self.manifest_parent_identity is None
+            or self.manifest_file_identity is None
+            or any(
+                source.parent_identity is None or source.file_identity is None
+                for source in self.authority_sources
+            )
+        ):
+            _fail("screening runtime is missing pinned filesystem identities")
         stores = tuple(fold.store for fold in self.folds)
         for store in stores:
             store._execution_ready = False
@@ -178,6 +232,10 @@ class ScreeningRuntime:
                 self.manifest,
                 self.authority_sources,
                 self.tree_sha256,
+                self.raw_root_identity,
+                self.child_identities,
+                self.manifest_parent_identity,
+                self.manifest_file_identity,
             )
             _activate_prepared_batch(stores, self.provenance)
             # Activation is read-only, but immediately recheck the immutable
@@ -189,6 +247,10 @@ class ScreeningRuntime:
                 self.manifest,
                 self.authority_sources,
                 self.tree_sha256,
+                self.raw_root_identity,
+                self.child_identities,
+                self.manifest_parent_identity,
+                self.manifest_file_identity,
             )
         except Exception:
             for store in stores:
@@ -232,28 +294,84 @@ def _safe_basename(value: str, *, label: str) -> None:
 
 
 def _canonical_json_file(path: Path, *, label: str) -> tuple[bytes, Any]:
-    _reject_symlink_chain(path)
-    if not path.is_file():
-        _fail(f"screening runtime {label} must be a regular file")
     try:
-        content = path.read_bytes()
+        content, _parent_identity, _file_identity = _read_pinned_file(path, label=label)
         value = json.loads(content)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
         _fail(f"screening runtime {label} is invalid", exc)
     return content, value
 
 
-def _manifest_bytes(path: Path, pin: str) -> tuple[bytes, ScreeningReadinessManifest]:
-    content, _ = _canonical_json_file(path, label="committed manifest")
+def _canonical_json_file_at(directory_fd: int, name: str, *, label: str) -> tuple[bytes, Any]:
+    try:
+        content = secure_fs.read_bytes_at(directory_fd, name)
+        return content, json.loads(content)
+    except (secure_fs.SecureFilesystemError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        _fail(f"screening runtime {label} is invalid", exc)
+    raise AssertionError("unreachable")
+
+
+def _read_pinned_file(
+    path: Path,
+    *,
+    label: str,
+    expected_parent_identity: tuple[int, int] | None = None,
+    expected_file_identity: tuple[int, int] | None = None,
+) -> tuple[bytes, tuple[int, int], tuple[int, int]]:
+    """Read a regular file relative to one pinned parent directory."""
+
+    target = _reject_symlink_chain(path)
+    try:
+        parent_fd = secure_fs.open_directory_chain(target.parent)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail(f"screening runtime {label} parent cannot be securely opened", exc)
+    try:
+        parent_identity = secure_fs.directory_identity(parent_fd)
+        if (
+            expected_parent_identity is not None
+            and parent_identity != expected_parent_identity
+        ):
+            _fail(f"screening runtime {label} parent identity changed")
+        with secure_fs.open_regular_file_at(parent_fd, target.name) as file_fd:
+            observed = os.fstat(file_fd)
+            if not stat.S_ISREG(observed.st_mode):
+                _fail(f"screening runtime {label} must be a regular file")
+            file_identity = (observed.st_dev, observed.st_ino)
+            if expected_file_identity is not None and file_identity != expected_file_identity:
+                _fail(f"screening runtime {label} identity changed")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(file_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            return b"".join(chunks), parent_identity, file_identity
+    except secure_fs.SecureFilesystemError as exc:
+        _fail(f"screening runtime {label} is invalid", exc)
+    except OSError as exc:
+        _fail(f"screening runtime {label} is invalid", exc)
+    finally:
+        os.close(parent_fd)
+    raise AssertionError("unreachable")
+
+
+def _manifest_bytes(
+    path: Path, pin: str
+) -> tuple[bytes, ScreeningReadinessManifest, tuple[int, int], tuple[int, int]]:
+    content, parent_identity, file_identity = _read_pinned_file(path, label="committed manifest")
+    try:
+        value = json.loads(content)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        _fail("committed readiness manifest is not canonical", exc)
     if _sha256(content) != pin:
         _fail("committed readiness manifest bytes do not match the supplied pin")
     try:
-        manifest = load_screening_readiness_manifest(path)
+        manifest = ScreeningReadinessManifest.model_validate(value)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         _fail("committed readiness manifest is not canonical", exc)
     if content != canonical_json_bytes(manifest.model_dump(mode="json")) + b"\n":
         _fail("committed readiness manifest bytes are not canonical")
-    return content, manifest
+    return content, manifest, parent_identity, file_identity
 
 
 def _authority_sources(manifest: ScreeningReadinessManifest) -> tuple[AuthoritySourceSnapshot, ...]:
@@ -271,12 +389,14 @@ def _authority_sources(manifest: ScreeningReadinessManifest) -> tuple[AuthorityS
         snapshots = []
         for label, path, expected in rows:
             target = _reject_symlink_chain(Path(path))
-            content = target.read_bytes()
+            content, parent_identity, file_identity = _read_pinned_file(target, label=f"{label} authority")
             digest = _sha256(content)
             if digest != expected:
                 _fail(f"current {label} authority does not match the readiness manifest")
             snapshots.append(
-                AuthoritySourceSnapshot(label, target, content, digest)
+                AuthoritySourceSnapshot(
+                    label, target, content, digest, parent_identity, file_identity
+                )
             )
         return tuple(snapshots)
     except TrainingDataArtifactError:
@@ -365,68 +485,112 @@ def _assert_development_manifest(
             _fail("canonical screening child differs from readiness manifest authority")
 
 
-def _walk_tree_digest(root: Path) -> str:
-    """Hash names, types, and bytes while rejecting every symlink."""
+def _walk_tree_digest_at(
+    root_fd: int,
+    expected_child_identities: tuple[tuple[str, tuple[int, int]], ...] = (),
+) -> str:
+    """Hash one already-pinned runtime tree without resolving its path."""
 
     digest = hashlib.sha256()
+    expected = dict(expected_child_identities)
 
-    def visit(directory: Path, relative: str) -> None:
+    def visit(directory_fd: int, relative: str) -> None:
         try:
-            entries = sorted(directory.iterdir(), key=lambda entry: entry.name)
+            with os.scandir(directory_fd) as iterator:
+                entries = sorted(iterator, key=lambda entry: entry.name)
+                for entry in entries:
+                    name = entry.name
+                    child_relative = f"{relative}/{name}" if relative else name
+                    if entry.is_symlink():
+                        _fail(f"screening runtime tree contains a symlink: {child_relative}")
+                    if entry.is_dir(follow_symlinks=False):
+                        digest.update(b"D\0" + child_relative.encode() + b"\0")
+                        child_fd = secure_fs.open_child_directory(directory_fd, name)
+                        try:
+                            if name in expected and secure_fs.directory_identity(child_fd) != expected[name]:
+                                _fail(f"screening runtime child identity changed: {name}")
+                            visit(child_fd, child_relative)
+                        finally:
+                            os.close(child_fd)
+                    elif entry.is_file(follow_symlinks=False):
+                        digest.update(b"F\0" + child_relative.encode() + b"\0")
+                        digest.update(
+                            _sha256(secure_fs.read_bytes_at(directory_fd, name)).encode() + b"\0"
+                        )
+                    else:
+                        _fail(
+                            f"screening runtime tree contains a non-regular entry: {child_relative}"
+                        )
         except OSError as exc:
             _fail("cannot enumerate the screening runtime tree", exc)
-        for entry in entries:
-            if entry.is_symlink():
-                _fail(f"screening runtime tree contains a symlink: {entry}")
-            child_relative = f"{relative}/{entry.name}" if relative else entry.name
-            if entry.is_dir():
-                digest.update(b"D\0" + child_relative.encode() + b"\0")
-                visit(entry, child_relative)
-            elif entry.is_file():
-                digest.update(b"F\0" + child_relative.encode() + b"\0")
-                try:
-                    content = entry.read_bytes()
-                except OSError as exc:
-                    _fail("cannot read the screening runtime tree", exc)
-                digest.update(_sha256(content).encode() + b"\0")
-            else:
-                _fail(f"screening runtime tree contains a non-regular entry: {entry}")
-
-    visit(root, "")
+    visit(root_fd, "")
     return digest.hexdigest()
 
 
-def _assert_tree_shape(raw_root: Path, manifest: ScreeningReadinessManifest) -> None:
-    _reject_symlink_chain(raw_root)
-    if not raw_root.is_dir():
-        _fail("screening runtime raw root must be a directory")
+def _assert_tree_shape_at(
+    raw_fd: int,
+    manifest: ScreeningReadinessManifest,
+    expected_child_identities: tuple[tuple[str, tuple[int, int]], ...] = (),
+) -> None:
     expected_names = {"phase2-screening-readiness.json", *manifest.child_run_ids}
-    observed_names = {entry.name for entry in raw_root.iterdir()}
-    if observed_names != expected_names:
-        _fail("screening runtime raw root has unexpected direct children")
+    try:
+        with os.scandir(raw_fd) as iterator:
+            entries = tuple(iterator)
+            observed_names = {entry.name for entry in entries}
+            if observed_names != expected_names:
+                _fail("screening runtime raw root has unexpected direct children")
+            for entry in entries:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    if entry.name != "phase2-screening-readiness.json" or entry.is_symlink():
+                        _fail("screening runtime raw root contains an unsafe entry")
+            expected = dict(expected_child_identities)
+            for run_id in manifest.child_run_ids:
+                _safe_basename(run_id, label="child run id")
+                child_fd = secure_fs.open_child_directory(raw_fd, run_id)
+                try:
+                    if run_id in expected and secure_fs.directory_identity(child_fd) != expected[run_id]:
+                        _fail(f"screening runtime child identity changed: {run_id}")
+                    child_names: set[str] = set()
+                    child_dirs: set[str] = set()
+                    with os.scandir(child_fd) as child_entries:
+                        for child_entry in child_entries:
+                            if child_entry.is_symlink():
+                                _fail("screening runtime child contains a symlink")
+                            if child_entry.is_dir(follow_symlinks=False):
+                                child_dirs.add(child_entry.name)
+                            elif child_entry.is_file(follow_symlinks=False):
+                                child_names.add(child_entry.name)
+                            else:
+                                _fail("screening runtime child contains a non-regular entry")
+                    if child_names | child_dirs != _CHILD_TOP_LEVEL_NAMES:
+                        _fail("screening runtime child top-level names are incomplete or extra")
+                    for namespace in ("units", "attempts"):
+                        namespace_fd = secure_fs.open_child_directory(child_fd, namespace)
+                        try:
+                            if secure_fs.strict_regular_entries(namespace_fd):
+                                _fail(f"screening runtime {namespace} namespace is not empty")
+                        finally:
+                            os.close(namespace_fd)
+                    if "aggregate.json" in child_names:
+                        _fail("screening runtime contains forbidden aggregate state")
+                finally:
+                    os.close(child_fd)
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        _fail("screening runtime tree shape is unsafe", exc)
+
+
+def _tree_identities_at(
+    raw_fd: int, manifest: ScreeningReadinessManifest
+) -> tuple[tuple[int, int], tuple[tuple[str, tuple[int, int]], ...]]:
+    root_identity = secure_fs.directory_identity(raw_fd)
+    children: list[tuple[str, tuple[int, int]]] = []
     for run_id in manifest.child_run_ids:
-        _safe_basename(run_id, label="child run id")
-        child = raw_root / run_id
-        _reject_symlink_chain(child)
-        if child.parent != raw_root or not child.is_dir():
-            _fail("screening runtime child is not a safe direct directory")
+        child_fd = secure_fs.open_child_directory(raw_fd, run_id)
         try:
-            _validate_child_top_level(child)
-        except (OSError, RuntimeError, TypeError, ValueError) as exc:
-            _fail("screening runtime child top-level inventory is invalid", exc)
-        if {entry.name for entry in child.iterdir()} != _CHILD_TOP_LEVEL_NAMES:
-            _fail("screening runtime child top-level names are incomplete or extra")
-        # These namespaces must exist but contain no outcome or attempt state.
-        for namespace in ("units", "attempts"):
-            directory = child / namespace
-            if directory.is_symlink() or not directory.is_dir() or tuple(directory.iterdir()):
-                _fail(f"screening runtime {namespace} namespace is not empty")
-        if (child / "aggregate.json").exists():
-            _fail("screening runtime contains forbidden aggregate state")
-    parent_manifest = raw_root / "phase2-screening-readiness.json"
-    _reject_symlink_chain(parent_manifest)
-    if not parent_manifest.is_file():
-        _fail("screening runtime raw root is missing its readiness manifest")
+            children.append((run_id, secure_fs.directory_identity(child_fd)))
+        finally:
+            os.close(child_fd)
+    return root_identity, tuple(children)
 
 
 def _recheck_manifest_and_tree(
@@ -436,21 +600,56 @@ def _recheck_manifest_and_tree(
     manifest: ScreeningReadinessManifest,
     authority_sources: tuple[AuthoritySourceSnapshot, ...],
     tree_sha256: str,
+    raw_root_identity: tuple[int, int],
+    child_identities: tuple[tuple[str, tuple[int, int]], ...],
+    manifest_parent_identity: tuple[int, int],
+    manifest_file_identity: tuple[int, int],
 ) -> None:
-    current_manifest = _manifest_bytes(manifest_path, _sha256(manifest_bytes))[0]
+    current_manifest, _current_parent_identity, _current_file_identity = _read_pinned_file(
+        manifest_path,
+        label="committed manifest",
+        expected_parent_identity=manifest_parent_identity,
+        expected_file_identity=manifest_file_identity,
+    )
     if current_manifest != manifest_bytes:
         _fail("committed readiness manifest changed after runtime load")
     for source in authority_sources:
-        _reject_symlink_chain(source.path)
         try:
-            current = source.path.read_bytes()
-        except OSError as exc:
+            current, _parent_identity, _file_identity = _read_pinned_file(
+                source.path,
+                label=f"{source.label} authority",
+                expected_parent_identity=source.parent_identity,
+                expected_file_identity=source.file_identity,
+            )
+        except TrainingDataArtifactError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
             _fail(f"cannot reread {source.label} authority", exc)
-        if current != source.content or _sha256(current) != source.sha256:
+        if (
+            current != source.content
+            or _sha256(current) != source.sha256
+        ):
             _fail(f"{source.label} authority changed after runtime load")
-    _assert_tree_shape(raw_root, manifest)
-    if _walk_tree_digest(raw_root) != tree_sha256:
-        _fail("screening runtime tree changed after runtime load")
+    try:
+        raw_fd = secure_fs.open_directory_chain(raw_root)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail("screening runtime raw root cannot be securely reopened", exc)
+    try:
+        observed_root_identity, observed_child_identities = _tree_identities_at(raw_fd, manifest)
+        if observed_root_identity != raw_root_identity:
+            _fail("screening runtime raw root identity changed after runtime load")
+        if observed_child_identities != child_identities:
+            _fail("screening runtime child identity changed after runtime load")
+        raw_manifest, raw_value = _canonical_json_file_at(
+            raw_fd, "phase2-screening-readiness.json", label="raw-root manifest"
+        )
+        if raw_manifest != manifest_bytes or raw_value != manifest.model_dump(mode="json"):
+            _fail("raw-root readiness manifest changed after runtime load")
+        _assert_tree_shape_at(raw_fd, manifest, child_identities)
+        if _walk_tree_digest_at(raw_fd, child_identities) != tree_sha256:
+            _fail("screening runtime tree changed after runtime load")
+    finally:
+        os.close(raw_fd)
 
 
 def _assert_global_inventory(
@@ -487,31 +686,68 @@ def _load_fold(
     config: ExperimentConfig,
     child_manifest: ScreeningReadinessChild,
     raw_root: Path,
+    raw_fd: int,
+    expected_child_identity: tuple[int, int],
     repository: Path,
     provenance: SystemProvenance,
 ) -> ScreeningRuntimeFold:
-    child_dir = raw_root / child_manifest.run_id
     try:
-        data_keys = build_screening_data_keys(config, provenance)
-        data = load_screening_data_inventory(config, data_keys, child_dir)
-        model_keys = build_screening_model_keys(config, data_keys, data.manifests)
-        models = load_screening_model_inventory(
-            config,
-            data_keys,
-            data,
-            model_keys,
-            child_dir,
-        )
-        shared = build_screening_shared_plan(config, data_keys, data.manifests, model_keys)
-        expected_child = _child_manifest(
-            config,
-            data_keys,
-            data,
-            model_keys,
-            models,
-            shared,
-            provenance,
-        )
+        with ExitStack() as stack:
+            child_fd = secure_fs.open_child_directory(raw_fd, child_manifest.run_id)
+            stack.callback(os.close, child_fd)
+            if secure_fs.directory_identity(child_fd) != expected_child_identity:
+                _fail("screening runtime child identity changed before fold loading")
+            child_metadata: dict[str, tuple[bytes, Any]] = {
+                name: _canonical_json_file_at(child_fd, name, label=name)
+                for name in (
+                    "config.json",
+                    "expected-units.json",
+                    "expected-shared-artifacts.json",
+                    "provenance.json",
+                )
+            }
+            data_reader = stack.enter_context(open_training_data_reader(child_fd))
+            model_reader = stack.enter_context(open_training_artifact_reader(child_fd))
+            data_intent_fd = secure_fs.open_child_directory(
+                child_fd, "screening-data-intents"
+            )
+            stack.callback(os.close, data_intent_fd)
+            model_intent_fd = secure_fs.open_child_directory(
+                child_fd, "screening-model-intents"
+            )
+            stack.callback(os.close, model_intent_fd)
+            data_keys = build_screening_data_keys(config, provenance)
+            data = load_screening_data_inventory_at(
+                config,
+                data_keys,
+                child_fd,
+                reader=data_reader,
+                intent_fd=data_intent_fd,
+            )
+            model_keys = build_screening_model_keys(config, data_keys, data.manifests)
+            models = load_screening_model_inventory_at(
+                config,
+                data_keys,
+                data,
+                model_keys,
+                child_fd,
+                data_reader=data_reader,
+                data_intent_fd=data_intent_fd,
+                model_reader=model_reader,
+                model_intent_fd=model_intent_fd,
+            )
+            shared = build_screening_shared_plan(
+                config, data_keys, data.manifests, model_keys
+            )
+            expected_child = _child_manifest(
+                config,
+                data_keys,
+                data,
+                model_keys,
+                models,
+                shared,
+                provenance,
+            )
     except TrainingDataArtifactError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
@@ -530,7 +766,7 @@ def _load_fold(
         ("expected-shared-artifacts.json", store.expected_shared.model_dump(mode="json")),
         ("provenance.json", provenance.model_dump(mode="json")),
     ):
-        content, value = _canonical_json_file(child_dir / name, label=name)
+        content, value = child_metadata[name]
         if content != canonical_json_bytes(expected) + b"\n" or value != expected:
             _fail(f"screening runtime child {name} does not match its authority")
     return ScreeningRuntimeFold(
@@ -543,6 +779,7 @@ def _load_fold(
         models=models,
         shared_plan=shared,
     )
+
 
 
 def load_screening_runtime(
@@ -564,13 +801,24 @@ def load_screening_runtime(
     repository_path = _reject_symlink_chain(Path(repository)).resolve(strict=True)
     if not repository_path.is_dir():
         _fail("screening runtime repository must be a directory")
-    manifest_bytes, manifest = _manifest_bytes(committed, manifest_bytes_sha256)
-    _assert_tree_shape(root, manifest)
-    raw_manifest_bytes, _ = _canonical_json_file(
-        root / "phase2-screening-readiness.json", label="raw-root manifest"
+    manifest_bytes, manifest, manifest_parent_identity, manifest_file_identity = _manifest_bytes(
+        committed, manifest_bytes_sha256
     )
-    if raw_manifest_bytes != manifest_bytes:
-        _fail("raw-root readiness manifest differs from the pinned committed manifest")
+    try:
+        root_fd = secure_fs.open_directory_chain(root)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail("screening runtime raw root cannot be securely opened", exc)
+    try:
+        raw_manifest_bytes, raw_value = _canonical_json_file_at(
+            root_fd, "phase2-screening-readiness.json", label="raw-root manifest"
+        )
+        if raw_manifest_bytes != manifest_bytes or raw_value != manifest.model_dump(mode="json"):
+            _fail("raw-root readiness manifest differs from the pinned committed manifest")
+        _assert_tree_shape_at(root_fd, manifest)
+        tree_sha256 = _walk_tree_digest_at(root_fd)
+        raw_root_identity, child_identities = _tree_identities_at(root_fd, manifest)
+    finally:
+        os.close(root_fd)
     authority_sources = _authority_sources(manifest)
     try:
         plan = build_screening_plan()
@@ -595,10 +843,28 @@ def load_screening_runtime(
     # Preserve the first-writer timestamp only after current policy/provenance
     # identity has been independently re-established.
     provenance_value = manifest.provenance
-    folds = tuple(
-        _load_fold(config, child, root, repository_path, provenance_value)
-        for config, child in zip(configs, manifest.children, strict=True)
-    )
+    child_identity_map = dict(child_identities)
+    try:
+        fold_root_fd = secure_fs.open_directory_chain(root)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail("screening runtime raw root cannot be pinned for fold loading", exc)
+    try:
+        if secure_fs.directory_identity(fold_root_fd) != raw_root_identity:
+            _fail("screening runtime raw root changed before fold loading")
+        folds = tuple(
+            _load_fold(
+                config,
+                child,
+                root,
+                fold_root_fd,
+                child_identity_map[child.run_id],
+                repository_path,
+                provenance_value,
+            )
+            for config, child in zip(configs, manifest.children, strict=True)
+        )
+    finally:
+        os.close(fold_root_fd)
     _assert_global_inventory(manifest, folds)
     stores = tuple(fold.store for fold in folds)
     for store in stores:
@@ -606,7 +872,6 @@ def load_screening_runtime(
     # Loading proves the immutable inventory but deliberately leaves execution
     # locked.  The caller must perform a fresh required recheck immediately
     # before execution to open all gates transactionally.
-    tree_sha256 = _walk_tree_digest(root)
     _recheck_manifest_and_tree(
         committed,
         root,
@@ -614,6 +879,10 @@ def load_screening_runtime(
         manifest,
         authority_sources,
         tree_sha256,
+        raw_root_identity,
+        child_identities,
+        manifest_parent_identity,
+        manifest_file_identity,
     )
     return ScreeningRuntime(
         manifest_path=committed,
@@ -626,6 +895,10 @@ def load_screening_runtime(
         provenance=provenance_value,
         folds=folds,
         tree_sha256=tree_sha256,
+        raw_root_identity=raw_root_identity,
+        child_identities=child_identities,
+        manifest_parent_identity=manifest_parent_identity,
+        manifest_file_identity=manifest_file_identity,
     )
 
 

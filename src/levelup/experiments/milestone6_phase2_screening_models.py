@@ -13,6 +13,7 @@ import os
 import tempfile
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -30,11 +31,13 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     ScreeningDataKeys,
     ScreeningDataManifests,
     ScreeningModelKeys,
+    _validate_namespace_fd,
     build_screening_data_keys,
     build_screening_model_keys,
     load_screening_data_inventory,
+    load_screening_data_inventory_at,
 )
-from levelup.experiments.runner import within_parameter_tolerance
+from levelup.experiments.runner import secure_fs, within_parameter_tolerance
 from levelup.experiments.runner.config import (
     ExperimentConfig,
     canonical_json_bytes,
@@ -48,21 +51,28 @@ from levelup.experiments.runner.records import (
     TrainingPreparationAccounting,
 )
 from levelup.experiments.runner.training_artifacts import (
+    PinnedTrainingArtifactReader,
     TrainingArtifactKey,
     TrainingArtifactManifest,
     TrainingReportMetadata,
+    load_training_bundle_from_at,
     load_training_cost,
     load_training_key_index,
     load_training_model,
+    open_training_artifact_reader,
     write_training_artifact,
 )
 from levelup.experiments.runner.training_data_artifacts import (
+    PinnedTrainingDataReader,
     TrainingDataArtifactError,
     TrainingDataArtifactManifest,
     learner_samples,
     load_training_data_artifact,
+    load_training_data_evidence_bundle_from_at,
     load_training_data_evidence_cost,
+    load_training_data_view_bundle_from_at,
     load_training_data_view_cost,
+    open_training_data_reader,
 )
 from levelup.learning.state_conditioned import (
     TrainingReport,
@@ -235,6 +245,34 @@ def _validate_data(
         payloads[identity] = payload
     for replicate, key in data_keys.evidence.items():
         evidence_cost = load_training_data_evidence_cost(run_dir, key)
+        if evidence_cost.cost_id != data.evidence_cost_ids.get(replicate):
+            raise TrainingDataArtifactError("screening evidence cost inventory is incomplete")
+    return payloads
+
+
+def _validate_data_at(
+    reader: PinnedTrainingDataReader,
+    data_keys: ScreeningDataKeys,
+    data: MaterializedScreeningData,
+) -> dict[tuple[str, int], Any]:
+    """Reload the exact data lineage through one retained namespace bundle."""
+
+    manifests = data.manifests
+    if set(manifests.evidence) != set(data_keys.evidence) or set(manifests.views) != set(
+        data_keys.views
+    ):
+        raise TrainingDataArtifactError("screening data manifest inventory is not exact")
+    payloads: dict[tuple[str, int], Any] = {}
+    for identity, key in data_keys.views.items():
+        expected = manifests.views[identity]
+        view_cost, loaded, payload = load_training_data_view_bundle_from_at(reader, key)
+        if view_cost.cost_id != data.view_cost_ids.get(identity):
+            raise TrainingDataArtifactError("screening view cost identity drifted")
+        if loaded != expected:
+            raise TrainingDataArtifactError("screening view manifest reload drifted")
+        payloads[identity] = payload
+    for replicate, key in data_keys.evidence.items():
+        evidence_cost, _, _ = load_training_data_evidence_bundle_from_at(reader, key)
         if evidence_cost.cost_id != data.evidence_cost_ids.get(replicate):
             raise TrainingDataArtifactError("screening evidence cost inventory is incomplete")
     return payloads
@@ -566,6 +604,20 @@ def _load_one_readonly(
         or not (artifact_dir / "tensors").is_dir()
     ):
         raise TrainingDataArtifactError("screening model artifact inventory drifted")
+    return _validated_model_report(config, key, data_manifest, payload, model, manifest, cost)
+
+
+def _validated_model_report(
+    config: ExperimentConfig,
+    key: TrainingArtifactKey,
+    data_manifest: TrainingDataArtifactManifest,
+    payload: Any,
+    model: torch.nn.Module,
+    manifest: TrainingArtifactManifest,
+    cost: TrainingArtifactCostRecord,
+) -> tuple[TrainingArtifactManifest, TrainingArtifactCostRecord, ModelComputeReport]:
+    """Recompute the frozen report from an already-loaded model lineage."""
+
     if manifest.model_id != _expected_model_id(key.condition_id) or manifest.key != key:
         raise TrainingDataArtifactError("screening model manifest identity drifted")
     if cost.artifact_id != manifest.artifact_id or cost.key_id != key.key_id:
@@ -632,6 +684,23 @@ def _load_one_readonly(
         forward_passes=expected_forward_passes,
         training_wall_seconds=accounting.training.wall_seconds,
     )
+
+
+def _load_one_readonly_at(
+    reader: PinnedTrainingArtifactReader,
+    config: ExperimentConfig,
+    key: TrainingArtifactKey,
+    data_manifest: TrainingDataArtifactManifest,
+    payload: Any,
+) -> tuple[TrainingArtifactManifest, TrainingArtifactCostRecord, ModelComputeReport]:
+    """Load one model lineage through retained namespace descriptors."""
+
+    model, manifest, _, cost = load_training_bundle_from_at(
+        reader, key, model_factory=_model_factory
+    )
+    if model.training:
+        raise TrainingDataArtifactError("screening model loader did not return eval mode")
+    return _validated_model_report(config, key, data_manifest, payload, model, manifest, cost)
 
 
 def load_screening_model_inventory(
@@ -705,6 +774,136 @@ def load_screening_model_inventory(
         compute=reports,
         b1_compute={identity: report for identity, report in reports.items() if identity[0] == B1},
     )
+
+
+def load_screening_model_inventory_at(
+    config: ExperimentConfig,
+    data_keys: ScreeningDataKeys,
+    data: MaterializedScreeningData,
+    model_keys: ScreeningModelKeys,
+    run_fd: int,
+    *,
+    data_reader: PinnedTrainingDataReader | None = None,
+    data_intent_fd: int | None = None,
+    model_reader: PinnedTrainingArtifactReader | None = None,
+    model_intent_fd: int | None = None,
+) -> MaterializedScreeningModels:
+    """Validate the frozen 60-model inventory through retained descriptors."""
+
+    supplied = (data_reader, data_intent_fd, model_reader, model_intent_fd)
+    if any(item is None for item in supplied) and any(item is not None for item in supplied):
+        raise TrainingDataArtifactError(
+            "screening model retained readers must be supplied as one complete set"
+        )
+    with ExitStack() as stack:
+        if data_reader is None:
+            data_reader = stack.enter_context(open_training_data_reader(run_fd))
+            model_reader = stack.enter_context(open_training_artifact_reader(run_fd))
+            try:
+                data_intent_fd = secure_fs.open_child_directory(
+                    run_fd, "screening-data-intents"
+                )
+                stack.callback(os.close, data_intent_fd)
+                model_intent_fd = secure_fs.open_child_directory(
+                    run_fd, "screening-model-intents"
+                )
+                stack.callback(os.close, model_intent_fd)
+            except secure_fs.SecureFilesystemError as exc:
+                raise TrainingDataArtifactError(
+                    "screening model intent namespaces are missing or unsafe"
+                ) from exc
+        assert data_reader is not None
+        assert data_intent_fd is not None
+        assert model_reader is not None
+        assert model_intent_fd is not None
+
+        validate_screening_child_config(config)
+        if config.split.final_tasks:
+            raise ValueError("screening model inventory cannot receive final tasks")
+        if data_keys != build_screening_data_keys(config, data_keys.provenance):
+            raise ValueError("screening model inventory received noncanonical data keys")
+        if len(data_keys.evidence) != 5 or len(data_keys.views) != 15:
+            raise ValueError("screening model inventory received incomplete data keys")
+        expected_data = load_screening_data_inventory_at(
+            config,
+            data_keys,
+            run_fd,
+            reader=data_reader,
+            intent_fd=data_intent_fd,
+        )
+        if expected_data != data:
+            raise TrainingDataArtifactError("screening model inventory data has drifted")
+        expected_model_keys = build_screening_model_keys(config, data_keys, data.manifests)
+        if model_keys != expected_model_keys or len(model_keys.models) != 60:
+            raise ValueError("screening model-key inventory is not the frozen 60-model matrix")
+
+        expected_ids = {key.key_id for key in model_keys.models.values()}
+        expected_names = {f"{key_id}.json" for key_id in expected_ids}
+        for descriptor, label in (
+            (model_intent_fd, "screening model intents"),
+            (model_reader.keys_fd, "screening model keys"),
+            (model_reader.costs_fd, "screening model costs"),
+        ):
+            _validate_namespace_fd(
+                descriptor,
+                expected_names,
+                entry_kind="file",
+                label=label,
+            )
+        for identity, key in model_keys.models.items():
+            data_manifest = data.manifests.views[(identity[0], identity[2])]
+            try:
+                intent_bytes = secure_fs.read_bytes_at(
+                    model_intent_fd, f"{key.key_id}.json"
+                )
+            except secure_fs.SecureFilesystemError as exc:
+                raise TrainingDataArtifactError(
+                    "screening model intent cannot be read safely"
+                ) from exc
+            if intent_bytes != canonical_json_bytes(
+                _intent_body(config, key, data_manifest)
+            ) + b"\n":
+                raise TrainingDataArtifactError("screening model intent content drifted")
+
+        payloads = _validate_data_at(data_reader, data_keys, data)
+        loaded: dict[
+            ModelIdentity,
+            tuple[
+                TrainingArtifactManifest,
+                TrainingArtifactCostRecord,
+                ModelComputeReport,
+            ],
+        ] = {}
+        artifact_ids: set[str] = set()
+        for identity, key in model_keys.models.items():
+            data_manifest = data.manifests.views[(identity[0], identity[2])]
+            item = _load_one_readonly_at(
+                model_reader,
+                config,
+                key,
+                data_manifest,
+                payloads[(identity[0], identity[2])],
+            )
+            loaded[identity] = item
+            artifact_ids.add(item[0].artifact_id)
+        _validate_namespace_fd(
+            model_reader.artifacts_fd,
+            artifact_ids,
+            entry_kind="directory",
+            label="screening model artifacts",
+        )
+        reports = {identity: item[2] for identity, item in loaded.items()}
+        _validate_matched_pairs(reports, payloads, model_keys)
+        return MaterializedScreeningModels(
+            manifests={identity: item[0] for identity, item in loaded.items()},
+            costs={identity: item[1] for identity, item in loaded.items()},
+            compute=reports,
+            b1_compute={
+                identity: report
+                for identity, report in reports.items()
+                if identity[0] == B1
+            },
+        )
 
 
 prepare_screening_models = materialize_screening_models

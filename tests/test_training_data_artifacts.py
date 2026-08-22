@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from levelup.experiments.runner.records import PhaseAccounting, TrainingPreparationAccounting
+from levelup.experiments.runner.secure_fs import open_directory_chain
 from levelup.experiments.runner.training_data_artifacts import (
     AffordanceTableRecord,
     ObservableStateRecord,
@@ -20,8 +21,13 @@ from levelup.experiments.runner.training_data_artifacts import (
     evidence_key_for,
     learner_samples,
     load_training_data_artifact,
+    load_training_data_artifact_at,
+    load_training_data_evidence,
+    load_training_data_evidence_at,
     load_training_data_evidence_cost,
+    load_training_data_evidence_cost_at,
     load_training_data_view_cost,
+    load_training_data_view_cost_at,
     sanitize_clean_optimum_samples,
     write_training_data_artifact,
 )
@@ -149,6 +155,43 @@ def test_condition_views_share_content_evidence_without_sharing_view_identity(
     assert affordances.for_alias("wait") == (1.0,) * 49
 
 
+def test_fd_root_loaders_match_path_loader_validation(tmp_path: Path) -> None:
+    key = _key()
+    written = _write(tmp_path, key, _canonical_data())
+    evidence_key = evidence_key_for(key)
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        assert load_training_data_artifact_at(
+            run_fd, written.artifact_id
+        ) == load_training_data_artifact(tmp_path, written.artifact_id)
+        assert load_training_data_artifact_at(
+            run_fd, expected_key=key
+        ) == load_training_data_artifact(tmp_path, expected_key=key)
+        assert load_training_data_evidence_at(
+            run_fd,
+            written.evidence_id,
+            expected_key=evidence_key,
+        ) == load_training_data_evidence(
+            tmp_path,
+            written.evidence_id,
+            expected_key=evidence_key,
+        )
+        assert load_training_data_evidence_cost_at(
+            run_fd, evidence_key
+        ) == load_training_data_evidence_cost(tmp_path, evidence_key)
+        assert load_training_data_evidence_cost_at(
+            run_fd, evidence_key.key_id
+        ) == load_training_data_evidence_cost(tmp_path, evidence_key.key_id)
+        assert load_training_data_view_cost_at(
+            run_fd, key
+        ) == load_training_data_view_cost(tmp_path, key)
+        assert load_training_data_view_cost_at(
+            run_fd, key.key_id
+        ) == load_training_data_view_cost(tmp_path, key.key_id)
+    finally:
+        os.close(run_fd)
+
+
 def test_evidence_identity_binds_generation_metadata_not_only_payload(tmp_path: Path) -> None:
     first_key = _key("B1")
     changed_key = first_key.model_copy(update={"probe_policy_sha256": _hash("changed-probe")})
@@ -219,6 +262,79 @@ def test_symlinked_manifest_leaf_is_rejected(tmp_path: Path) -> None:
     os.symlink(moved, path)
     with pytest.raises(TrainingDataArtifactError, match="symlink|unexpected files"):
         load_training_data_artifact(tmp_path, manifest.artifact_id)
+
+
+@pytest.mark.parametrize("mutation", ["symlink", "directory", "extra"])
+def test_fd_root_evidence_loader_rejects_unsafe_or_extra_entries(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    key = _key()
+    manifest = _write(tmp_path, key, _canonical_data())
+    evidence_dir = tmp_path / "training-data-evidence" / manifest.evidence_id
+    manifest_path = evidence_dir / "manifest.json"
+    if mutation == "symlink":
+        external = tmp_path / "external-evidence-manifest.json"
+        manifest_path.rename(external)
+        manifest_path.symlink_to(external)
+    elif mutation == "directory":
+        manifest_path.unlink()
+        manifest_path.mkdir()
+    else:
+        (evidence_dir / "unexpected.json").write_text("{}", encoding="utf-8")
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        with pytest.raises(TrainingDataArtifactError):
+            load_training_data_evidence_at(
+                run_fd,
+                manifest.evidence_id,
+                expected_key=evidence_key_for(key),
+            )
+    finally:
+        os.close(run_fd)
+
+
+def test_fd_root_view_loader_rejects_extra_manifest_entry(tmp_path: Path) -> None:
+    manifest = _write(tmp_path, _key(), _canonical_data())
+    view_dir = tmp_path / "training-data-artifacts" / manifest.artifact_id
+    (view_dir / "unexpected.json").write_text("{}", encoding="utf-8")
+    run_fd = open_directory_chain(tmp_path)
+    try:
+        with pytest.raises(TrainingDataArtifactError, match="unexpected files"):
+            load_training_data_artifact_at(run_fd, manifest.artifact_id)
+    finally:
+        os.close(run_fd)
+
+
+def test_fd_root_loaders_remain_anchored_after_run_path_substitution(
+    tmp_path: Path,
+) -> None:
+    run_root = tmp_path / "run"
+    key = _key()
+    manifest = _write(run_root, key, _canonical_data())
+    run_fd = open_directory_chain(run_root)
+    detached = tmp_path / "run-detached"
+    run_root.rename(detached)
+    external = tmp_path / "external"
+    external.mkdir()
+    sentinel = external / "sentinel"
+    sentinel.write_text("unchanged", encoding="utf-8")
+    run_root.symlink_to(external, target_is_directory=True)
+    try:
+        loaded_manifest, payload = load_training_data_artifact_at(
+            run_fd,
+            expected_key=key,
+        )
+        assert loaded_manifest == manifest
+        assert payload.samples[0].task_id == "task-a"
+        assert (
+            load_training_data_evidence_cost_at(run_fd, evidence_key_for(key)).artifact_id
+            == manifest.evidence_id
+        )
+        assert load_training_data_view_cost_at(run_fd, key).artifact_id == manifest.artifact_id
+    finally:
+        os.close(run_fd)
+    assert sentinel.read_text(encoding="utf-8") == "unchanged"
 
 
 def test_payload_must_exactly_match_ordered_training_fold(tmp_path: Path) -> None:

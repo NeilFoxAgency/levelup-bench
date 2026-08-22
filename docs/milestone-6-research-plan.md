@@ -191,6 +191,16 @@ bytes, rebuilds the frozen leave-one-family-out plan, reopens the exact 30 evide
 representation views, 360 capacity-checked models, and 480 shared-artifact declarations, and
 rejects final-family, outcome, aggregate, partial, extra, or symlinked state.
 
+The committed implementation keeps the raw root, fold child, data namespaces, model namespaces,
+artifact directories, and tensor directories pinned by POSIX descriptors for the complete dependent
+read. Descendants are opened relative to those descriptors with no symlink following; later path
+replacement cannot redirect an inventory or tensor read. The non-mocked
+`test_real_fold_model_load_stays_on_detached_pinned_tree` regression materializes one exact fold
+containing five evidence artifacts, fifteen same-data views, and sixty trained models. It replaces
+the textual child path after the fd-native data inventory is loaded, then reloads all sixty
+model/tensor artifacts from the retained descriptors rather than the replacement tree. This is a
+storage-boundary test only and records no comparative screening outcome.
+
 Loading alone leaves all six child stores non-executable. Immediately before execution, the
 runtime must recapture current repository and device provenance, recheck the authority bytes and
 complete prepared tree, and only then activate all six stores transactionally. A failed recheck

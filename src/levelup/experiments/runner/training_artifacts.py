@@ -14,14 +14,17 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Iterator, Literal
 
 import numpy as np
 import torch
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from torch import nn
 
+import levelup.experiments.runner.secure_fs as secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import (
     ResourceAccounting,
@@ -31,6 +34,39 @@ from levelup.experiments.runner.records import (
 from levelup.experiments.runner.storage import ArtifactValidationError
 
 HASH_FIELD = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@dataclass(frozen=True, slots=True)
+class PinnedTrainingArtifactReader:
+    """Descriptors retained across one model cost/index/tensor transaction."""
+
+    keys_fd: int
+    costs_fd: int
+    artifacts_fd: int
+
+
+@contextmanager
+def open_training_artifact_reader(
+    run_fd: int,
+) -> Iterator[PinnedTrainingArtifactReader]:
+    """Pin all model-artifact namespaces below an already-pinned run fd."""
+
+    with ExitStack() as stack:
+        try:
+            descriptors: dict[str, int] = {}
+            for field, name in (
+                ("keys_fd", "training-artifact-keys"),
+                ("costs_fd", "training-artifact-costs"),
+                ("artifacts_fd", "training-artifacts"),
+            ):
+                descriptor = secure_fs.open_child_directory(run_fd, name)
+                stack.callback(os.close, descriptor)
+                descriptors[field] = descriptor
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ArtifactValidationError(
+                "training artifact namespaces contain a symlink or cannot be securely pinned"
+            ) from exc
+        yield PinnedTrainingArtifactReader(**descriptors)
 MODEL_IDS = frozenset(
     {
         "global_affordance_mlp_frequency_v1",
@@ -457,6 +493,304 @@ def load_training_manifest(output_root: str | Path, artifact_id: str) -> Trainin
         raise ArtifactValidationError("training artifact ID mismatch")
     _validate_artifact_files(artifact_dir, manifest)
     return manifest
+
+
+def _fd_child(stack: ExitStack, parent_fd: int, *components: str) -> int:
+    try:
+        child_fd = secure_fs.open_child_chain(parent_fd, *components)
+    except secure_fs.SecureFilesystemError as exc:
+        raise ArtifactValidationError("cannot securely open training artifact") from exc
+    stack.callback(os.close, child_fd)
+    return child_fd
+
+
+def _fd_json(directory_fd: int, name: str) -> dict[str, Any]:
+    try:
+        value = secure_fs.load_json_at(directory_fd, name)
+    except secure_fs.SecureFilesystemError as exc:
+        raise ArtifactValidationError(f"invalid training artifact manifest: {name}") from exc
+    if not isinstance(value, dict):
+        raise ArtifactValidationError("training artifact manifest must be an object")
+    return value
+
+
+def _fd_model(model_type: type[BaseModel], raw: Any, label: str) -> BaseModel:
+    try:
+        return model_type.model_validate(raw)
+    except (TypeError, ValueError) as exc:
+        raise ArtifactValidationError(f"invalid {label} schema") from exc
+
+
+def _validate_tensor_file_at(
+    tensors_fd: int, filename: str, metadata: TensorMetadata
+) -> torch.Tensor:
+    try:
+        payload = secure_fs.read_bytes_at(tensors_fd, filename)
+    except secure_fs.SecureFilesystemError as exc:
+        raise ArtifactValidationError(f"cannot read tensor file: {filename}") from exc
+    if (
+        len(payload) != metadata.byte_length
+        or hashlib.sha256(payload).hexdigest() != metadata.sha256
+    ):
+        raise ArtifactValidationError(f"tensor integrity mismatch: {metadata.name}")
+    expected_bytes = 4
+    for dimension in metadata.shape:
+        expected_bytes *= dimension
+    if len(payload) != expected_bytes:
+        raise ArtifactValidationError(f"tensor byte length does not match shape: {metadata.name}")
+    values = np.frombuffer(payload, dtype="<f4").reshape(metadata.shape).copy()
+    tensor = torch.from_numpy(values)
+    if not bool(torch.isfinite(tensor).all()):
+        raise ArtifactValidationError(f"tensor contains non-finite values: {metadata.name}")
+    return tensor
+
+
+def _load_artifact_state_at(
+    artifact_fd: int, manifest: TrainingArtifactManifest
+) -> dict[str, torch.Tensor]:
+    with ExitStack() as stack:
+        try:
+            with os.scandir(artifact_fd) as iterator:
+                entries = {
+                    entry.name: (
+                        entry.is_symlink(),
+                        entry.is_file(follow_symlinks=False),
+                        entry.is_dir(follow_symlinks=False),
+                    )
+                    for entry in iterator
+                }
+        except OSError as exc:
+            raise ArtifactValidationError("training artifact inventory is unreadable") from exc
+        if entries != {
+            "manifest.json": (False, True, False),
+            "tensors": (False, False, True),
+        }:
+            raise ArtifactValidationError("training artifact has unexpected files")
+        tensors_fd = _fd_child(stack, artifact_fd, "tensors")
+        try:
+            observed = set(secure_fs.regular_entries_at(tensors_fd))
+        except secure_fs.SecureFilesystemError as exc:
+            raise ArtifactValidationError("training artifact has invalid tensor inventory") from exc
+        expected = {item.filename for item in manifest.tensors}
+        if observed != expected:
+            raise ArtifactValidationError("training artifact has unexpected tensor files")
+        return {
+            item.name: _validate_tensor_file_at(tensors_fd, item.filename, item)
+            for item in manifest.tensors
+        }
+
+
+def _load_manifest_state_from_at(
+    reader: PinnedTrainingArtifactReader, artifact_id: str
+) -> tuple[TrainingArtifactManifest, dict[str, torch.Tensor]]:
+    if not HEX64.fullmatch(artifact_id):
+        raise ArtifactValidationError("invalid training artifact ID")
+    with ExitStack() as stack:
+        artifact_fd = _fd_child(stack, reader.artifacts_fd, artifact_id)
+        manifest = _fd_model(
+            TrainingArtifactManifest,
+            _fd_json(artifact_fd, "manifest.json"),
+            "training artifact manifest",
+        )
+        assert isinstance(manifest, TrainingArtifactManifest)
+        if manifest.artifact_id != artifact_id or manifest.expected_artifact_id != artifact_id:
+            raise ArtifactValidationError("training artifact ID mismatch")
+        state = _load_artifact_state_at(artifact_fd, manifest)
+    return manifest, state
+
+
+def load_training_manifest_from_at(
+    reader: PinnedTrainingArtifactReader, artifact_id: str
+) -> TrainingArtifactManifest:
+    """Load a manifest and validate its tensors through retained namespaces."""
+
+    manifest, _ = _load_manifest_state_from_at(reader, artifact_id)
+    return manifest
+
+
+def load_training_manifest_at(
+    run_fd: int, artifact_id: str
+) -> TrainingArtifactManifest:
+    """Load a training manifest and tensors from an already-pinned run fd."""
+
+    with open_training_artifact_reader(run_fd) as reader:
+        return load_training_manifest_from_at(reader, artifact_id)
+
+
+def _load_training_key_index_record_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+) -> TrainingArtifactKeyIndex:
+    index = _fd_model(
+        TrainingArtifactKeyIndex,
+        _fd_json(reader.keys_fd, f"{expected_key.key_id}.json"),
+        "training artifact key index",
+    )
+    assert isinstance(index, TrainingArtifactKeyIndex)
+    if index.key != expected_key or index.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact key index does not match expected key")
+    return index
+
+
+def load_training_key_index_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+) -> TrainingArtifactKeyIndex:
+    """Resolve a key through retained key/artifact namespace descriptors."""
+
+    index = _load_training_key_index_record_from_at(reader, expected_key)
+    manifest = load_training_manifest_from_at(reader, index.artifact_id)
+    if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
+        raise ArtifactValidationError("training artifact key index manifest digest mismatch")
+    return index
+
+
+def load_training_key_index_at(
+    run_fd: int, expected_key: TrainingArtifactKey
+) -> TrainingArtifactKeyIndex:
+    """Resolve a training key using only descendants of an already-pinned fd."""
+
+    with open_training_artifact_reader(run_fd) as reader:
+        return load_training_key_index_from_at(reader, expected_key)
+
+
+def _load_training_cost_record_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+) -> TrainingArtifactCostRecord:
+    record = _fd_model(
+        TrainingArtifactCostRecord,
+        _fd_json(reader.costs_fd, f"{expected_key.key_id}.json"),
+        "training artifact cost record",
+    )
+    assert isinstance(record, TrainingArtifactCostRecord)
+    if record.key != expected_key.model_dump(mode="json") or record.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact cost key mismatch")
+    if not HEX64.fullmatch(record.artifact_id):
+        raise ArtifactValidationError("invalid cost artifact ID")
+    return record
+
+
+def load_training_bundle_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+    *,
+    model_factory: Callable[[str], nn.Module],
+) -> tuple[
+    nn.Module,
+    TrainingArtifactManifest,
+    TrainingArtifactKeyIndex,
+    TrainingArtifactCostRecord,
+]:
+    """Load cost, index, manifest, and tensors under one pinned fd bundle."""
+
+    index = _load_training_key_index_record_from_at(reader, expected_key)
+    cost = _load_training_cost_record_from_at(reader, expected_key)
+    if cost.artifact_id != index.artifact_id:
+        raise ArtifactValidationError("training artifact cost points to the wrong artifact")
+    manifest, state = _load_manifest_state_from_at(reader, index.artifact_id)
+    if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
+        raise ArtifactValidationError("training artifact key index manifest digest mismatch")
+    if manifest.key != expected_key or manifest.key.key_id != expected_key.key_id:
+        raise ArtifactValidationError("training artifact key does not match expected key")
+    if manifest.model_id not in MODEL_IDS:
+        raise ArtifactValidationError("model ID is not allowlisted")
+    try:
+        model = model_factory(manifest.model_id)
+    except Exception as exc:
+        raise ArtifactValidationError("model factory rejected artifact model ID") from exc
+    try:
+        model.load_state_dict(state, strict=True)
+    except (RuntimeError, TypeError, ValueError) as exc:
+        raise ArtifactValidationError("model state dict does not match artifact") from exc
+    model.eval()
+    return model, manifest, index, cost
+
+
+def load_training_lineage_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+) -> tuple[
+    TrainingArtifactManifest,
+    TrainingArtifactKeyIndex,
+    TrainingArtifactCostRecord,
+]:
+    """Validate one cost/index/manifest/tensor lineage without constructing a model."""
+
+    index = _load_training_key_index_record_from_at(reader, expected_key)
+    cost = _load_training_cost_record_from_at(reader, expected_key)
+    if cost.artifact_id != index.artifact_id:
+        raise ArtifactValidationError("training artifact cost points to the wrong artifact")
+    manifest = load_training_manifest_from_at(reader, index.artifact_id)
+    if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
+        raise ArtifactValidationError("training artifact key index manifest digest mismatch")
+    if manifest.key != expected_key:
+        raise ArtifactValidationError("training artifact key does not match expected key")
+    return manifest, index, cost
+
+
+def load_training_cost_from_at(
+    reader: PinnedTrainingArtifactReader,
+    expected_key: TrainingArtifactKey,
+) -> TrainingArtifactCostRecord:
+    """Load one complete training lineage through retained namespace fds."""
+
+    _, _, cost = load_training_lineage_from_at(reader, expected_key)
+    return cost
+
+
+def load_training_cost_by_id_from_at(
+    reader: PinnedTrainingArtifactReader,
+    key_id: str,
+) -> TrainingArtifactCostRecord:
+    """Resolve a typed training key from a retained cost namespace."""
+
+    if not HEX64.fullmatch(key_id):
+        raise ArtifactValidationError("invalid training artifact cost key")
+    raw = _fd_model(
+        TrainingArtifactCostRecord,
+        _fd_json(reader.costs_fd, f"{key_id}.json"),
+        "training artifact cost record",
+    )
+    assert isinstance(raw, TrainingArtifactCostRecord)
+    try:
+        expected_key = TrainingArtifactKey.model_validate(raw.key)
+    except (TypeError, ValueError) as exc:
+        raise ArtifactValidationError("invalid training artifact cost key schema") from exc
+    if expected_key.key_id != key_id:
+        raise ArtifactValidationError("training artifact cost key identity mismatch")
+    return load_training_cost_from_at(reader, expected_key)
+
+
+def load_training_model_at(
+    run_fd: int,
+    expected_key: TrainingArtifactKey,
+    *,
+    model_factory: Callable[[str], nn.Module],
+) -> tuple[nn.Module, TrainingArtifactManifest]:
+    """Load a fresh model through one pinned run descriptor."""
+
+    with open_training_artifact_reader(run_fd) as reader:
+        model, manifest, _, _ = load_training_bundle_from_at(
+            reader, expected_key, model_factory=model_factory
+        )
+        return model, manifest
+
+
+def load_training_cost_at(
+    run_fd: int, expected_key: TrainingArtifactKey
+) -> TrainingArtifactCostRecord:
+    """Load a training cost and all artifacts it claims from a pinned run fd."""
+
+    with open_training_artifact_reader(run_fd) as reader:
+        index = _load_training_key_index_record_from_at(reader, expected_key)
+        record = _load_training_cost_record_from_at(reader, expected_key)
+        if record.artifact_id != index.artifact_id:
+            raise ArtifactValidationError("training artifact cost points to the wrong artifact")
+        manifest = load_training_manifest_from_at(reader, record.artifact_id)
+        if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
+            raise ArtifactValidationError("training artifact key index manifest digest mismatch")
+        return record
 
 
 def _validate_artifact_files(artifact_dir: Path, manifest: TrainingArtifactManifest) -> None:

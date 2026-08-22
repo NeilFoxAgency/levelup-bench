@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 
 import levelup.experiments.milestone6_phase2_screening_models as models
+import levelup.experiments.milestone6_phase2_screening_runtime as runtime
 from levelup.experiments.milestone6_phase2_screening import (
     B1,
     B2,
@@ -19,15 +21,27 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     ScreeningDataManifests,
     build_screening_data_keys,
     build_screening_model_keys,
+    build_screening_shared_plan,
     materialize_screening_data,
 )
-from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.milestone6_phase2_screening_readiness import _child_manifest
+from levelup.experiments.runner import secure_fs
+from levelup.experiments.runner.config import (
+    canonical_json_bytes,
+    run_id_for,
+    scientific_config_value,
+)
 from levelup.experiments.runner.records import (
     PhaseAccounting,
     ResourceAccounting,
     SystemProvenance,
 )
+from levelup.experiments.runner.secure_fs import (
+    open_child_directory,
+    open_directory_chain,
+)
 from levelup.experiments.runner.selection_metric import within_parameter_tolerance
+from levelup.experiments.runner.storage import RunStore
 from levelup.experiments.runner.training_data_artifacts import (
     TrainingDataArtifactError,
     TrainingDataArtifactManifest,
@@ -439,3 +453,84 @@ def test_real_b1_b2_c_tuple_uses_same_data_and_objective_matched_budget(
         reports[B2].trainable_parameters, reports[C].trainable_parameters, tolerance=0.1
     )
     assert reports[B1].training_examples != 0
+
+
+def test_real_fold_model_load_stays_on_detached_pinned_tree(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = build_screening_child_config("plain")
+    raw_root = tmp_path / "raw"
+    run_dir = raw_root / run_id_for(config)
+    data_keys = build_screening_data_keys(config, PROVENANCE)
+    data = materialize_screening_data(config, data_keys, run_dir)
+    model_keys = build_screening_model_keys(config, data_keys, data.manifests)
+    expected = models.materialize_screening_models(
+        config, data_keys, data, model_keys, run_dir
+    )
+    shared = build_screening_shared_plan(config, data_keys, data.manifests, model_keys)
+    store = RunStore(
+        raw_root,
+        config,
+        repository=tmp_path,
+        shared_artifacts=tuple(shared.artifacts),
+    )
+    (run_dir / "units").mkdir()
+    (run_dir / "attempts").mkdir()
+    for name, value in (
+        ("config.json", scientific_config_value(config)),
+        ("expected-units.json", store.expected.model_dump(mode="json")),
+        (
+            "expected-shared-artifacts.json",
+            store.expected_shared.model_dump(mode="json"),
+        ),
+        ("provenance.json", PROVENANCE.model_dump(mode="json")),
+    ):
+        (run_dir / name).write_bytes(canonical_json_bytes(value) + b"\n")
+    child_manifest = _child_manifest(
+        config,
+        data_keys,
+        data,
+        model_keys,
+        expected,
+        shared,
+        PROVENANCE,
+    )
+    real_data_loader = runtime.load_screening_data_inventory_at
+    sentinel: Path | None = None
+
+    def detach_after_real_data_load(*args, **kwargs):
+        nonlocal sentinel
+        loaded = real_data_loader(*args, **kwargs)
+        detached = tmp_path / "detached-child"
+        os.rename(run_dir, detached)
+        run_dir.mkdir()
+        sentinel = run_dir / "external-sentinel"
+        sentinel.write_text("must never be read", encoding="utf-8")
+        return loaded
+
+    monkeypatch.setattr(
+        runtime, "load_screening_data_inventory_at", detach_after_real_data_load
+    )
+    raw_fd = open_directory_chain(raw_root)
+    try:
+        child_fd = open_child_directory(raw_fd, child_manifest.run_id)
+        try:
+            child_identity = secure_fs.directory_identity(child_fd)
+        finally:
+            os.close(child_fd)
+        loaded = runtime._load_fold(
+            config,
+            child_manifest,
+            raw_root,
+            raw_fd,
+            child_identity,
+            tmp_path,
+            PROVENANCE,
+        )
+    finally:
+        os.close(raw_fd)
+
+    assert loaded.models == expected
+    assert sentinel is not None
+    assert sentinel.read_text(encoding="utf-8") == "must never be read"

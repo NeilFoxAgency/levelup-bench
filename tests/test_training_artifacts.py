@@ -4,11 +4,13 @@ import hashlib
 import json
 import os
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
 import torch
 
+import levelup.experiments.runner.secure_fs as secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import PhaseAccounting, ResourceAccounting
 from levelup.experiments.runner.training_artifacts import (
@@ -16,9 +18,13 @@ from levelup.experiments.runner.training_artifacts import (
     TrainingArtifactKey,
     TrainingReportMetadata,
     load_training_cost,
+    load_training_cost_at,
     load_training_key_index,
+    load_training_key_index_at,
     load_training_manifest,
+    load_training_manifest_at,
     load_training_model,
+    load_training_model_at,
     write_training_artifact,
 )
 from levelup.learning.state_conditioned import (
@@ -446,3 +452,228 @@ def test_manifest_rejects_wrong_model_id_or_shape(
     manifest_path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(RuntimeError):
         load_training_manifest(tmp_path, manifest.artifact_id)
+
+
+def test_descriptor_loaders_match_path_loaders(tmp_path: Path) -> None:
+    key = _key()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=key,
+        model_id=key.backbone_id,
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    run_fd = secure_fs.open_directory_chain(tmp_path)
+    try:
+        assert load_training_manifest_at(run_fd, manifest.artifact_id) == load_training_manifest(
+            tmp_path, manifest.artifact_id
+        )
+        assert load_training_key_index_at(run_fd, key) == load_training_key_index(tmp_path, key)
+        assert load_training_cost_at(run_fd, key) == load_training_cost(tmp_path, key)
+        fd_model, fd_manifest = load_training_model_at(
+            run_fd,
+            key,
+            model_factory=lambda _: StateConditionedScorer(),
+        )
+        path_model, path_manifest = load_training_model(
+            tmp_path,
+            manifest.artifact_id,
+            expected_key=key,
+            model_factory=lambda _: StateConditionedScorer(),
+        )
+        assert fd_manifest == path_manifest
+        assert all(
+            torch.equal(fd_model.state_dict()[name], value)
+            for name, value in path_model.state_dict().items()
+        )
+    finally:
+        os.close(run_fd)
+
+
+@pytest.mark.parametrize("entry_kind", ["artifact", "tensor", "index", "cost"])
+def test_descriptor_loaders_reject_symlinked_entries(tmp_path: Path, entry_kind: str) -> None:
+    key = _key()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=key,
+        model_id=key.backbone_id,
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    artifact = tmp_path / "training-artifacts" / manifest.artifact_id
+    if entry_kind == "artifact":
+        moved = tmp_path / "moved-artifact"
+        artifact.rename(moved)
+        artifact.symlink_to(moved, target_is_directory=True)
+
+        def loader(fd: int) -> object:
+            return load_training_manifest_at(fd, manifest.artifact_id)
+
+    elif entry_kind == "tensor":
+        tensors = artifact / "tensors"
+        moved = tmp_path / "moved-tensors"
+        tensors.rename(moved)
+        tensors.symlink_to(moved, target_is_directory=True)
+
+        def loader(fd: int) -> object:
+            return load_training_manifest_at(fd, manifest.artifact_id)
+
+    elif entry_kind == "index":
+        path = tmp_path / "training-artifact-keys" / f"{key.key_id}.json"
+        moved = tmp_path / "moved-index.json"
+        path.rename(moved)
+        path.symlink_to(moved)
+
+        def loader(fd: int) -> object:
+            return load_training_key_index_at(fd, key)
+
+    else:
+        path = tmp_path / "training-artifact-costs" / f"{key.key_id}.json"
+        moved = tmp_path / "moved-cost.json"
+        path.rename(moved)
+        path.symlink_to(moved)
+
+        def loader(fd: int) -> object:
+            return load_training_cost_at(fd, key)
+    run_fd = secure_fs.open_directory_chain(tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            loader(run_fd)
+    finally:
+        os.close(run_fd)
+
+
+def test_descriptor_loader_rejects_nonregular_or_extra_tensor_entry(tmp_path: Path) -> None:
+    key = _key()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=key,
+        model_id=key.backbone_id,
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    tensors = tmp_path / "training-artifacts" / manifest.artifact_id / "tensors"
+    first = tensors / manifest.tensors[0].filename
+    first.unlink()
+    first.mkdir()
+    run_fd = secure_fs.open_directory_chain(tmp_path)
+    try:
+        with pytest.raises(RuntimeError):
+            load_training_manifest_at(run_fd, manifest.artifact_id)
+    finally:
+        os.close(run_fd)
+
+    shutil.rmtree(first)
+    first.write_bytes(b"invalid")
+    (tensors / "extra.bin").write_bytes(b"unexpected")
+    run_fd = secure_fs.open_directory_chain(tmp_path)
+    try:
+        with pytest.raises(RuntimeError, match="unexpected tensor"):
+            load_training_manifest_at(run_fd, manifest.artifact_id)
+    finally:
+        os.close(run_fd)
+
+
+def test_manifest_and_tensors_share_one_pinned_artifact_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    key = _key()
+    manifest = write_training_artifact(
+        tmp_path,
+        key=key,
+        model_id=key.backbone_id,
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    artifact = tmp_path / "training-artifacts" / manifest.artifact_id
+    detached = tmp_path / "detached-artifact"
+    replacement = tmp_path / "replacement-artifact"
+    replacement.mkdir()
+    (replacement / "manifest.json").write_text("not-json", encoding="utf-8")
+    original_read = secure_fs.read_bytes_at
+    substituted = False
+
+    def read_bytes(directory_fd: int, name: str) -> bytes:
+        nonlocal substituted
+        payload = original_read(directory_fd, name)
+        if name == "manifest.json" and not substituted:
+            substituted = True
+            artifact.rename(detached)
+            artifact.symlink_to(replacement, target_is_directory=True)
+        return payload
+
+    monkeypatch.setattr(secure_fs, "read_bytes_at", read_bytes)
+    run_fd = secure_fs.open_directory_chain(tmp_path)
+    try:
+        assert load_training_manifest_at(run_fd, manifest.artifact_id) == manifest
+    finally:
+        os.close(run_fd)
+    assert substituted
+    assert (replacement / "manifest.json").read_text(encoding="utf-8") == "not-json"
+
+
+@pytest.mark.parametrize("substitute_ancestor", [False, True])
+def test_descriptor_loader_is_anchored_across_rename_and_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitute_ancestor: bool,
+) -> None:
+    parent = tmp_path / "parent"
+    root = parent / "run"
+    root.mkdir(parents=True)
+    key = _key()
+    manifest = write_training_artifact(
+        root,
+        key=key,
+        model_id=key.backbone_id,
+        model=StateConditionedScorer(),
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    external = tmp_path / "external"
+    external_artifact = external / "run" / "training-artifacts" / manifest.artifact_id
+    external_artifact.mkdir(parents=True)
+    (external_artifact / "manifest.json").write_text("not-json", encoding="utf-8")
+
+    barrier = threading.Barrier(2)
+    original_read = secure_fs.read_bytes_at
+    gated = False
+
+    def read_bytes(directory_fd: int, name: str) -> bytes:
+        nonlocal gated
+        if name == "manifest.json" and not gated:
+            gated = True
+            barrier.wait(timeout=5)
+            barrier.wait(timeout=5)
+        return original_read(directory_fd, name)
+
+    monkeypatch.setattr(secure_fs, "read_bytes_at", read_bytes)
+    run_fd = secure_fs.open_directory_chain(root)
+
+    def substitute() -> None:
+        barrier.wait(timeout=5)
+        if substitute_ancestor:
+            detached = tmp_path / "parent-detached"
+            parent.rename(detached)
+            parent.symlink_to(external, target_is_directory=True)
+        else:
+            detached = tmp_path / "run-detached"
+            root.rename(detached)
+            root.symlink_to(external / "run", target_is_directory=True)
+        barrier.wait(timeout=5)
+
+    replacer = threading.Thread(target=substitute)
+    replacer.start()
+    try:
+        loaded = load_training_manifest_at(run_fd, manifest.artifact_id)
+    finally:
+        os.close(run_fd)
+    replacer.join(timeout=10)
+    assert not replacer.is_alive()
+    assert loaded == manifest
+    assert (external_artifact / "manifest.json").read_text(encoding="utf-8") == "not-json"

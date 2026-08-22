@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -38,6 +41,22 @@ PROVENANCE = SystemProvenance(
     captured_at_utc=datetime(2026, 8, 21, tzinfo=UTC),
 )
 _REAL_RECHECK = runtime._recheck_manifest_and_tree
+
+
+def _tree_snapshot(raw_root: Path, manifest):
+    fd = runtime.secure_fs.open_directory_chain(raw_root)
+    try:
+        return runtime._tree_identities_at(fd, manifest)
+    finally:
+        os.close(fd)
+
+
+def _tree_digest(raw_root: Path) -> str:
+    fd = runtime.secure_fs.open_directory_chain(raw_root)
+    try:
+        return runtime._walk_tree_digest_at(fd)
+    finally:
+        os.close(fd)
 
 
 class _Manifest:
@@ -78,8 +97,16 @@ def _fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     committed.write_bytes(body)
     source = tmp_path / "protocol.json"
     source.write_bytes(b"authority")
+    source_bytes, source_parent_identity, source_file_identity = runtime._read_pinned_file(
+        source, label="test authority"
+    )
     source_snapshot = runtime.AuthoritySourceSnapshot(
-        "protocol", source, source.read_bytes(), hashlib.sha256(source.read_bytes()).hexdigest()
+        "protocol",
+        source,
+        source_bytes,
+        hashlib.sha256(source_bytes).hexdigest(),
+        source_parent_identity,
+        source_file_identity,
     )
     config = SimpleNamespace(
         device_policy=SimpleNamespace(requested_device="cpu"),
@@ -87,13 +114,21 @@ def _fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
         split=SimpleNamespace(final_tasks=()),
         conditions=(),
     )
-    monkeypatch.setattr(runtime, "load_screening_readiness_manifest", lambda _path: manifest)
+    committed_bytes, committed_parent_identity, committed_file_identity = runtime._read_pinned_file(
+        committed, label="test manifest"
+    )
+    def manifest_bytes(_path, pin):
+        if pin != hashlib.sha256(body).hexdigest():
+            raise TrainingDataArtifactError("supplied pin does not match committed manifest")
+        return body, manifest, committed_parent_identity, committed_file_identity
+
+    monkeypatch.setattr(runtime, "_manifest_bytes", manifest_bytes)
     monkeypatch.setattr(runtime, "_authority_sources", lambda _manifest: (source_snapshot,))
     monkeypatch.setattr(runtime, "screening_child_configs", lambda: (config,))
     monkeypatch.setattr(runtime, "_assert_development_manifest", lambda *_args: None)
     monkeypatch.setattr(runtime, "build_screening_plan", lambda: SimpleNamespace())
     monkeypatch.setattr(runtime, "validate_screening_plan", lambda *_args: None)
-    monkeypatch.setattr(runtime, "_assert_tree_shape", lambda *_args: None)
+    monkeypatch.setattr(runtime, "_assert_tree_shape_at", lambda *_args: None)
     monkeypatch.setattr(
         runtime,
         "_load_fold",
@@ -305,15 +340,28 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
     # inventory and activation boundary remain isolated.
     monkeypatch.undo()
     manifest = _Manifest()
-    monkeypatch.setattr(runtime, "load_screening_readiness_manifest", lambda _path: manifest)
+    monkeypatch.setattr(
+        runtime,
+        "_manifest_bytes",
+        lambda _path, _pin: (
+            body,
+            manifest,
+            runtime._read_pinned_file(committed, label="test manifest")[1],
+            runtime._read_pinned_file(committed, label="test manifest")[2],
+        ),
+    )
     monkeypatch.setattr(runtime, "_authority_sources", lambda _manifest: (
         runtime.AuthoritySourceSnapshot(
-            "protocol", source, source.read_bytes(), hashlib.sha256(source.read_bytes()).hexdigest()
+            "protocol",
+            source,
+            source.read_bytes(),
+            hashlib.sha256(source.read_bytes()).hexdigest(),
+            runtime._read_pinned_file(source, label="test authority")[1],
+            runtime._read_pinned_file(source, label="test authority")[2],
         ),
     ))
     monkeypatch.setattr(runtime, "screening_child_configs", lambda: ())
     monkeypatch.setattr(runtime, "_assert_development_manifest", lambda *_args: None)
-    monkeypatch.setattr(runtime, "_validate_child_top_level", lambda *_args: None)
     monkeypatch.setattr(runtime, "_CHILD_TOP_LEVEL_NAMES", frozenset({"marker", "units", "attempts"}))
     monkeypatch.setattr(runtime, "_load_fold", lambda *_args: SimpleNamespace(store=object()))
     monkeypatch.setattr(runtime, "_activate_prepared_batch", lambda *_args: None)
@@ -323,6 +371,9 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
     marker.write_bytes(b"original")
     # Construct the handle directly so the stored tree digest represents the
     # pre-tamper state and no execution path is needed for the test.
+    raw_root_identity, child_identities = _tree_snapshot(raw_root, manifest)
+    manifest_parent_identity = runtime._read_pinned_file(committed, label="test manifest")[1]
+    manifest_file_identity = runtime._read_pinned_file(committed, label="test manifest")[2]
     handle = runtime.ScreeningRuntime(
         manifest_path=committed,
         raw_root=raw_root,
@@ -332,12 +383,21 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
         manifest=manifest,
         authority_sources=(
             runtime.AuthoritySourceSnapshot(
-                "protocol", source, source.read_bytes(), hashlib.sha256(source.read_bytes()).hexdigest()
+                "protocol",
+                source,
+                source.read_bytes(),
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                runtime._read_pinned_file(source, label="test authority")[1],
+                runtime._read_pinned_file(source, label="test authority")[2],
             ),
         ),
         provenance=PROVENANCE,
         folds=(),
-        tree_sha256=runtime._walk_tree_digest(raw_root),
+        tree_sha256=_tree_digest(raw_root),
+        raw_root_identity=raw_root_identity,
+        child_identities=child_identities,
+        manifest_parent_identity=manifest_parent_identity,
+        manifest_file_identity=manifest_file_identity,
     )
     marker.write_bytes(b"tampered")
     with pytest.raises(TrainingDataArtifactError, match="tree changed"):
@@ -394,4 +454,59 @@ def test_recheck_rejects_identical_byte_authority_symlink_substitution(
     source.unlink()
     source.symlink_to(replacement)
     with pytest.raises(TrainingDataArtifactError, match="contains a symlink"):
+        handle.recheck_before_execution()
+
+
+def test_manually_constructed_runtime_without_identities_fails_closed(monkeypatch, tmp_path):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    handle = runtime.load_screening_runtime(
+        committed,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    broken = replace(handle, raw_root_identity=None)
+    with pytest.raises(TrainingDataArtifactError, match="missing pinned filesystem identities"):
+        broken.recheck_before_execution()
+
+
+def test_recheck_rejects_raw_root_substitution_before_reading_replacement(
+    monkeypatch, tmp_path
+):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    handle = runtime.load_screening_runtime(
+        committed,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    monkeypatch.setattr(runtime, "_recheck_manifest_and_tree", _REAL_RECHECK)
+    original = tmp_path / "raw-original"
+    raw_root.rename(original)
+    shutil.copytree(original, raw_root)
+    with pytest.raises(TrainingDataArtifactError, match="raw root identity"):
+        handle.recheck_before_execution()
+
+
+def test_recheck_rejects_same_byte_committed_manifest_replacement(monkeypatch, tmp_path):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    handle = runtime.load_screening_runtime(
+        committed,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    monkeypatch.setattr(runtime, "_recheck_manifest_and_tree", _REAL_RECHECK)
+    committed.unlink()
+    committed.write_bytes(body)
+    with pytest.raises(TrainingDataArtifactError, match="committed manifest identity changed"):
         handle.recheck_before_execution()

@@ -5,15 +5,15 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from typing import Any, Iterator, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
+from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import (
     ExperimentConfig,
     canonical_json_bytes,
@@ -33,7 +33,6 @@ from levelup.experiments.runner.records import (
     ResourceAccounting,
     SharedArtifactReference,
     SystemProvenance,
-    TrainingArtifactCostRecord,
     UnitKey,
     UnitRecord,
     UnitSeeds,
@@ -119,56 +118,51 @@ def _directory_flags() -> int:
 
 def _open_directory_chain(path: Path) -> int:
     """Open every absolute path component without following symlinks."""
-
-    absolute = Path(os.path.abspath(path))
     try:
-        directory_fd = os.open(absolute.anchor, _directory_flags())
-        for component in absolute.parts[1:]:
-            try:
-                child_fd = os.open(component, _directory_flags(), dir_fd=directory_fd)
-            finally:
-                # Only close the parent after ``openat`` has either pinned the
-                # child or raised.  The child remains anchored across renames.
-                os.close(directory_fd)
-            directory_fd = child_fd
-        return directory_fd
-    except (AttributeError, NotImplementedError, OSError) as exc:
+        absolute = Path(os.path.abspath(path))
+        for candidate in (absolute, *absolute.parents):
+            if candidate.is_symlink():
+                raise ArtifactValidationError(
+                    f"cannot securely open symlink directory path: {candidate}"
+                )
+        return secure_fs.open_directory_chain(path)
+    except ArtifactValidationError:
+        raise
+    except secure_fs.SecureFilesystemError as exc:
         raise ArtifactValidationError(f"cannot securely open directory: {path}") from exc
 
 
 def _directory_identity(directory_fd: int) -> tuple[int, int]:
-    observed = os.fstat(directory_fd)
-    if not stat.S_ISDIR(observed.st_mode):
-        raise ArtifactValidationError("result namespace descriptor is not a directory")
-    return observed.st_dev, observed.st_ino
+    try:
+        return secure_fs.directory_identity(directory_fd)
+    except secure_fs.SecureFilesystemError as exc:
+        raise ArtifactValidationError("result namespace descriptor is not a directory") from exc
 
 
 def _open_child_directory(parent_fd: int, name: str) -> int:
     try:
-        return os.open(name, _directory_flags(), dir_fd=parent_fd)
-    except (NotImplementedError, OSError) as exc:
-        raise ArtifactValidationError(f"cannot securely open result namespace: {name}") from exc
+        return secure_fs.open_child_directory(parent_fd, name)
+    except secure_fs.SecureFilesystemError as exc:
+        raise ArtifactValidationError(
+            f"cannot securely open result namespace or symlink: {name}"
+        ) from exc
 
 
 def _load_model_at(directory_fd: int, name: str, model_type: type[ModelT]) -> ModelT:
     """Read a final artifact entry without following it or re-resolving a path."""
 
     try:
-        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd)
-        try:
-            observed = os.fstat(fd)
-            if not stat.S_ISREG(observed.st_mode):
-                raise ArtifactValidationError(f"invalid artifact entry: {name}")
-            with os.fdopen(fd, "r", encoding="utf-8") as handle:
-                fd = -1
-                raw = json.load(handle)
-        finally:
-            if fd != -1:
-                os.close(fd)
+        raw = secure_fs.read_json_at(directory_fd, name)
         return model_type.model_validate(raw)
     except ArtifactValidationError:
         raise
-    except (OSError, json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+    except secure_fs.SecureFilesystemError as exc:
+        if isinstance(exc.__cause__, FileNotFoundError):
+            raise ArtifactValidationError(f"missing prepared {name}") from None
+        raise ArtifactValidationError(
+            f"invalid artifact {name}: {type(exc).__name__}"
+        ) from None
+    except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
         raise ArtifactValidationError(
             f"invalid artifact {name}: {type(exc).__name__}"
         ) from None
@@ -256,40 +250,27 @@ def _strict_namespace_entries(
     namespace: str,
     expected_units: set[str],
 ) -> tuple[str, ...]:
-    entries: list[str] = []
     try:
-        with os.scandir(namespace_directory_fd) as iterator:
-            for entry in iterator:
-                name = entry.name
-                entries.append(name)
-                if entry.is_symlink():
-                    raise ArtifactValidationError(
-                        f"unexpected symlink in {namespace} namespace: {name}"
-                    )
-                if not entry.is_file(follow_symlinks=False):
-                    raise ArtifactValidationError(
-                        f"unexpected non-file in {namespace} namespace: {name}"
-                    )
-                if namespace == "units":
-                    if not name.endswith(".json") or name[:-5] not in expected_units:
-                        raise ArtifactValidationError(
-                            f"unexpected completed unit files: {name}"
-                        )
-                else:
-                    stem = name.removesuffix(".json")
-                    unit_id, separator, number = stem.rpartition(".attempt-")
-                    if (
-                        not name.endswith(".json")
-                        or not separator
-                        or unit_id not in expected_units
-                        or len(number) != 4
-                        or not number.isdigit()
-                        or int(number) < 1
-                    ):
-                        raise ArtifactValidationError(f"unexpected attempt file: {name}")
+        entries = list(secure_fs.strict_regular_entries(namespace_directory_fd))
+        for name in entries:
+            if namespace == "units":
+                if not name.endswith(".json") or name[:-5] not in expected_units:
+                    raise ArtifactValidationError(f"unexpected completed unit files: {name}")
+            else:
+                stem = name.removesuffix(".json")
+                unit_id, separator, number = stem.rpartition(".attempt-")
+                if (
+                    not name.endswith(".json")
+                    or not separator
+                    or unit_id not in expected_units
+                    or len(number) != 4
+                    or not number.isdigit()
+                    or int(number) < 1
+                ):
+                    raise ArtifactValidationError(f"unexpected attempt file: {name}")
     except ArtifactValidationError:
         raise
-    except (NotImplementedError, OSError) as exc:
+    except secure_fs.SecureFilesystemError as exc:
         raise ArtifactValidationError(
             f"cannot enumerate {namespace} namespace"
         ) from exc
@@ -500,6 +481,28 @@ class RunStore:
         finally:
             os.close(run_fd)
 
+    @contextmanager
+    def _open_pinned_run(self) -> Iterator[int]:
+        """Pin the run root for all shared-artifact lineage reads."""
+
+        if self._result_directory_identities is None:
+            raise ArtifactValidationError("result directories have not been initialized")
+        run_fd = _open_directory_chain(self.run_dir)
+        try:
+            expected = self._result_directory_identities["run"]
+            if _directory_identity(run_fd) != expected:
+                raise ArtifactValidationError("run directory identity changed")
+            yield run_fd
+        finally:
+            os.close(run_fd)
+        current_fd = _open_directory_chain(self.run_dir)
+        try:
+            current_identity = _directory_identity(current_fd)
+        finally:
+            os.close(current_fd)
+        if current_identity != self._result_directory_identities["run"]:
+            raise ArtifactValidationError("run directory identity changed after shared-artifact read")
+
     def _assert_result_namespace_current(self, namespace: str) -> None:
         # Re-open the current textual path after each operation.  The work was
         # anchored to safe fds; this detects a concurrent rename/substitution
@@ -508,42 +511,19 @@ class RunStore:
             pass
 
     @staticmethod
-    def _validate_prepared_path(path: Path, *, kind: str) -> Path:
-        """Validate a prepared path without creating or opening its contents."""
-
-        # Check every textual ancestor before resolving the path.  Resolving
-        # first would make a symlinked run directory look like an ordinary
-        # prepared directory and would also make a later check race-prone.
-        absolute = Path(os.path.abspath(path))
-        current = absolute
-        while True:
-            if current.is_symlink():
-                raise ArtifactValidationError(
-                    f"refusing symlink {kind} path: {path}"
-                )
-            if current.parent == current:
-                break
-            current = current.parent
-        if kind.endswith("directory"):
-            if not absolute.is_dir():
-                raise ArtifactValidationError(f"missing prepared {kind}: {path}")
-        elif not absolute.is_file():
-            raise ArtifactValidationError(f"missing prepared {kind}: {path}")
-        return absolute.resolve(strict=False)
-
-    @staticmethod
-    def _require_canonical_bytes(
-        path: Path,
+    def _require_canonical_bytes_at(
+        directory_fd: int,
+        name: str,
         expected: bytes,
         *,
         kind: str,
     ) -> bytes:
         try:
-            observed = path.read_bytes()
-        except OSError as exc:
-            raise ArtifactValidationError(f"cannot read prepared {kind}: {path}") from exc
+            observed = secure_fs.read_bytes_at(directory_fd, name)
+        except secure_fs.SecureFilesystemError as exc:
+            raise ArtifactValidationError(f"cannot read prepared {kind}: {name}") from exc
         if observed != expected:
-            raise ArtifactValidationError(f"non-canonical prepared {kind}: {path.name}")
+            raise ArtifactValidationError(f"non-canonical prepared {kind}: {name}")
         return observed
 
     @classmethod
@@ -585,84 +565,84 @@ class RunStore:
         if len(run_ids) != len(set(run_ids)):
             raise ArtifactValidationError("prepared batch contains duplicate run IDs")
 
+        stack = ExitStack()
+        stack.__enter__()
         canonical_paths: list[Path] = []
         result_identities: list[dict[str, tuple[int, int]]] = []
-        for store in provided:
-            canonical_paths.append(
-                cls._validate_prepared_path(store.run_dir, kind="run directory")
-            )
-            result_identities.append(store._capture_result_directory_identities())
-        if len(canonical_paths) != len(set(canonical_paths)):
-            raise ArtifactValidationError("prepared batch contains duplicate run paths")
-
-        for store in provided:
-            config_path = cls._validate_prepared_path(
-                store.run_dir / "config.json", kind="config file"
-            )
-            expected_path = cls._validate_prepared_path(
-                store.run_dir / "expected-units.json", kind="expected-units file"
-            )
-            shared_path = cls._validate_prepared_path(
-                store.run_dir / "expected-shared-artifacts.json",
-                kind="expected-shared-artifacts file",
-            )
-            provenance_path = cls._validate_prepared_path(
-                store.run_dir / "provenance.json", kind="provenance file"
-            )
-            cls._validate_prepared_path(store.units_dir, kind="units directory")
-            cls._validate_prepared_path(store.attempts_dir, kind="attempts directory")
-
-            cls._require_canonical_bytes(
-                config_path,
-                canonical_json_bytes(scientific_config_value(store.config)) + b"\n",
-                kind="config",
-            )
-            cls._require_canonical_bytes(
-                expected_path,
-                canonical_json_bytes(store.expected.model_dump(mode="json")) + b"\n",
-                kind="expected-units",
-            )
-            cls._require_canonical_bytes(
-                shared_path,
-                canonical_json_bytes(store.expected_shared.model_dump(mode="json")) + b"\n",
-                kind="expected-shared-artifacts",
-            )
-            stored_provenance = _load_model(provenance_path, SystemProvenance)
-            cls._require_canonical_bytes(
-                provenance_path,
-                canonical_json_bytes(
-                    stored_provenance.model_dump(mode="json", warnings=False)
+        run_fds: list[int] = []
+        try:
+            for store in provided:
+                run_fd = _open_directory_chain(store.run_dir)
+                stack.callback(os.close, run_fd)
+                units_fd = _open_child_directory(run_fd, "units")
+                stack.callback(os.close, units_fd)
+                attempts_fd = _open_child_directory(run_fd, "attempts")
+                stack.callback(os.close, attempts_fd)
+                run_fds.append(run_fd)
+                canonical_paths.append(Path(os.path.abspath(store.run_dir)))
+                result_identities.append(
+                    {
+                        "run": _directory_identity(run_fd),
+                        "units": _directory_identity(units_fd),
+                        "attempts": _directory_identity(attempts_fd),
+                    }
                 )
-                + b"\n",
-                kind="provenance",
-            )
-            if _provenance_identity(stored_provenance) != _provenance_identity(provenance):
-                raise ArtifactValidationError(
-                    "prepared provenance identity does not match supplied provenance"
-                )
-            _validate_provenance_policy(
-                provenance,
-                store.config,
-                provenance.resolved_device,
-            )
+            if len(canonical_paths) != len(set(canonical_paths)):
+                raise ArtifactValidationError("prepared batch contains duplicate run paths")
 
+            for store, run_fd in zip(provided, run_fds, strict=True):
+                cls._require_canonical_bytes_at(
+                    run_fd,
+                    "config.json",
+                    canonical_json_bytes(scientific_config_value(store.config)) + b"\n",
+                    kind="config",
+                )
+                cls._require_canonical_bytes_at(
+                    run_fd,
+                    "expected-units.json",
+                    canonical_json_bytes(store.expected.model_dump(mode="json")) + b"\n",
+                    kind="expected-units",
+                )
+                cls._require_canonical_bytes_at(
+                    run_fd,
+                    "expected-shared-artifacts.json",
+                    canonical_json_bytes(store.expected_shared.model_dump(mode="json")) + b"\n",
+                    kind="expected-shared-artifacts",
+                )
+                stored_provenance = _load_model_at(run_fd, "provenance.json", SystemProvenance)
+                cls._require_canonical_bytes_at(
+                    run_fd,
+                    "provenance.json",
+                    canonical_json_bytes(stored_provenance.model_dump(mode="json", warnings=False))
+                    + b"\n",
+                    kind="provenance",
+                )
+                if _provenance_identity(stored_provenance) != _provenance_identity(provenance):
+                    raise ArtifactValidationError(
+                        "prepared provenance identity does not match supplied provenance"
+                    )
+                _validate_provenance_policy(provenance, store.config, provenance.resolved_device)
         # No mutation, policy application, or provenance capture occurs above
         # this point.  The batch becomes usable only after every store passes.
-        for store, identities in zip(provided, result_identities, strict=True):
-            if store._capture_result_directory_identities() != identities:
-                raise ArtifactValidationError(
-                    "prepared result directory identity changed during activation"
-                )
-            if (
-                store._result_directory_identities is not None
-                and store._result_directory_identities != identities
-            ):
-                raise ArtifactValidationError(
-                    "prepared result directory identity changed after prior activation"
-                )
-        for store, identities in zip(provided, result_identities, strict=True):
-            store._result_directory_identities = identities
-            store._execution_ready = True
+            for store, identities in zip(provided, result_identities, strict=True):
+                if store._capture_result_directory_identities() != identities:
+                    raise ArtifactValidationError(
+                        "prepared result directory identity changed during activation"
+                    )
+                if (
+                    store._result_directory_identities is not None
+                    and store._result_directory_identities != identities
+                ):
+                    raise ArtifactValidationError(
+                        "prepared result directory identity changed after prior activation"
+                    )
+            for store, identities in zip(provided, result_identities, strict=True):
+                store._result_directory_identities = identities
+                store._execution_ready = True
+        except BaseException:
+            stack.close()
+            raise
+        stack.close()
 
     def _validate_shared_plan(self) -> None:
         units = {unit.unit_id: unit for unit in self.expected.units}
@@ -790,6 +770,77 @@ class RunStore:
         self._result_directory_identities = prepared_identities
         self._execution_ready = for_execution
 
+    def initialize_prepared(self, provenance: SystemProvenance) -> None:
+        """Publish and pin a preparation-only store from supplied provenance.
+
+        Readiness captures provenance once for the complete six-fold
+        transaction.  This boundary must therefore never resolve a device or
+        recapture the host if a file disappears during publication.  All four
+        canonical RunStore files are published and verified relative to one
+        retained run descriptor, and the result namespaces remain disabled for
+        execution until the later prepared-batch activation succeeds.
+        """
+
+        self._execution_ready = False
+        if not isinstance(provenance, SystemProvenance):
+            raise ArtifactValidationError("prepared provenance is invalid")
+        provenance = _revalidate_instance(provenance, SystemProvenance)
+
+        stack = ExitStack()
+        stack.__enter__()
+        try:
+            run_fd = _open_directory_chain(self.run_dir)
+            stack.callback(os.close, run_fd)
+            units_fd = _open_child_directory(run_fd, "units")
+            stack.callback(os.close, units_fd)
+            attempts_fd = _open_child_directory(run_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            identities = {
+                "run": _directory_identity(run_fd),
+                "units": _directory_identity(units_fd),
+                "attempts": _directory_identity(attempts_fd),
+            }
+
+            canonical_values = (
+                ("config.json", scientific_config_value(self.config)),
+                ("expected-units.json", self.expected.model_dump(mode="json")),
+                (
+                    "expected-shared-artifacts.json",
+                    self.expected_shared.model_dump(mode="json"),
+                ),
+                ("provenance.json", provenance.model_dump(mode="json")),
+            )
+            for name, value in canonical_values:
+                _exclusive_write_json_at(run_fd, run_fd, name, value)
+                self._require_canonical_bytes_at(
+                    run_fd,
+                    name,
+                    canonical_json_bytes(value) + b"\n",
+                    kind=name.removesuffix(".json"),
+                )
+
+            stored_provenance = _load_model_at(run_fd, "provenance.json", SystemProvenance)
+            if _provenance_identity(stored_provenance) != _provenance_identity(provenance):
+                raise ArtifactValidationError(
+                    "prepared provenance identity does not match supplied provenance"
+                )
+            if self._capture_result_directory_identities() != identities:
+                raise ArtifactValidationError(
+                    "prepared result directory identity changed during initialization"
+                )
+            if (
+                self._result_directory_identities is not None
+                and self._result_directory_identities != identities
+            ):
+                raise ArtifactValidationError(
+                    "prepared result directory identity changed after prior initialization"
+                )
+            self._result_directory_identities = identities
+        except BaseException:
+            stack.close()
+            raise
+        stack.close()
+
     def planned_unit(self, unit_id: str) -> PlannedUnit:
         try:
             return self._expected_by_id[unit_id]
@@ -797,7 +848,8 @@ class RunStore:
             raise ArtifactValidationError(f"unexpected unit_id: {unit_id}") from exc
 
     def load_provenance(self) -> SystemProvenance:
-        return _load_model(self.run_dir / "provenance.json", SystemProvenance)
+        with self._open_pinned_run() as run_fd:
+            return _load_model_at(run_fd, "provenance.json", SystemProvenance)
 
     def planned_shared(self, key_id: str, kind: str = "training_artifact") -> PlannedSharedArtifact:
         matches = [
@@ -810,48 +862,76 @@ class RunStore:
         return matches[0]
 
     def load_shared_cost(self, key_id: str, kind: str = "training_artifact") -> Any:
+        with self._open_pinned_run() as run_fd:
+            return self._load_shared_cost_at(run_fd, key_id, kind)
+
+    def _load_shared_cost_at(
+        self,
+        run_fd: int,
+        key_id: str,
+        kind: str = "training_artifact",
+        *,
+        data_reader: Any | None = None,
+        model_reader: Any | None = None,
+    ) -> Any:
+        """Load one planned shared cost through the pinned run descriptor."""
+
         self.planned_shared(key_id, kind)
         if kind == "training_data_evidence":
             from levelup.experiments.runner.training_data_artifacts import (
-                load_training_data_evidence_cost,
+                load_training_data_evidence_cost_from_at,
+                open_training_data_reader,
             )
 
-            try:
-                return load_training_data_evidence_cost(self.run_dir, key_id)
-            except (OSError, RuntimeError, ValueError) as exc:
-                raise ArtifactValidationError("invalid shared training-data evidence cost") from exc
+            if data_reader is None:
+                with open_training_data_reader(run_fd) as opened:
+                    return load_training_data_evidence_cost_from_at(opened, key_id)
+            return load_training_data_evidence_cost_from_at(data_reader, key_id)
         if kind == "training_data_view":
             from levelup.experiments.runner.training_data_artifacts import (
-                load_training_data_view_cost,
+                load_training_data_view_cost_from_at,
+                open_training_data_reader,
             )
 
-            try:
-                return load_training_data_view_cost(self.run_dir, key_id)
-            except (OSError, RuntimeError, ValueError) as exc:
-                raise ArtifactValidationError("invalid shared training-data view cost") from exc
+            if data_reader is None:
+                with open_training_data_reader(run_fd) as opened:
+                    return load_training_data_view_cost_from_at(opened, key_id)
+            return load_training_data_view_cost_from_at(data_reader, key_id)
         if kind != "training_artifact":
             raise ArtifactValidationError("unknown shared-artifact kind")
-        costs_root = self.run_dir / "training-artifact-costs"
-        path = costs_root / f"{key_id}.json"
-        if self.run_dir.is_symlink() or costs_root.is_symlink() or path.is_symlink():
-            raise ArtifactValidationError("refusing symlink shared-artifact cost path")
-        try:
-            path.resolve().relative_to(costs_root.resolve())
-        except ValueError:
-            raise ArtifactValidationError("shared-artifact cost path escapes its root") from None
-        record = _load_model(path, TrainingArtifactCostRecord)
-        if record.key_id != key_id or record.expected_cost_id != record.cost_id:
+        from levelup.experiments.runner.training_artifacts import (
+            load_training_cost_by_id_from_at,
+            open_training_artifact_reader,
+        )
+
+        if model_reader is None:
+            with open_training_artifact_reader(run_fd) as opened:
+                raw = load_training_cost_by_id_from_at(opened, key_id)
+        else:
+            raw = load_training_cost_by_id_from_at(model_reader, key_id)
+        if raw.key_id != key_id or raw.expected_cost_id != raw.cost_id:
             raise ArtifactValidationError("shared-artifact cost identity mismatch")
-        return record
+        return raw
 
     def validate_shared_reference(
         self, unit: PlannedUnit, reference: SharedArtifactReference
     ) -> None:
+        with self._open_pinned_run() as run_fd:
+            self._validate_shared_reference_set_at(run_fd, unit, (reference,))
+
+    def _validate_shared_reference_at(
+        self,
+        run_fd: int,
+        unit: PlannedUnit,
+        reference: SharedArtifactReference,
+        *,
+        data_reader: Any | None,
+        model_reader: Any | None,
+        model_lineage: tuple[Any, Any, Any] | None = None,
+    ) -> tuple[Any, Any]:
         from levelup.experiments.runner.training_artifacts import (
             TrainingArtifactKey,
-            load_training_cost,
-            load_training_key_index,
-            load_training_manifest,
+            load_training_lineage_from_at,
         )
 
         planned = self.planned_shared(reference.key_id, reference.kind)
@@ -863,19 +943,22 @@ class RunStore:
         ):
             raise ArtifactValidationError("shared-artifact owner/replicate mismatch")
         expected_plan_sha256 = expected_units_sha256(self.expected)
-        expected_provenance_sha256 = provenance_identity_sha256(self.load_provenance())
-        cost = self.load_shared_cost(reference.key_id, reference.kind)
-        if cost.artifact_id != reference.artifact_id or cost.cost_id != reference.cost_id:
-            raise ArtifactValidationError("shared-artifact reference does not match cost record")
+        expected_provenance_sha256 = provenance_identity_sha256(
+            _load_model_at(run_fd, "provenance.json", SystemProvenance)
+        )
         expected_group = planned.owner_group_id or planned.owner_condition_id
         if reference.kind == "training_data_evidence":
+            if data_reader is None:
+                raise ArtifactValidationError("training-data reader is absent")
             try:
                 from levelup.experiments.runner.training_data_artifacts import (
                     TrainingDataEvidenceKey,
-                    load_training_data_evidence,
-                    load_training_data_evidence_cost,
+                    load_training_data_evidence_bundle_from_at,
                 )
 
+                cost, manifest, _ = load_training_data_evidence_bundle_from_at(
+                    data_reader, reference.key_id
+                )
                 evidence_key = TrainingDataEvidenceKey.model_validate(cost.key)
                 if (
                     cost.scope != "training_data_evidence_preparation"
@@ -891,25 +974,29 @@ class RunStore:
                     raise ArtifactValidationError(
                         "shared evidence key does not match its frozen owner"
                     )
-                validated_cost = load_training_data_evidence_cost(self.run_dir, evidence_key)
-                manifest, _ = load_training_data_evidence(
-                    self.run_dir, reference.artifact_id, expected_key=evidence_key
-                )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise ArtifactValidationError("shared training-data evidence is invalid") from exc
-            if validated_cost != cost or manifest.evidence_id != reference.artifact_id:
+            if (
+                cost.artifact_id != reference.artifact_id
+                or cost.cost_id != reference.cost_id
+                or manifest.evidence_id != reference.artifact_id
+            ):
                 raise ArtifactValidationError(
-                    "shared training-data evidence files do not match the unit reference"
+                    "shared training-data evidence reference does not match its cost record"
                 )
-            return
+            return cost, manifest
         if reference.kind == "training_data_view":
+            if data_reader is None:
+                raise ArtifactValidationError("training-data reader is absent")
             try:
                 from levelup.experiments.runner.training_data_artifacts import (
                     TrainingDataArtifactKey,
-                    load_training_data_artifact,
-                    load_training_data_view_cost,
+                    load_training_data_view_bundle_from_at,
                 )
 
+                cost, manifest, _ = load_training_data_view_bundle_from_at(
+                    data_reader, reference.key_id
+                )
                 data_key = TrainingDataArtifactKey.model_validate(cost.key)
                 if (
                     cost.scope != "training_data_view_preparation"
@@ -926,25 +1013,40 @@ class RunStore:
                     raise ArtifactValidationError(
                         "shared training-data view key does not match its frozen owner"
                     )
-                validated_cost = load_training_data_view_cost(self.run_dir, data_key)
-                manifest, _ = load_training_data_artifact(
-                    self.run_dir, reference.artifact_id, expected_key=data_key
-                )
             except (OSError, RuntimeError, ValueError) as exc:
                 raise ArtifactValidationError("shared training-data view is invalid") from exc
-            if validated_cost != cost or manifest.artifact_id != reference.artifact_id:
+            if (
+                cost.artifact_id != reference.artifact_id
+                or cost.cost_id != reference.cost_id
+                or manifest.artifact_id != reference.artifact_id
+            ):
                 raise ArtifactValidationError(
-                    "shared training-data view files do not match the unit reference"
+                    "shared training-data view reference does not match its cost record"
                 )
-            return
+            return cost, manifest
+        if model_reader is None:
+            raise ArtifactValidationError("training-artifact reader is absent")
+        try:
+            if model_lineage is None:
+                raw_cost = self._load_shared_cost_at(
+                    run_fd,
+                    reference.key_id,
+                    reference.kind,
+                    data_reader=data_reader,
+                    model_reader=model_reader,
+                )
+                training_key = TrainingArtifactKey.model_validate(raw_cost.key)
+                manifest, index, cost = load_training_lineage_from_at(
+                    model_reader, training_key
+                )
+            else:
+                manifest, index, cost = model_lineage
+                raw_cost = cost
+                training_key = TrainingArtifactKey.model_validate(cost.key)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ArtifactValidationError("shared training artifact is invalid") from exc
         if cost.scope != "training_preparation":
             raise ArtifactValidationError("shared model cost has the wrong scope")
-        try:
-            training_key = TrainingArtifactKey.model_validate(cost.key)
-        except (TypeError, ValueError):
-            raise ArtifactValidationError(
-                "shared-artifact cost does not contain a valid training key"
-            ) from None
         if (
             training_key.key_id != reference.key_id
             or training_key.condition_id != expected_group
@@ -958,49 +1060,94 @@ class RunStore:
             raise ArtifactValidationError(
                 "shared-artifact training key does not match its frozen owner"
             )
-        validated_cost = load_training_cost(self.run_dir, training_key)
-        index = load_training_key_index(self.run_dir, training_key)
-        manifest = load_training_manifest(self.run_dir, index.artifact_id)
         if (
-            validated_cost != cost
+            raw_cost != cost
+            or cost.artifact_id != reference.artifact_id
+            or cost.cost_id != reference.cost_id
             or index.artifact_id != reference.artifact_id
             or manifest.artifact_id != reference.artifact_id
         ):
             raise ArtifactValidationError("shared-artifact files do not match the unit reference")
+        return cost, manifest
 
     def validate_shared_reference_set(
         self,
         unit: PlannedUnit,
         references: tuple[SharedArtifactReference, ...],
     ) -> None:
+        with self._open_pinned_run() as run_fd:
+            self._validate_shared_reference_set_at(run_fd, unit, references)
+
+    def _validate_shared_reference_set_at(
+        self,
+        run_fd: int,
+        unit: PlannedUnit,
+        references: tuple[SharedArtifactReference, ...],
+        *,
+        data_reader: Any | None = None,
+        model_reader: Any | None = None,
+        model_lineage: tuple[Any, Any, Any] | None = None,
+    ) -> None:
         """Validate cross-kind provenance after validating each typed reference."""
 
-        for reference in references:
-            self.validate_shared_reference(unit, reference)
+        if data_reader is None and model_reader is None:
+            from levelup.experiments.runner.training_artifacts import (
+                open_training_artifact_reader,
+            )
+            from levelup.experiments.runner.training_data_artifacts import (
+                open_training_data_reader,
+            )
+
+            kinds = {reference.kind for reference in references}
+            with ExitStack() as stack:
+                opened_data = (
+                    stack.enter_context(open_training_data_reader(run_fd))
+                    if kinds & {"training_data_evidence", "training_data_view"}
+                    else None
+                )
+                opened_model = (
+                    stack.enter_context(open_training_artifact_reader(run_fd))
+                    if "training_artifact" in kinds
+                    else None
+                )
+                self._validate_shared_reference_set_at(
+                    run_fd,
+                    unit,
+                    references,
+                    data_reader=opened_data,
+                    model_reader=opened_model,
+                    model_lineage=model_lineage,
+                )
+                return
+        kinds = {reference.kind for reference in references}
+        if (
+            kinds & {"training_data_evidence", "training_data_view"}
+            and data_reader is None
+        ) or ("training_artifact" in kinds and model_reader is None):
+            raise ArtifactValidationError("required shared reference reader is absent")
+
+        validated_by_kind = {
+            reference.kind: self._validate_shared_reference_at(
+                run_fd,
+                unit,
+                reference,
+                data_reader=data_reader,
+                model_reader=model_reader,
+                model_lineage=(
+                    model_lineage if reference.kind == "training_artifact" else None
+                ),
+            )
+            for reference in references
+        }
         by_kind = {reference.kind: reference for reference in references}
         evidence = by_kind.get("training_data_evidence")
         view = by_kind.get("training_data_view")
         model = by_kind.get("training_artifact")
         if evidence is not None and view is not None:
-            try:
-                from levelup.experiments.runner.training_data_artifacts import (
-                    evidence_key_for,
-                    load_training_data_artifact,
-                    load_training_data_evidence_cost,
-                    load_training_data_view_cost,
-                )
+            from levelup.experiments.runner.training_data_artifacts import evidence_key_for
 
-                evidence_cost = load_training_data_evidence_cost(
-                    self.run_dir, evidence.key_id
-                )
-                view_cost = load_training_data_view_cost(self.run_dir, view.key_id)
-                view_manifest, _ = load_training_data_artifact(
-                    self.run_dir, view.artifact_id, expected_key=view_cost.key
-                )
-            except (OSError, RuntimeError, ValueError) as exc:
-                raise ArtifactValidationError(
-                    "shared training-data lineage is invalid"
-                ) from exc
+            evidence_cost, _ = validated_by_kind["training_data_evidence"]
+            view_cost, view_manifest = validated_by_kind["training_data_view"]
             if (
                 evidence_key_for(view_cost.key) != evidence_cost.key
                 or view_manifest.evidence_id != evidence.artifact_id
@@ -1011,7 +1158,7 @@ class RunStore:
         if view is not None and model is not None:
             from levelup.experiments.runner.training_artifacts import TrainingArtifactKey
 
-            model_cost = self.load_shared_cost(model.key_id, model.kind)
+            model_cost, _ = validated_by_kind["training_artifact"]
             try:
                 model_key = TrainingArtifactKey.model_validate(model_cost.key)
             except (AttributeError, TypeError, ValueError):

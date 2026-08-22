@@ -30,8 +30,11 @@ from levelup.experiments.runner.storage import ArtifactValidationError
 from levelup.experiments.runner.training_artifacts import (
     TrainingArtifactManifest,
     TrainingReportMetadata,
-    load_training_key_index,
-    load_training_model,
+    load_training_bundle_from_at,
+    open_training_artifact_reader,
+)
+from levelup.experiments.runner.training_data_artifacts import (
+    open_training_data_reader,
 )
 
 ModelIdentity = tuple[str, str, str, int]
@@ -310,27 +313,38 @@ def prepare_unit_model(
         cost_id=model_cost.cost_id,
     )
     references = (evidence_reference, view_reference, model_reference)
-    fold.store.validate_shared_reference_set(planned, references)
+    with fold.store._open_pinned_run() as run_fd:
+        with (
+            open_training_data_reader(run_fd) as data_reader,
+            open_training_artifact_reader(run_fd) as model_reader,
+        ):
+            cached = None if cache is None else cache.get(model_identity)
+            model_lineage = None
+            if cached is None:
+                model, manifest, index, cost = load_training_bundle_from_at(
+                    model_reader,
+                    model_key,
+                    model_factory=_model_factory,
+                )
+                model_lineage = (manifest, index, cost)
+            fold.store._validate_shared_reference_set_at(
+                run_fd,
+                planned,
+                references,
+                data_reader=data_reader,
+                model_reader=model_reader,
+                model_lineage=model_lineage,
+            )
 
-    cached = None if cache is None else cache.get(model_identity)
-    if cached is None:
-        index = load_training_key_index(fold.store.run_dir, model_key)
-        if index.artifact_id != expected_manifest.artifact_id:
-            _fail("screening model key index substituted an artifact")
-        model, manifest = load_training_model(
-            fold.store.run_dir,
-            index.artifact_id,
-            expected_key=model_key,
-            model_factory=_model_factory,
-        )
-        if manifest != expected_manifest or model.training:
-            _fail("screening model manifest or evaluation mode drifted")
-        if cache is not None:
-            cache.put(model_identity, model, manifest)
-    else:
-        model, cached_manifest = cached
-        if model.training or cached_manifest != expected_manifest:
-            _fail("screening cached model is not an exact evaluation artifact")
+            if cached is None:
+                if manifest != expected_manifest or model.training:
+                    _fail("screening model manifest or evaluation mode drifted")
+                if cache is not None:
+                    cache.put(model_identity, model, manifest)
+            else:
+                model, cached_manifest = cached
+                if model.training or cached_manifest != expected_manifest:
+                    _fail("screening cached model is not an exact evaluation artifact")
 
     return PreparedUnitModel(model, expected_manifest.report, references, model_identity)
 

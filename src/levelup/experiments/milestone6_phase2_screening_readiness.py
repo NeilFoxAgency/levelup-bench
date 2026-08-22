@@ -530,13 +530,7 @@ def _write_run_store_structure(store: RunStore, provenance: SystemProvenance) ->
     _safe_dir(store.run_dir, create=True)
     _safe_dir(store.units_dir, create=True)
     _safe_dir(store.attempts_dir, create=True)
-    _exclusive_json(store.run_dir / "config.json", scientific_config_value(store.config))
-    _exclusive_json(store.run_dir / "expected-units.json", store.expected.model_dump(mode="json"))
-    _exclusive_json(store.run_dir / "provenance.json", provenance.model_dump(mode="json"))
-    _exclusive_json(
-        store.run_dir / "expected-shared-artifacts.json",
-        store.expected_shared.model_dump(mode="json"),
-    )
+    store.initialize_prepared(provenance)
 
 
 def _child_manifest(
