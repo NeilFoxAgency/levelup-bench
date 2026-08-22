@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from levelup.experiments.milestone6_phase2 import ROOT
 from levelup.experiments.milestone6_phase2_screening import (
     build_screening_plan,
     screening_child_configs,
@@ -32,6 +33,11 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     build_screening_data_keys,
     build_screening_model_keys,
     build_screening_shared_plan,
+)
+from levelup.experiments.milestone6_phase2_screening_provenance import (
+    CANONICAL_READINESS_PATH,
+    canonical_screening_repository,
+    validate_screening_provenance,
 )
 from levelup.experiments.milestone6_phase2_screening_readiness import (
     _CHILD_TOP_LEVEL_NAMES,
@@ -60,7 +66,7 @@ from levelup.experiments.runner.storage import (
     RunStore,
     expected_units_sha256,
     plan_expected_units,
-    provenance_identity_sha256,
+    provenance_identity_sha256,  # noqa: F401 - retained compatibility export
 )
 from levelup.experiments.runner.training_artifacts import open_training_artifact_reader
 from levelup.experiments.runner.training_data_artifacts import (
@@ -69,6 +75,7 @@ from levelup.experiments.runner.training_data_artifacts import (
 )
 
 FileIdentity = tuple[int, int, int, int, int]
+DirectorySnapshot = tuple[int, int, int, int, int, tuple[tuple[str, str], ...]]
 
 
 def load_screening_data_inventory(
@@ -185,6 +192,7 @@ class ScreeningRuntime:
     child_identities: tuple[tuple[str, tuple[int, int]], ...]
     manifest_parent_identity: tuple[int, int]
     manifest_file_identity: FileIdentity
+    result_namespace_snapshot: tuple[tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...] = ()
 
     @property
     def authority_bytes_by_path(self) -> tuple[tuple[Path, bytes], ...]:
@@ -201,31 +209,40 @@ class ScreeningRuntime:
     def recheck_before_execution(self) -> None:
         """Reconfirm all authority, then transactionally open execution gates."""
 
-        if (
-            self.raw_root_identity is None
-            or not self.child_identities
-            or self.manifest_parent_identity is None
-            or self.manifest_file_identity is None
-            or any(
-                source.parent_identity is None or source.file_identity is None
-                for source in self.authority_sources
-            )
-        ):
-            _fail("screening runtime is missing pinned filesystem identities")
         stores = tuple(fold.store for fold in self.folds)
         for store in stores:
             store._execution_ready = False
         try:
+            if self.manifest_path != self.repository / CANONICAL_READINESS_PATH:
+                _fail(
+                    "screening execution requires the canonical committed readiness manifest"
+                )
+            if (
+                self.raw_root_identity is None
+                or not self.child_identities
+                or self.manifest_parent_identity is None
+                or self.manifest_file_identity is None
+                or any(
+                    source.parent_identity is None or source.file_identity is None
+                    for source in self.authority_sources
+                )
+            ):
+                _fail("screening runtime is missing pinned filesystem identities")
             try:
                 captured = capture_system_provenance(self.repository, self.device_policy)
             except (OSError, RuntimeError, TypeError, ValueError) as exc:
                 _fail("cannot recapture screening runtime provenance", exc)
-            captured_identity = provenance_identity_sha256(captured)
-            if (
-                captured_identity != self.manifest.provenance_sha256
-                or captured_identity != provenance_identity_sha256(self.provenance)
-            ):
-                _fail("screening runtime provenance changed after runtime load")
+            try:
+                validate_screening_provenance(
+                    self.provenance,
+                    captured,
+                    repository=self.repository,
+                    manifest_bytes=self.manifest_bytes,
+                )
+            except TrainingDataArtifactError:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                _fail("screening runtime provenance changed after runtime load", exc)
 
             _recheck_manifest_and_tree(
                 self.manifest_path,
@@ -238,6 +255,8 @@ class ScreeningRuntime:
                 self.child_identities,
                 self.manifest_parent_identity,
                 self.manifest_file_identity,
+                self.folds,
+                self.result_namespace_snapshot,
             )
             _activate_prepared_batch(stores, self.provenance)
             # Activation is read-only, but immediately recheck the immutable
@@ -253,7 +272,27 @@ class ScreeningRuntime:
                 self.child_identities,
                 self.manifest_parent_identity,
                 self.manifest_file_identity,
+                self.folds,
+                self.result_namespace_snapshot,
             )
+            # Git/worktree state is path-based rather than part of the retained
+            # prepared-tree descriptors.  Recapture it after activation and the
+            # final tree check so a checkout or dirty edit during that interval
+            # closes every gate instead of escaping the pre-activation check.
+            try:
+                captured_after_activation = capture_system_provenance(
+                    self.repository, self.device_policy
+                )
+                validate_screening_provenance(
+                    self.provenance,
+                    captured_after_activation,
+                    repository=self.repository,
+                    manifest_bytes=self.manifest_bytes,
+                )
+            except TrainingDataArtifactError:
+                raise
+            except (OSError, RuntimeError, TypeError, ValueError) as exc:
+                _fail("screening runtime provenance changed during activation", exc)
         except Exception:
             for store in stores:
                 store._execution_ready = False
@@ -500,11 +539,13 @@ def _assert_development_manifest(
 def _walk_tree_digest_at(
     root_fd: int,
     expected_child_identities: tuple[tuple[str, tuple[int, int]], ...] = (),
+    canonical_child_ids: tuple[str, ...] = (),
 ) -> str:
     """Hash one already-pinned runtime tree without resolving its path."""
 
     digest = hashlib.sha256()
     expected = dict(expected_child_identities)
+    canonical = set(canonical_child_ids) or set(expected)
 
     def visit(directory_fd: int, relative: str) -> None:
         try:
@@ -521,6 +562,16 @@ def _walk_tree_digest_at(
                         try:
                             if name in expected and secure_fs.directory_identity(child_fd) != expected[name]:
                                 _fail(f"screening runtime child identity changed: {name}")
+                            # Result namespaces are mutable write-once state.  Bind
+                            # their directory type and identity, but deliberately
+                            # exclude their entries from the immutable prepared-tree
+                            # digest so resumable execution can publish records.
+                            if relative in canonical and name in {"units", "attempts"}:
+                                namespace_identity = secure_fs.directory_identity(child_fd)
+                                digest.update(
+                                    f"I\0{child_relative}\0{namespace_identity[0]}:{namespace_identity[1]}\0".encode()
+                                )
+                                continue
                             visit(child_fd, child_relative)
                         finally:
                             os.close(child_fd)
@@ -543,6 +594,7 @@ def _assert_tree_shape_at(
     raw_fd: int,
     manifest: ScreeningReadinessManifest,
     expected_child_identities: tuple[tuple[str, tuple[int, int]], ...] = (),
+    expected_units_by_run: dict[str, set[str]] | None = None,
 ) -> None:
     expected_names = {"phase2-screening-readiness.json", *manifest.child_run_ids}
     try:
@@ -579,8 +631,13 @@ def _assert_tree_shape_at(
                     for namespace in ("units", "attempts"):
                         namespace_fd = secure_fs.open_child_directory(child_fd, namespace)
                         try:
-                            if secure_fs.strict_regular_entries(namespace_fd):
-                                _fail(f"screening runtime {namespace} namespace is not empty")
+                            _assert_result_namespace_shape_at(
+                                namespace_fd,
+                                namespace,
+                                None
+                                if expected_units_by_run is None
+                                else expected_units_by_run.get(run_id, set()),
+                            )
                         finally:
                             os.close(namespace_fd)
                     if "aggregate.json" in child_names:
@@ -589,6 +646,42 @@ def _assert_tree_shape_at(
                     os.close(child_fd)
     except (OSError, secure_fs.SecureFilesystemError) as exc:
         _fail("screening runtime tree shape is unsafe", exc)
+
+
+def _assert_result_namespace_shape_at(
+    namespace_fd: int, namespace: str, expected_units: set[str] | None
+) -> None:
+    """Reject unsafe or unexpected result entry names without reading outcomes."""
+
+    try:
+        entries = secure_fs.strict_regular_entries(namespace_fd)
+    except secure_fs.SecureFilesystemError as exc:
+        _fail(f"screening runtime {namespace} namespace is unsafe", exc)
+    for name in entries:
+        if namespace == "units":
+            unit_id = name[:-5] if name.endswith(".json") else ""
+            if (
+                not name.endswith(".json")
+                or (expected_units is None and (len(unit_id) != 64 or any(c not in "0123456789abcdef" for c in unit_id)))
+                or (expected_units is not None and unit_id not in expected_units)
+            ):
+                _fail(f"screening runtime contains unexpected unit result: {name}")
+            continue
+        stem = name.removesuffix(".json")
+        unit_id, separator, number = stem.rpartition(".attempt-")
+        if (
+            not name.endswith(".json")
+            or not separator
+            or (
+                expected_units is None
+                and (len(unit_id) != 64 or any(c not in "0123456789abcdef" for c in unit_id))
+            )
+            or (expected_units is not None and unit_id not in expected_units)
+            or len(number) != 4
+            or not number.isdigit()
+            or int(number) < 1
+        ):
+            _fail(f"screening runtime contains unexpected attempt result: {name}")
 
 
 def _tree_identities_at(
@@ -605,6 +698,59 @@ def _tree_identities_at(
     return root_identity, tuple(children)
 
 
+def _result_namespace_snapshot(
+    folds: tuple[ScreeningRuntimeFold, ...],
+) -> tuple[tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...]:
+    """Capture stable run/namespace identities and directory types.
+
+    This snapshot is intentionally separate from the immutable prepared-tree
+    digest: a fresh runtime load captures the current write-once inventory, and
+    all validation/activation gates require it to remain byte-identical.
+    """
+
+    snapshots: list[tuple[str, tuple[tuple[str, DirectorySnapshot], ...]]] = []
+    for fold in folds:
+        store = fold.store
+        # Test doubles for the loader boundary may not expose a filesystem
+        # backed RunStore.  Real prepared folds always do, and are checked
+        # strictly below.
+        if not hasattr(store, "run_dir"):
+            continue
+        if store._result_directory_identities is None:
+            _fail(f"screening runtime {store.run_id} result identities are not pinned")
+        entries: list[tuple[str, DirectorySnapshot]] = []
+        try:
+            for namespace in ("units", "attempts"):
+                # RunStore compares the textual path to its retained run and
+                # namespace identities before yielding either descriptor.  Do
+                # not read a replacement namespace before that comparison.
+                with store._open_result_namespace(namespace) as (_, namespace_fd):
+                    observed = os.fstat(namespace_fd)
+                    if not stat.S_ISDIR(observed.st_mode):
+                        _fail(f"screening runtime {store.run_id} {namespace} is not a directory")
+                    names_and_digests = tuple(
+                        (name, _sha256(secure_fs.read_bytes_at(namespace_fd, name)))
+                        for name in secure_fs.strict_regular_entries(namespace_fd)
+                    )
+                    entries.append(
+                        (
+                            namespace,
+                            (
+                                observed.st_dev,
+                                observed.st_ino,
+                                observed.st_ctime_ns,
+                                observed.st_mtime_ns,
+                                stat.S_IFMT(observed.st_mode),
+                                names_and_digests,
+                            ),
+                        )
+                    )
+            snapshots.append((store.run_id, tuple(entries)))
+        except (OSError, RuntimeError, ValueError, secure_fs.SecureFilesystemError) as exc:
+            _fail(f"screening runtime {store.run_id} result namespace is invalid", exc)
+    return tuple(snapshots)
+
+
 def _recheck_manifest_and_tree(
     manifest_path: Path,
     raw_root: Path,
@@ -616,6 +762,10 @@ def _recheck_manifest_and_tree(
     child_identities: tuple[tuple[str, tuple[int, int]], ...],
     manifest_parent_identity: tuple[int, int],
     manifest_file_identity: FileIdentity,
+    folds: tuple[ScreeningRuntimeFold, ...] = (),
+    expected_result_namespace_snapshot: tuple[
+        tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...
+    ] = (),
 ) -> None:
     current_manifest, _current_parent_identity, _current_file_identity = _read_pinned_file(
         manifest_path,
@@ -657,11 +807,62 @@ def _recheck_manifest_and_tree(
         )
         if raw_manifest != manifest_bytes or raw_value != manifest.model_dump(mode="json"):
             _fail("raw-root readiness manifest changed after runtime load")
-        _assert_tree_shape_at(raw_fd, manifest, child_identities)
-        if _walk_tree_digest_at(raw_fd, child_identities) != tree_sha256:
+        expected_units_by_run = {
+            fold.store.run_id: {unit.unit_id for unit in fold.store.expected.units}
+            for fold in folds
+        }
+        _assert_tree_shape_at(
+            raw_fd,
+            manifest,
+            child_identities,
+            expected_units_by_run if folds else None,
+        )
+        _validate_result_namespaces(folds, expected_result_namespace_snapshot)
+        if (
+            _walk_tree_digest_at(
+                raw_fd,
+                child_identities,
+                canonical_child_ids=manifest.child_run_ids,
+            )
+            != tree_sha256
+        ):
             _fail("screening runtime tree changed after runtime load")
     finally:
         os.close(raw_fd)
+
+
+def _validate_result_namespaces(
+    folds: tuple[ScreeningRuntimeFold, ...],
+    expected_snapshot: tuple[
+        tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...
+    ] = (),
+) -> None:
+    """Validate resumable result state through each store's pinned APIs."""
+
+    before_snapshot = _result_namespace_snapshot(folds)
+    if expected_snapshot and before_snapshot != expected_snapshot:
+        _fail("screening runtime result namespace snapshot changed")
+    for fold in folds:
+        store = fold.store
+        try:
+            identities = store._capture_result_directory_identities()
+            if (
+                store._result_directory_identities is not None
+                and identities != store._result_directory_identities
+            ):
+                _fail(f"screening runtime {store.run_id} result directory identity changed")
+            store._result_directory_identities = identities
+            # These APIs securely enumerate, parse, and identity-check every
+            # existing record.  They intentionally do not aggregate or select
+            # and therefore do not inspect comparative outcome values.
+            store.completed_records()
+            store.attempt_records()
+        except TrainingDataArtifactError:
+            raise
+        except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+            _fail(f"screening runtime {store.run_id} result state is invalid", exc)
+    if _result_namespace_snapshot(folds) != before_snapshot:
+        _fail("screening runtime result state changed during validation")
 
 
 def _assert_global_inventory(
@@ -760,37 +961,81 @@ def _load_fold(
                 shared,
                 provenance,
             )
+            if expected_child != child_manifest:
+                _fail(
+                    "screening runtime child inventory does not match the readiness manifest"
+                )
+            store = RunStore(
+                raw_root,
+                config,
+                repository=repository,
+                shared_artifacts=tuple(shared.artifacts),
+            )
+            for name, expected in (
+                ("config.json", scientific_config_value(config)),
+                ("expected-units.json", store.expected.model_dump(mode="json")),
+                (
+                    "expected-shared-artifacts.json",
+                    store.expected_shared.model_dump(mode="json"),
+                ),
+                ("provenance.json", provenance.model_dump(mode="json")),
+            ):
+                content, value = child_metadata[name]
+                if content != canonical_json_bytes(expected) + b"\n" or value != expected:
+                    _fail(f"screening runtime child {name} does not match its authority")
+
+            units_fd = secure_fs.open_child_directory(child_fd, "units")
+            stack.callback(os.close, units_fd)
+            attempts_fd = secure_fs.open_child_directory(child_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            anchored_identities = {
+                "run": secure_fs.directory_identity(child_fd),
+                "units": secure_fs.directory_identity(units_fd),
+                "attempts": secure_fs.directory_identity(attempts_fd),
+            }
+            # Pin the result namespaces from the same retained child descriptor
+            # used for every metadata and artifact read.  Reopening the textual
+            # path is permitted only to compare identities before any result
+            # bytes are read through RunStore.
+            current_run_fd = secure_fs.open_directory_chain(store.run_dir)
+            stack.callback(os.close, current_run_fd)
+            if (
+                secure_fs.directory_identity(current_run_fd)
+                != anchored_identities["run"]
+            ):
+                _fail("screening runtime child result path changed before pinning")
+            current_units_fd = secure_fs.open_child_directory(current_run_fd, "units")
+            stack.callback(os.close, current_units_fd)
+            current_attempts_fd = secure_fs.open_child_directory(
+                current_run_fd, "attempts"
+            )
+            stack.callback(os.close, current_attempts_fd)
+            if {
+                "run": secure_fs.directory_identity(current_run_fd),
+                "units": secure_fs.directory_identity(current_units_fd),
+                "attempts": secure_fs.directory_identity(current_attempts_fd),
+            } != anchored_identities:
+                _fail("screening runtime child result path changed before pinning")
+            store._result_directory_identities = anchored_identities
+            fold = ScreeningRuntimeFold(
+                family_id=child_manifest.heldout_family_id,
+                config=config,
+                store=store,
+                data_keys=data_keys,
+                data=data,
+                model_keys=model_keys,
+                models=models,
+                shared_plan=shared,
+            )
+            # Existing partial/complete write-once state is valid input to a
+            # resumable reload, but every entry must pass the fd-pinned RunStore
+            # schema and identity validators before the child descriptor closes.
+            _validate_result_namespaces((fold,))
+            return fold
     except TrainingDataArtifactError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         _fail("screening runtime child inventory failed closed", exc)
-    if expected_child != child_manifest:
-        _fail("screening runtime child inventory does not match the readiness manifest")
-    store = RunStore(
-        raw_root,
-        config,
-        repository=repository,
-        shared_artifacts=tuple(shared.artifacts),
-    )
-    for name, expected in (
-        ("config.json", scientific_config_value(config)),
-        ("expected-units.json", store.expected.model_dump(mode="json")),
-        ("expected-shared-artifacts.json", store.expected_shared.model_dump(mode="json")),
-        ("provenance.json", provenance.model_dump(mode="json")),
-    ):
-        content, value = child_metadata[name]
-        if content != canonical_json_bytes(expected) + b"\n" or value != expected:
-            _fail(f"screening runtime child {name} does not match its authority")
-    return ScreeningRuntimeFold(
-        family_id=child_manifest.heldout_family_id,
-        config=config,
-        store=store,
-        data_keys=data_keys,
-        data=data,
-        model_keys=model_keys,
-        models=models,
-        shared_plan=shared,
-    )
 
 
 
@@ -811,8 +1056,12 @@ def load_screening_runtime(
     committed = _reject_symlink_chain(Path(manifest_path))
     root = _reject_symlink_chain(Path(raw_root))
     repository_path = _reject_symlink_chain(Path(repository)).resolve(strict=True)
-    if not repository_path.is_dir():
-        _fail("screening runtime repository must be a directory")
+    try:
+        repository_path = canonical_screening_repository(
+            repository_path, authority_root=ROOT
+        )
+    except TrainingDataArtifactError as exc:
+        _fail(str(exc), exc)
     manifest_bytes, manifest, manifest_parent_identity, manifest_file_identity = _manifest_bytes(
         committed, manifest_bytes_sha256
     )
@@ -827,7 +1076,10 @@ def load_screening_runtime(
         if raw_manifest_bytes != manifest_bytes or raw_value != manifest.model_dump(mode="json"):
             _fail("raw-root readiness manifest differs from the pinned committed manifest")
         _assert_tree_shape_at(root_fd, manifest)
-        tree_sha256 = _walk_tree_digest_at(root_fd)
+        tree_sha256 = _walk_tree_digest_at(
+            root_fd,
+            canonical_child_ids=manifest.child_run_ids,
+        )
         raw_root_identity, child_identities = _tree_identities_at(root_fd, manifest)
     finally:
         os.close(root_fd)
@@ -846,12 +1098,22 @@ def load_screening_runtime(
     )
     apply_runtime_policy(configs[0].device_policy)
     captured_provenance = capture_system_provenance(repository_path, configs[0].device_policy)
-    if supplied_provenance is not None and provenance_identity_sha256(
-        supplied_provenance
-    ) != provenance_identity_sha256(captured_provenance):
-        _fail("supplied provenance identity differs from the current captured provenance")
-    if provenance_identity_sha256(captured_provenance) != manifest.provenance_sha256:
-        _fail("screening runtime provenance identity differs from readiness authority")
+    try:
+        validate_screening_provenance(
+            manifest.provenance,
+            captured_provenance,
+            repository=repository_path,
+            manifest_bytes=manifest_bytes,
+        )
+        if supplied_provenance is not None:
+            validate_screening_provenance(
+                supplied_provenance,
+                captured_provenance,
+                repository=repository_path,
+                manifest_bytes=manifest_bytes,
+            )
+    except TrainingDataArtifactError as exc:
+        _fail(f"current captured screening provenance rejected: {exc}", exc)
     # Preserve the first-writer timestamp only after current policy/provenance
     # identity has been independently re-established.
     provenance_value = manifest.provenance
@@ -878,6 +1140,7 @@ def load_screening_runtime(
     finally:
         os.close(fold_root_fd)
     _assert_global_inventory(manifest, folds)
+    result_namespace_snapshot = _result_namespace_snapshot(folds)
     stores = tuple(fold.store for fold in folds)
     for store in stores:
         store._execution_ready = False
@@ -895,6 +1158,8 @@ def load_screening_runtime(
         child_identities,
         manifest_parent_identity,
         manifest_file_identity,
+        folds,
+        result_namespace_snapshot,
     )
     return ScreeningRuntime(
         manifest_path=committed,
@@ -911,6 +1176,7 @@ def load_screening_runtime(
         child_identities=child_identities,
         manifest_parent_identity=manifest_parent_identity,
         manifest_file_identity=manifest_file_identity,
+        result_namespace_snapshot=result_namespace_snapshot,
     )
 
 

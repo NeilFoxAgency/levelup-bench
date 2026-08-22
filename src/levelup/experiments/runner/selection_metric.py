@@ -7,7 +7,7 @@ import json
 import statistics
 from dataclasses import InitVar, dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 from levelup.experiments.runner.config import (
     ExperimentConfig,
@@ -59,11 +59,41 @@ class SelectionAuthority:
     training_core_task_identities: tuple[
         tuple[str, tuple[tuple[str, int, int, int], ...]], ...
     ]
+    # Retained immutable bytes let a pinned runtime revalidate the authority
+    # without reopening any source path after load.
+    protocol_bytes: bytes = b""
+    screening_candidates_bytes: bytes = b""
+    task_manifest_bytes: bytes = b""
     _construction_token: InitVar[object | None] = None
 
     def __post_init__(self, _construction_token: object | None) -> None:
         if _construction_token is not _AUTHORITY_CONSTRUCTION_TOKEN:
             raise ValueError("selection authority must be loaded from frozen files")
+
+    @property
+    def source_bytes(self) -> dict[str, bytes]:
+        """Return the immutable authority bytes retained at load time."""
+
+        if not all(
+            isinstance(value, bytes)
+            for value in (
+                self.protocol_bytes,
+                self.screening_candidates_bytes,
+                self.task_manifest_bytes,
+            )
+        ) or not all(
+            (value for value in (
+                self.protocol_bytes,
+                self.screening_candidates_bytes,
+                self.task_manifest_bytes,
+            ))
+        ):
+            raise ValueError("selection authority does not retain all source bytes")
+        return {
+            "protocol": self.protocol_bytes,
+            "screening_candidates": self.screening_candidates_bytes,
+            "task_manifest": self.task_manifest_bytes,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +132,8 @@ class SelectionMetricSpec:
     action_formula: str = ACTION_FORMULA
     oracle_policy: str = ORACLE_POLICY
     require_shared_preparation: bool = True
+    require_candidate_generation_identity: bool = False
+    require_zero_local_training: bool = False
     _construction_token: InitVar[object | None] = None
 
     def __post_init__(self, _construction_token: object | None) -> None:
@@ -199,16 +231,36 @@ def load_selection_authority(
     protocol_path: Path,
     screening_candidates_path: Path,
     task_manifest_path: Path,
+    *,
+    source_bytes: Mapping[str, bytes] | None = None,
 ) -> SelectionAuthority:
     """Load and cross-check the actual frozen development-selection files."""
 
-    protocol_bytes = protocol_path.read_bytes()
+    if source_bytes is not None and set(source_bytes) != {
+        "protocol",
+        "screening_candidates",
+        "task_manifest",
+    }:
+        raise ValueError("authority source bytes must contain exactly the three frozen sources")
+    protocol_bytes = (
+        protocol_path.read_bytes()
+        if source_bytes is None
+        else bytes(source_bytes["protocol"])
+    )
     protocol_sha256 = hashlib.sha256(protocol_bytes).hexdigest()
     protocol = json.loads(protocol_bytes)
-    screening_bytes = screening_candidates_path.read_bytes()
+    screening_bytes = (
+        screening_candidates_path.read_bytes()
+        if source_bytes is None
+        else bytes(source_bytes["screening_candidates"])
+    )
     screening_sha256 = hashlib.sha256(screening_bytes).hexdigest()
     screening = json.loads(screening_bytes)
-    task_manifest_bytes = task_manifest_path.read_bytes()
+    task_manifest_bytes = (
+        task_manifest_path.read_bytes()
+        if source_bytes is None
+        else bytes(source_bytes["task_manifest"])
+    )
     task_manifest_sha256 = hashlib.sha256(task_manifest_bytes).hexdigest()
     task_manifest = json.loads(task_manifest_bytes)
     if not all(isinstance(payload, dict) for payload in (protocol, screening, task_manifest)):
@@ -534,6 +586,9 @@ def load_selection_authority(
         screening_replicates=screening_replicates,
         heldout_task_ids=tuple(heldout_task_ids),
         training_core_task_identities=tuple(training_core_task_identities),
+        protocol_bytes=protocol_bytes,
+        screening_candidates_bytes=screening_bytes,
+        task_manifest_bytes=task_manifest_bytes,
         _construction_token=_AUTHORITY_CONSTRUCTION_TOKEN,
     )
 
@@ -559,6 +614,7 @@ def build_selection_metric_spec(
         authority.protocol_path,
         authority.screening_candidates_path,
         authority.task_manifest_path,
+        source_bytes=authority.source_bytes,
     )
     if authority != canonical_authority:
         raise ValueError("selection authority differs from the canonical frozen files")
@@ -646,47 +702,39 @@ def build_selection_metric_spec(
         or seed_policy.replicate_stride != 100_000
     ):
         raise ValueError("selection child seed policy drifted from the frozen LOFO fold")
-    from levelup.experiments.milestone6_phase2 import (
-        _heldout_identity,
-        _manifest_tasks,
-        _training_identity,
-    )
-
-    manifest_entries = _manifest_tasks()
-    expected_training_tasks = tuple(
-        sorted(
-            (
-                _training_identity(entry)
-                for entry in manifest_entries
-                if entry["family"] != heldout_family and "training_core" in entry["roles"]
-            ),
-            key=lambda task: task.task_id,
-        )
-    )
-    expected_heldout_tasks = tuple(
-        sorted(
-            (
-                _heldout_identity(entry)
-                for entry in manifest_entries
-                if entry["family"] == heldout_family and "training_core" in entry["roles"]
-            ),
-            key=lambda task: task.task_id,
-        )
-    )
-    if (
-        tuple(sorted(config.split.development_tasks, key=lambda task: task.task_id))
-        != expected_training_tasks
-        or tuple(sorted(config.split.validation_tasks, key=lambda task: task.task_id))
-        != expected_heldout_tasks
-    ):
+    expected_training = {
+        task_id: (task_index, generator_seed, environment_reset_seed)
+        for family_id, identities in authority.training_core_task_identities
+        if family_id != heldout_family
+        for task_id, task_index, generator_seed, environment_reset_seed in identities
+    }
+    expected_heldout = {
+        task_id: (task_index, generator_seed, environment_reset_seed)
+        for family_id, identities in authority.training_core_task_identities
+        if family_id == heldout_family
+        for task_id, task_index, generator_seed, environment_reset_seed in identities
+    }
+    actual_training = {
+        task.task_id: (task.task_index, task.generator_seed, task.environment_reset_seed)
+        for task in config.split.development_tasks
+    }
+    actual_heldout = {
+        task.task_id: (task.task_index, task.generator_seed, task.environment_reset_seed)
+        for task in config.split.validation_tasks
+    }
+    if actual_training != expected_training or actual_heldout != expected_heldout:
         raise ValueError("selection child task identities drift from the frozen LOFO fold")
     selected_conditions = [
         condition for condition in config.conditions if condition.condition_id == condition_id
     ]
+    expected_exposure_tasks = set(expected_training) if condition_id not in {
+        "A0-no-probe-uniform",
+        "A1-paid-probe-uniform",
+    } else set()
     if (
         len(selected_conditions) != 1
         or set(selected_conditions[0].exposure.train_task_ids)
-        != {task.task_id for task in expected_training_tasks}
+        != expected_exposure_tasks
     ):
         raise ValueError("selection condition training exposure drifted from the LOFO fold")
     allowed_tasks = dict(authority.heldout_task_ids)
@@ -716,6 +764,11 @@ def build_selection_metric_spec(
             expected_keys_by_unit.setdefault(unit_id, []).append(
                 (artifact.kind, artifact.key_id)
             )
+    fixed_conditions = {
+        "A0-no-probe-uniform",
+        "A1-paid-probe-uniform",
+    }
+    require_shared_preparation = condition_id not in fixed_conditions
     learned_bases = (
         "B1-clean-global-optimum-frequency",
         "B2-global-listwise-optimum",
@@ -726,9 +779,14 @@ def build_selection_metric_spec(
         for base in learned_bases
         if condition_id == base or condition_id.startswith(f"{base}--")
     ]
-    if len(matching_bases) != 1:
+    if require_shared_preparation and len(matching_bases) != 1:
         raise ValueError("selection condition is not a frozen learned-condition variant")
-    condition_base = matching_bases[0]
+    condition_base = matching_bases[0] if require_shared_preparation else None
+    if not require_shared_preparation and any(
+        expected_keys_by_unit.get(unit.unit_id)
+        for unit in planned
+    ):
+        raise ValueError("fixed-control selection units cannot consume shared artifacts")
     artifacts_by_unit = {
         unit.unit_id: [
             artifact
@@ -739,7 +797,7 @@ def build_selection_metric_spec(
     }
     for unit in planned:
         artifacts = artifacts_by_unit[unit.unit_id]
-        if any(
+        if require_shared_preparation and any(
             artifact.owner_family_id != heldout_family
             or artifact.owner_fold_id != f"lofo-{heldout_family}"
             or artifact.owner_replicate != unit.key.replicate
@@ -773,10 +831,17 @@ def build_selection_metric_spec(
                 key=unit.key,
                 seeds=unit.seeds,
                 exposure_manifest_sha256=unit.exposure_manifest_sha256,
-                shared_key_ids=tuple(sorted(expected_keys_by_unit.get(unit.unit_id, ()))),
+                shared_key_ids=(
+                    tuple(sorted(expected_keys_by_unit.get(unit.unit_id, ())))
+                    if require_shared_preparation
+                    else ()
+                ),
             )
             for unit in planned
         ),
+        require_shared_preparation=require_shared_preparation,
+        require_candidate_generation_identity=True,
+        require_zero_local_training=True,
         _construction_token=_SPEC_CONSTRUCTION_TOKEN,
     )
 
@@ -812,6 +877,8 @@ def merge_selection_metric_specs(
         "action_formula",
         "oracle_policy",
         "require_shared_preparation",
+        "require_candidate_generation_identity",
+        "require_zero_local_training",
         "protocol_sha256",
         "screening_candidates_sha256",
         "task_manifest_sha256",
@@ -847,6 +914,8 @@ def merge_selection_metric_specs(
         authority_family_ids_sha256=first.authority_family_ids_sha256,
         expected_units=tuple(unit for spec in materialized for unit in spec.expected_units),
         require_shared_preparation=first.require_shared_preparation,
+        require_candidate_generation_identity=first.require_candidate_generation_identity,
+        require_zero_local_training=first.require_zero_local_training,
         _construction_token=_SPEC_CONSTRUCTION_TOKEN,
     )
 
@@ -887,8 +956,15 @@ def restricted_interactions(record: UnitRecord, spec: SelectionMetricSpec) -> in
         actual_keys = tuple(sorted((item.kind, item.key_id) for item in record.shared_artifacts))
         if actual_keys != expected.shared_key_ids:
             raise ValueError("selection unit shared keys drift from the frozen artifact plan")
-        if record.candidate_generation_sha256 is None:
-            raise ValueError("selection units require a candidate-generation identity")
+    elif spec.require_zero_local_training and record.accounting.training != PhaseAccounting():
+        raise ValueError("fixed-control selection units cannot contain unit-local training")
+    elif record.shared_artifact is not None or record.shared_artifacts:
+        raise ValueError("fixed-control selection units cannot carry shared artifacts")
+    if (
+        (spec.require_shared_preparation or spec.require_candidate_generation_identity)
+        and record.candidate_generation_sha256 is None
+    ):
+        raise ValueError("selection units require a candidate-generation identity")
 
     probe_actions = record.accounting.probes.actions
     search_actions = record.accounting.search.actions

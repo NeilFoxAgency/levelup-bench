@@ -44,6 +44,9 @@ from levelup.experiments.milestone6_phase2_screening_preparation import (
     build_screening_shared_plan,
     materialize_screening_data,
 )
+from levelup.experiments.milestone6_phase2_screening_provenance import (
+    canonical_screening_repository,
+)
 from levelup.experiments.runner.config import (
     ExperimentConfig,
     canonical_json_bytes,
@@ -651,6 +654,7 @@ def prepare_screening_readiness(
 ) -> PreparedScreeningReadiness:
     """Materialize all six frozen development folds and publish one manifest."""
 
+    repository_path = canonical_screening_repository(repository, authority_root=ROOT)
     snapshot = _authority_snapshot()
     plan = build_screening_readiness_plan()
     configs = screening_child_configs()
@@ -697,7 +701,13 @@ def prepare_screening_readiness(
         raise TrainingDataArtifactError("readiness output root cannot be a symlink")
     _safe_dir(root, create=True)
     apply_runtime_policy(configs[0].device_policy)
-    captured_provenance = capture_system_provenance(repository, configs[0].device_policy)
+    captured_provenance = capture_system_provenance(
+        repository_path, configs[0].device_policy
+    )
+    if captured_provenance.git_dirty or captured_provenance.git_diff_sha256 is not None:
+        raise TrainingDataArtifactError(
+            "screening readiness preparation requires a clean repository"
+        )
     if provenance is not None and provenance_identity_sha256(
         captured_provenance
     ) != provenance_identity_sha256(provenance):
@@ -802,7 +812,7 @@ def prepare_screening_readiness(
         store = RunStore(
             root,
             config,
-            repository=repository,
+            repository=repository_path,
             shared_artifacts=tuple(shared.artifacts),
         )
         _write_run_store_structure(store, provenance)

@@ -175,6 +175,7 @@ def fake_backend(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     provenance_calls: list[str] = []
     policy_calls: list[str] = []
     provenance = PROVENANCE
+    monkeypatch.setattr(readiness, "ROOT", tmp_path)
 
     def cached_plan():
         global _PLAN_CACHE
@@ -310,6 +311,38 @@ def test_six_child_run_dirs_have_one_run_id_and_exact_readiness_inventory(
     assert result.search_executed is False
     assert result.outcomes_present is False
     assert result.selection_performed is False
+
+
+def test_dirty_capture_is_rejected_before_any_materializer_call(
+    fake_backend,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _root, calls, _provenance, _captures, _policies = fake_backend
+    dirty = PROVENANCE.model_copy(update={"git_dirty": True, "git_diff_sha256": "c" * 64})
+    monkeypatch.setattr(readiness, "capture_system_provenance", lambda *_args: dirty)
+    with pytest.raises(TrainingDataArtifactError, match="requires a clean repository"):
+        readiness.prepare_screening_readiness(tmp_path, repository=tmp_path)
+    assert calls == []
+
+
+def test_preparation_rejects_repository_distinct_from_authority_checkout(
+    fake_backend,
+    tmp_path: Path,
+) -> None:
+    _root, calls, _provenance, captures, _policies = fake_backend
+    other_repository = tmp_path / "other-repository"
+    other_repository.mkdir()
+    with pytest.raises(
+        TrainingDataArtifactError,
+        match="canonical authority checkout",
+    ):
+        readiness.prepare_screening_readiness(
+            tmp_path / "output",
+            repository=other_repository,
+        )
+    assert calls == []
+    assert captures == []
 
 
 def test_all_folds_share_exact_provenance_and_sorted_identity_order(

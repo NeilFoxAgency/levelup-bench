@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import shutil
+import subprocess
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,7 +16,13 @@ import pytest
 import levelup.experiments.milestone6_phase2_screening_runtime as runtime
 from levelup.experiments.runner.config import DevicePolicy, canonical_json_bytes
 from levelup.experiments.runner.execution import ExperimentRunner
-from levelup.experiments.runner.records import SystemProvenance
+from levelup.experiments.runner.records import (
+    ResourceAccounting,
+    SystemProvenance,
+    UnitOutcome,
+    UnitRecord,
+)
+from levelup.experiments.runner.storage import RunStore
 from levelup.experiments.runner.training_data_artifacts import TrainingDataArtifactError
 
 PROVENANCE = SystemProvenance(
@@ -54,9 +61,19 @@ def _tree_snapshot(raw_root: Path, manifest):
 def _tree_digest(raw_root: Path) -> str:
     fd = runtime.secure_fs.open_directory_chain(raw_root)
     try:
-        return runtime._walk_tree_digest_at(fd)
+        return runtime._walk_tree_digest_at(fd, canonical_child_ids=("child",))
     finally:
         os.close(fd)
+
+
+def _git(repository: Path, *args: str) -> str:
+    return subprocess.run(
+        ("git", *args),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
 
 
 class _Manifest:
@@ -72,8 +89,9 @@ class _Manifest:
     protocol_sha256 = "1" * 64
     screening_candidates_sha256 = "2" * 64
     task_manifest_sha256 = "3" * 64
-    provenance_sha256 = runtime.provenance_identity_sha256(PROVENANCE)
-    provenance = PROVENANCE
+    def __init__(self, provenance: SystemProvenance = PROVENANCE) -> None:
+        self.provenance = provenance
+        self.provenance_sha256 = runtime.provenance_identity_sha256(provenance)
 
     def model_dump(self, **_kwargs):
         return {
@@ -85,10 +103,19 @@ class _Manifest:
         }
 
 
-def _fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    manifest = _Manifest()
+def _fixture(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    provenance: SystemProvenance = PROVENANCE,
+):
+    monkeypatch.setattr(runtime, "ROOT", tmp_path)
+    manifest = _Manifest(provenance)
     body = canonical_json_bytes(manifest.model_dump()) + b"\n"
-    committed = tmp_path / "committed.json"
+    committed = (
+        tmp_path / "experiments" / "milestone6_phase2_screening_readiness.json"
+    )
+    committed.parent.mkdir()
     raw_root = tmp_path / "raw"
     raw_root.mkdir()
     (raw_root / "child" / "units").mkdir(parents=True)
@@ -143,6 +170,13 @@ def _fixture(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(runtime, "_assert_global_inventory", lambda *_args: None)
     monkeypatch.setattr(runtime, "_recheck_manifest_and_tree", lambda *_args: None)
+
+    def validate_for_fixture(preparation, current, **_kwargs):
+        if current.git_dirty or current.git_diff_sha256 is not None:
+            raise TrainingDataArtifactError("screening runtime provenance changed")
+        if preparation.git_commit_sha != current.git_commit_sha:
+            raise TrainingDataArtifactError("screening runtime provenance changed")
+    monkeypatch.setattr(runtime, "validate_screening_provenance", validate_for_fixture)
     return committed, raw_root, source, body, config
 
 
@@ -154,6 +188,22 @@ def test_manifest_byte_pin_is_checked_before_loading(monkeypatch, tmp_path):
             raw_root,
             tmp_path,
             manifest_bytes_sha256="0" * 64,
+            provenance=PROVENANCE,
+        )
+
+
+def test_runtime_rejects_repository_distinct_from_authority_checkout(
+    monkeypatch, tmp_path
+):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    other_repository = tmp_path / "other-repository"
+    other_repository.mkdir()
+    with pytest.raises(TrainingDataArtifactError, match="canonical authority checkout"):
+        runtime.load_screening_runtime(
+            committed,
+            raw_root,
+            other_repository,
+            manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
             provenance=PROVENANCE,
         )
 
@@ -206,6 +256,7 @@ def test_load_returns_locked_stores_and_runner_cannot_execute(monkeypatch, tmp_p
     committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
     monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
     monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    monkeypatch.setattr(runtime, "validate_screening_provenance", lambda *_args, **_kwargs: None)
     handle = runtime.load_screening_runtime(
         committed,
         raw_root,
@@ -236,7 +287,105 @@ def test_successful_required_recheck_opens_all_store_gates(monkeypatch, tmp_path
     )
     handle.recheck_before_execution()
     assert all(fold.store._execution_ready is True for fold in handle.folds)
-    assert capture_calls == ["capture", "capture"]
+    assert capture_calls == ["capture", "capture", "capture"]
+
+
+def test_raw_prepublication_manifest_loads_but_cannot_activate(monkeypatch, tmp_path):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    copied = tmp_path / "raw-prepublication-readiness.json"
+    copied.write_bytes(committed.read_bytes())
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: PROVENANCE)
+    monkeypatch.setattr(runtime, "validate_screening_provenance", lambda *_args, **_kwargs: None)
+    handle = runtime.load_screening_runtime(
+        copied,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    with pytest.raises(
+        TrainingDataArtifactError,
+        match="canonical committed readiness manifest",
+    ):
+        handle.recheck_before_execution()
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
+
+
+def test_runtime_load_and_recheck_accept_exact_artifact_publication_child(
+    monkeypatch,
+    tmp_path,
+):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    _git(repository, "init", "-q")
+    _git(repository, "config", "user.email", "test@example.invalid")
+    _git(repository, "config", "user.name", "Test")
+    (repository / "README").write_text("preparation\n")
+    _git(repository, "add", ".")
+    _git(repository, "commit", "-qm", "preparation")
+    preparation_sha = _git(repository, "rev-parse", "HEAD")
+    preparation = PROVENANCE.model_copy(update={"git_commit_sha": preparation_sha})
+
+    fixture_root = tmp_path / "fixture"
+    fixture_root.mkdir()
+    committed, raw_root, _source, body, _config = _fixture(
+        monkeypatch,
+        fixture_root,
+        provenance=preparation,
+    )
+    monkeypatch.setattr(runtime, "ROOT", repository)
+    canonical = (
+        repository / "experiments" / "milestone6_phase2_screening_readiness.json"
+    )
+    canonical.parent.mkdir()
+    canonical.write_bytes(body)
+    _git(repository, "add", "experiments/milestone6_phase2_screening_readiness.json")
+    _git(repository, "commit", "-qm", "publish readiness")
+    publication_sha = _git(repository, "rev-parse", "HEAD")
+    current = PROVENANCE.model_copy(update={"git_commit_sha": publication_sha})
+    captures: list[str] = []
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(
+        runtime,
+        "capture_system_provenance",
+        lambda *_args: captures.append("capture") or current,
+    )
+    from levelup.experiments.milestone6_phase2_screening_provenance import (
+        validate_screening_provenance,
+    )
+
+    monkeypatch.setattr(runtime, "validate_screening_provenance", validate_screening_provenance)
+    handle = runtime.load_screening_runtime(
+        canonical,
+        raw_root,
+        repository,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+    )
+    handle.recheck_before_execution()
+    assert captures == ["capture", "capture", "capture"]
+    assert all(fold.store._execution_ready is True for fold in handle.folds)
+
+
+def test_post_activation_provenance_change_clears_all_gates(monkeypatch, tmp_path):
+    committed, raw_root, _source, body, _config = _fixture(monkeypatch, tmp_path)
+    changed = PROVENANCE.model_copy(
+        update={"git_dirty": True, "git_diff_sha256": "b" * 64}
+    )
+    captures = [PROVENANCE, PROVENANCE, changed]
+    monkeypatch.setattr(runtime, "apply_runtime_policy", lambda *_args: None)
+    monkeypatch.setattr(runtime, "capture_system_provenance", lambda *_args: captures.pop(0))
+    handle = runtime.load_screening_runtime(
+        committed,
+        raw_root,
+        tmp_path,
+        manifest_bytes_sha256=hashlib.sha256(body).hexdigest(),
+        provenance=PROVENANCE,
+    )
+    with pytest.raises(TrainingDataArtifactError, match="provenance changed"):
+        handle.recheck_before_execution()
+    assert captures == []
+    assert all(fold.store._execution_ready is False for fold in handle.folds)
 
 
 def test_post_activation_recheck_failure_clears_all_gates(monkeypatch, tmp_path):
@@ -339,6 +488,7 @@ def test_recheck_detects_post_load_tree_tampering(monkeypatch, tmp_path):
     # Use the real tree/authority recheck for this test; the fixture's fake
     # inventory and activation boundary remain isolated.
     monkeypatch.undo()
+    monkeypatch.setattr(runtime, "validate_screening_provenance", lambda *_args, **_kwargs: None)
     manifest = _Manifest()
     monkeypatch.setattr(
         runtime,
@@ -510,3 +660,161 @@ def test_recheck_rejects_same_byte_committed_manifest_replacement(monkeypatch, t
     committed.write_bytes(body)
     with pytest.raises(TrainingDataArtifactError, match="committed manifest identity changed"):
         handle.recheck_before_execution()
+
+
+def test_mutable_result_entries_do_not_change_prepared_tree_digest(tmp_path):
+    raw_root = tmp_path / "raw"
+    (raw_root / "child" / "units").mkdir(parents=True)
+    (raw_root / "child" / "attempts").mkdir()
+    before = _tree_digest(raw_root)
+    (raw_root / "child" / "units" / ("a" * 64 + ".json")).write_bytes(b"partial")
+    (raw_root / "child" / "attempts" / ("a" * 64 + ".attempt-0001.json")).write_bytes(
+        b"attempt"
+    )
+    assert _tree_digest(raw_root) == before
+
+
+def test_result_namespace_identity_is_bound_by_prepared_tree_digest(tmp_path):
+    raw_root = tmp_path / "raw"
+    units = raw_root / "child" / "units"
+    units.mkdir(parents=True)
+    (raw_root / "child" / "attempts").mkdir()
+    before = _tree_digest(raw_root)
+    replacement = raw_root / "child" / "units-replacement"
+    units.rename(replacement)
+    units.mkdir()
+    assert _tree_digest(raw_root) != before
+
+
+def test_unexpected_result_entry_names_fail_closed(tmp_path):
+    namespace = tmp_path / "units"
+    namespace.mkdir()
+    (namespace / "unexpected.json").write_bytes(b"{}")
+    fd = runtime.secure_fs.open_directory_chain(namespace)
+    try:
+        with pytest.raises(TrainingDataArtifactError, match="unexpected unit result"):
+            runtime._assert_result_namespace_shape_at(fd, "units", {"a" * 64})
+    finally:
+        os.close(fd)
+
+
+def test_symlink_result_entry_fails_closed(tmp_path):
+    namespace = tmp_path / "attempts"
+    namespace.mkdir()
+    target = tmp_path / "target.json"
+    target.write_bytes(b"{}")
+    (namespace / ("a" * 64 + ".attempt-0001.json")).symlink_to(target)
+    fd = runtime.secure_fs.open_directory_chain(namespace)
+    try:
+        with pytest.raises(TrainingDataArtifactError, match="namespace is unsafe"):
+            runtime._assert_result_namespace_shape_at(fd, "attempts", {"a" * 64})
+    finally:
+        os.close(fd)
+
+
+def test_partial_and_complete_result_state_is_validated_while_locked():
+    calls: list[str] = []
+
+    class Store:
+        run_id = "fold"
+        _execution_ready = False
+        _result_directory_identities = None
+        expected = SimpleNamespace(units=())
+
+        def _capture_result_directory_identities(self):
+            calls.append("identities")
+            return {"run": (1, 1), "units": (1, 2), "attempts": (1, 3)}
+
+        def completed_records(self):
+            calls.append("completed")
+            return ("complete",)
+
+        def attempt_records(self):
+            calls.append("attempts")
+            return ("partial",)
+
+    runtime._validate_result_namespaces((SimpleNamespace(store=Store()),))
+    assert calls == ["identities", "completed", "attempts"]
+
+
+def test_corrupt_result_record_fails_closed_through_store_api():
+    class Store:
+        run_id = "fold"
+        _execution_ready = False
+        _result_directory_identities = None
+
+        def _capture_result_directory_identities(self):
+            return {"run": (1, 1), "units": (1, 2), "attempts": (1, 3)}
+
+        def completed_records(self):
+            raise RuntimeError("invalid artifact")
+
+        def attempt_records(self):
+            return ()
+
+    with pytest.raises(TrainingDataArtifactError, match="result state is invalid"):
+        runtime._validate_result_namespaces((SimpleNamespace(store=Store()),))
+
+
+def test_real_locked_store_resumes_valid_result_and_snapshot_detects_replacement(
+    tmp_path: Path,
+) -> None:
+    from levelup.experiments.milestone6_phase2_screening import (
+        screening_child_configs,
+    )
+
+    config = screening_child_configs()[0]
+    store = RunStore(tmp_path, config, repository=tmp_path)
+    store.units_dir.mkdir(parents=True)
+    store.attempts_dir.mkdir()
+    store._result_directory_identities = store._capture_result_directory_identities()
+    planned = next(
+        unit
+        for unit in store.expected.units
+        if unit.key.condition_id == "A0-no-probe-uniform"
+    )
+    record = UnitRecord(
+        run_id=store.run_id,
+        config_sha256=store.config_sha256,
+        unit_id=planned.unit_id,
+        key=planned.key,
+        seeds=planned.seeds,
+        exposure_manifest_sha256=planned.exposure_manifest_sha256,
+        started_at_utc="2026-08-22T00:00:00+00:00",
+        finished_at_utc="2026-08-22T00:00:01+00:00",
+        elapsed_wall_seconds=1.0,
+        outcome=UnitOutcome(
+            evaluator_ran=True,
+            valid=False,
+            completed=False,
+            success=False,
+            performance_metric_id="performance_value",
+            performance_direction="minimize",
+            censored=True,
+            censoring_budget=2048,
+            censoring_reason="fixed_endpoint",
+        ),
+        accounting=ResourceAccounting(),
+        candidate_generation_sha256="d" * 64,
+    )
+    assert store.write_completed(record) is True
+    store._execution_ready = False
+    fold = SimpleNamespace(store=store)
+
+    runtime._validate_result_namespaces((fold,))
+    assert store._execution_ready is False
+    snapshot = runtime._result_namespace_snapshot((fold,))
+
+    changed = record.model_copy(update={"elapsed_wall_seconds": 2.0})
+    (store.units_dir / f"{planned.unit_id}.json").write_bytes(
+        canonical_json_bytes(changed.model_dump(mode="json")) + b"\n"
+    )
+    with pytest.raises(TrainingDataArtifactError, match="snapshot changed"):
+        runtime._validate_result_namespaces((fold,), snapshot)
+
+    resumed = RunStore(tmp_path, config, repository=tmp_path)
+    resumed._result_directory_identities = resumed._capture_result_directory_identities()
+    resumed_fold = SimpleNamespace(store=resumed)
+    runtime._validate_result_namespaces((resumed_fold,))
+    assert resumed.completed_records() == (changed,)
+    assert resumed._execution_ready is False

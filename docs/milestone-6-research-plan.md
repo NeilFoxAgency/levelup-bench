@@ -195,17 +195,28 @@ The committed implementation keeps the raw root, fold child, data namespaces, mo
 artifact directories, and tensor directories pinned by POSIX descriptors for the complete dependent
 read. Descendants are opened relative to those descriptors with no symlink following; later path
 replacement cannot redirect an inventory or tensor read. The non-mocked
-`test_real_fold_model_load_stays_on_detached_pinned_tree` regression materializes one exact fold
-containing five evidence artifacts, fifteen same-data views, and sixty trained models. It replaces
-the textual child path after the fd-native data inventory is loaded, then reloads all sixty
-model/tensor artifacts from the retained descriptors rather than the replacement tree. This is a
-storage-boundary test only and records no comparative screening outcome.
+`test_real_fold_model_load_fails_closed_after_detached_pinned_tree` regression materializes one
+exact fold containing five evidence artifacts, fifteen same-data views, and sixty trained models.
+It replaces the textual child path after the fd-native data inventory is loaded, reloads all sixty
+model/tensor artifacts from the retained descriptors without reading the replacement tree, and
+then refuses to bind the executable result namespaces because the child path identity changed.
+This is a storage-boundary test only and records no comparative screening outcome.
 
 Loading alone leaves all six child stores non-executable. Immediately before execution, the
 runtime must recapture current repository and device provenance, recheck the authority bytes and
-complete prepared tree, and only then activate all six stores transactionally. A failed recheck
-leaves every store locked. This gate performs no probe, training, search, evaluator, oracle,
-aggregation, selection, or comparative-result read.
+complete prepared tree, and only then activate all six stores transactionally. It recaptures the
+repository and device provenance again after activation and the final prepared-tree check, so a
+change during that interval relocks every store. Preparation
+provenance must be clean. The screening comparator accepts the same clean commit, or exactly one
+clean child commit whose complete diff is the regular `100644` readiness artifact at
+`experiments/milestone6_phase2_screening_readiness.json` and whose blob bytes equal the pinned
+manifest; all other source, documentation, merge, descendant, or dirty changes fail closed.
+The provenance repository must be the same canonical checkout that supplies the frozen authority
+files; a different clean clone cannot vouch for modified authority inputs.
+Generic `RunStore` provenance remains exact. A post-publication `--prepare` resume may therefore
+remain fail-closed rather than trying to rewrite the preparation provenance. A failed runtime
+recheck leaves every store locked. This gate performs no probe, training, search, evaluator,
+oracle, aggregation, selection, or comparative-result read.
 
 The next committed boundary executes one authorized validation unit at a time. It loads only the
 unit's declared temperature-independent model and evidence-to-view-to-model lineage, pays the
@@ -215,6 +226,32 @@ every candidate, and only then queries the optimum for typed reporting. Unit-loc
 zero. Result and attempt files are enumerated and published through pinned directory descriptors
 with write-once semantics, so post-activation path substitution and concurrent writers fail closed.
 This implementation milestone does not itself execute or inspect comparative screening outcomes.
+The immutable preparation-tree digest binds the exact `units/` and `attempts/` namespace directory
+objects but excludes their write-once descendants. A separate descriptor-relative result snapshot
+binds directory identities and timestamps plus every result filename and byte digest from runtime
+load through transactional activation. Existing partial or complete typed records are therefore
+valid on a fresh resume, while a namespace or result change during validation or activation closes
+all execution gates. A freshly loaded locked runtime also pins and validates those namespaces, so
+post-run extraction does not require activating execution.
+
+The development-only driver exposes no scientific budget, phase, seed, or selection override. It
+requires the exact six-fold, 1,520-unit-per-fold and 9,120-unit total validation matrix while every
+store is still locked, performs one transactional runtime recheck, uses one model cache per fold,
+and resumes only through the standard atomic-unit runner. A fold is not complete merely because a
+prior failure was skipped: the driver also requires its missing-unit inventory to be empty.
+Validation-only mode never activates a store. Both driver modes require the manifest argument to
+resolve to the canonical committed
+`experiments/milestone6_phase2_screening_readiness.json`; a copied or external manifest cannot
+authorize execution. The lower-level loader remains available for a read-only prepublication check
+of raw manifest bytes at the exact clean preparation commit, but that path is not an execution
+entrypoint.
+
+After all units are complete, the separate read-only extractor consumes the retained authority
+bytes and the six validated result namespaces. It requires exactly 240 records for each of the 38
+frozen variants, merges all six family specifications, and returns typed restricted-interaction
+summaries. It neither activates execution nor writes or selects a preferred method. Applying the
+already frozen advancement rule remains a distinct analysis step after the complete development
+matrix exists.
 
 ## Phase 3 - represent decisions in context
 

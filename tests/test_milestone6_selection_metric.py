@@ -109,6 +109,9 @@ def _spec(
     endpoint: int = 64,
     require_shared_preparation: bool = False,
     family_universe: tuple[str, ...] | None = None,
+    condition_id: str = "variant",
+    require_candidate_generation_identity: bool = False,
+    require_zero_local_training: bool = False,
 ) -> SelectionMetricSpec:
     if family_universe is None:
         family_universe = tuple(sorted({record.key.family_id for record in records}))
@@ -116,7 +119,7 @@ def _spec(
         _FROZEN_FAMILY_ORDER if family_universe == _FROZEN_FAMILY_ORDER else ()
     )
     return SelectionMetricSpec(
-        condition_id="variant",
+        condition_id=condition_id,
         phase="validation",
         endpoint=endpoint,
         failure_sentinel=endpoint + 1,
@@ -143,6 +146,8 @@ def _spec(
             for record in records
         ),
         require_shared_preparation=require_shared_preparation,
+        require_candidate_generation_identity=require_candidate_generation_identity,
+        require_zero_local_training=require_zero_local_training,
         _construction_token=_SPEC_CONSTRUCTION_TOKEN,
     )
 
@@ -394,6 +399,36 @@ def test_shared_selection_requires_planned_keys_candidate_hash_and_zero_local_tr
                 )
             }
         ),
+    )
+    for changed in malformed:
+        with pytest.raises(ValueError):
+            restricted_interactions(changed, spec)
+
+
+def test_fixed_control_selection_rejects_training_shared_lineage_and_missing_hash() -> None:
+    base = _record(condition_id="A0-no-probe-uniform")
+    spec = _spec(
+        (base,),
+        condition_id="A0-no-probe-uniform",
+        require_candidate_generation_identity=True,
+        require_zero_local_training=True,
+    )
+    clean = base.model_copy(
+        update={
+            "accounting": base.accounting.model_copy(update={"training": PhaseAccounting()}),
+            "candidate_generation_sha256": "e" * 64,
+        }
+    )
+    malformed = (
+        clean.model_copy(update={"candidate_generation_sha256": None}),
+        clean.model_copy(
+            update={
+                "accounting": clean.accounting.model_copy(
+                    update={"training": PhaseAccounting(optimizer_steps=1)}
+                )
+            }
+        ),
+        _shared_record(clean),
     )
     for changed in malformed:
         with pytest.raises(ValueError):

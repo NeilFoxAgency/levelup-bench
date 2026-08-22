@@ -455,7 +455,7 @@ def test_real_b1_b2_c_tuple_uses_same_data_and_objective_matched_budget(
     assert reports[B1].training_examples != 0
 
 
-def test_real_fold_model_load_stays_on_detached_pinned_tree(
+def test_real_fold_model_load_fails_closed_after_detached_pinned_tree(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -519,18 +519,21 @@ def test_real_fold_model_load_stays_on_detached_pinned_tree(
             child_identity = secure_fs.directory_identity(child_fd)
         finally:
             os.close(child_fd)
-        loaded = runtime._load_fold(
-            config,
-            child_manifest,
-            raw_root,
-            raw_fd,
-            child_identity,
-            tmp_path,
-            PROVENANCE,
-        )
+        with pytest.raises(
+            TrainingDataArtifactError,
+            match="result path changed before pinning",
+        ):
+            runtime._load_fold(
+                config,
+                child_manifest,
+                raw_root,
+                raw_fd,
+                child_identity,
+                tmp_path,
+                PROVENANCE,
+            )
     finally:
         os.close(raw_fd)
 
-    assert loaded.models == expected
     assert sentinel is not None
     assert sentinel.read_text(encoding="utf-8") == "must never be read"
