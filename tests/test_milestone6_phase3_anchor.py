@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 from dataclasses import replace
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +15,7 @@ from levelup.experiments.milestone6_phase3_anchor import (
     AnchorManifestError,
     Phase3AnchorManifest,
     _conditions_by_id,
+    _validate_unit_bytes,
     build_phase3_anchor_manifest,
     load_committed_phase3_anchor_manifest_bytes,
     validate_phase3_anchor_manifest,
@@ -24,6 +26,13 @@ from levelup.experiments.milestone6_phase3_protocol import (
     load_phase3_protocol,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.records import (
+    ResourceAccounting,
+    UnitKey,
+    UnitOutcome,
+    UnitRecord,
+    UnitSeeds,
+)
 
 FAMILIES = ("plain", "battery", "cooldown", "heat", "momentum", "combo")
 BASES = (
@@ -47,6 +56,102 @@ def test_committed_anchor_authority_is_canonical_and_exact() -> None:
     assert hashlib.sha256(content).hexdigest() == (
         "8e8e1650f1c6a2e9cc8b92bcbdc0849a4ad352d050cfa4b22954ba80fe89b254"
     )
+
+
+def _legacy_record_fixture() -> tuple[UnitRecord, object, object]:
+    key = UnitKey(
+        phase="validation",
+        condition_id="legacy-condition",
+        family_id="plain",
+        task_id="legacy-task",
+        task_index=0,
+        replicate=0,
+    )
+    seeds = UnitSeeds(
+        model_seed=1,
+        environment_seed=2,
+        probe_seed=3,
+        search_seed=4,
+        data_order_seed=5,
+    )
+    record = UnitRecord(
+        run_id="legacy-run",
+        config_sha256="a" * 64,
+        unit_id="b" * 64,
+        key=key,
+        seeds=seeds,
+        exposure_manifest_sha256="c" * 64,
+        started_at_utc=datetime(2026, 1, 1, tzinfo=UTC),
+        finished_at_utc=datetime(2026, 1, 1, tzinfo=UTC),
+        elapsed_wall_seconds=0.0,
+        outcome=UnitOutcome(
+            evaluator_ran=True,
+            valid=True,
+            completed=True,
+            success=True,
+            performance_metric_id="elapsed_steps",
+            performance_value=1.0,
+            performance_direction="minimize",
+        ),
+        accounting=ResourceAccounting(),
+    )
+    planned = SimpleNamespace(
+        key=key,
+        seeds=seeds,
+        exposure_manifest_sha256="c" * 64,
+    )
+    store = SimpleNamespace(run_id="legacy-run", config_sha256="a" * 64)
+    return record, planned, store
+
+
+def test_historical_unit_bytes_remain_canonical_after_optional_schema_extension() -> None:
+    record, planned, store = _legacy_record_fixture()
+    legacy = record.model_dump(mode="json")
+    legacy.pop("history_shuffle_permutation_map_sha256")
+    raw = canonical_json_bytes(legacy) + b"\n"
+
+    _validate_unit_bytes(raw, "b" * 64, planned, store)
+
+
+@pytest.mark.parametrize(
+    "omitted_field",
+    (
+        "schema_version",
+        "status",
+        "shared_artifacts",
+        "diagnostics",
+        "candidate_generation_sha256",
+        "shared_artifact",
+    ),
+)
+def test_historical_compatibility_rejects_other_omitted_defaults(
+    omitted_field: str,
+) -> None:
+    record, planned, store = _legacy_record_fixture()
+    payload = record.model_dump(mode="json")
+    payload.pop(omitted_field)
+
+    with pytest.raises(AnchorManifestError, match="not canonical"):
+        _validate_unit_bytes(
+            canonical_json_bytes(payload) + b"\n",
+            "b" * 64,
+            planned,
+            store,
+        )
+
+
+def test_historical_compatibility_rejects_noncanonical_bytes() -> None:
+    record, planned, store = _legacy_record_fixture()
+    payload = record.model_dump(mode="json")
+    payload.pop("history_shuffle_permutation_map_sha256")
+
+    with pytest.raises(AnchorManifestError, match="not canonical"):
+        _validate_unit_bytes(
+            json.dumps(payload, sort_keys=False).encode() + b"\n",
+            "b" * 64,
+            planned,
+            store,
+        )
 
 
 def _skip_unit_validation(

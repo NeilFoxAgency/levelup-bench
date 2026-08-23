@@ -260,7 +260,15 @@ def _validate_unit_bytes(raw: bytes, unit_id: str, planned: Any, store: Any) -> 
         or record.exposure_manifest_sha256 != planned.exposure_manifest_sha256
     ):
         raise AnchorManifestError("Phase 2 unit result lineage differs from its plan")
-    if raw != canonical_json_bytes(record.model_dump(mode="json")) + b"\n":
+    # Historical Phase 2 records predate this one Phase 3-only extension.
+    # Accept either the complete current schema or the exact former schema;
+    # omitting any other defaulted field must remain non-canonical.
+    current_payload = record.model_dump(mode="json")
+    historical_payload = dict(current_payload)
+    historical_payload.pop("history_shuffle_permutation_map_sha256")
+    canonical_current = canonical_json_bytes(current_payload) + b"\n"
+    canonical_historical = canonical_json_bytes(historical_payload) + b"\n"
+    if raw not in (canonical_current, canonical_historical):
         raise AnchorManifestError("Phase 2 unit result bytes are not canonical")
 
 
