@@ -11,7 +11,15 @@ writes a result namespace.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
+import re
+import stat
+import uuid
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator
 
 from levelup.experiments.milestone6_phase3_model_authority import (
     Phase3ModelArtifactAuthority,
@@ -24,7 +32,9 @@ from levelup.experiments.milestone6_phase3_plan import (
     ValidatedPhase3Plan,
     _plan_body,
 )
+from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.records import AttemptRecord, UnitRecord
 
 SCHEMA_VERSION = "milestone6.phase3.result-store-plan.v1"
 EXPECTED_PHASE3_MODEL_AUTHORITY_SHA256 = (
@@ -37,6 +47,10 @@ _CONSTRUCTION_TOKEN = object()
 
 class Phase3ResultStorePlanError(ValueError):
     """Raised when a result-store partition is not the frozen plan."""
+
+
+class Phase3ResultStoreError(Phase3ResultStorePlanError):
+    """Raised when a prepared result namespace is unsafe or inconsistent."""
 
 
 def _sha256_json(value: object) -> str:
@@ -355,6 +369,483 @@ def validate_phase3_expected_plan(
     return value
 
 
+# ---------------------------------------------------------------------------
+# Preparation-only persistence
+# ---------------------------------------------------------------------------
+
+_STORE_FILES = ("config.json", "expected-units.json", "run.json")
+_ATTEMPT_RE = re.compile(r"^(?P<unit>[0-9a-f]{64})\.attempt-(?P<number>[0-9]{4})\.json$")
+
+
+def _planned_unit_value(item: Phase3PlannedUnit) -> dict[str, Any]:
+    """Render one opaque planned unit into canonical, JSON-compatible data."""
+
+    return {
+        "unit": item.unit.model_dump(mode="json"),
+        "base_condition_id": item.base_condition_id,
+        "tuple_id": item.tuple_id,
+        "training_tuple_id": item.training_tuple_id,
+        "fold_id": item.fold_id,
+        "heldout_family": item.heldout_family,
+        "model_owner_id": item.model_owner_id,
+        "view_id": item.view_id,
+    }
+
+
+def _store_metadata(store: Phase3ResultStoreSpec) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    config = {
+        "schema_version": SCHEMA_VERSION,
+        "phase": store.phase,
+        "family_id": store.family_id,
+        "plan_id": store.plan_id,
+        "protocol_sha256": store.protocol_sha256,
+        "model_authority_sha256": store.model_authority_sha256,
+        "config_sha256": store.store_config_sha256,
+        "run_id": store.run_id,
+        "unit_ids_sha256": store.unit_ids_sha256,
+        "final_family_access": False,
+    }
+    expected = {
+        "schema_version": SCHEMA_VERSION,
+        "phase": store.phase,
+        "family_id": store.family_id,
+        "run_id": store.run_id,
+        "config_sha256": store.store_config_sha256,
+        "unit_ids_sha256": store.unit_ids_sha256,
+        "units": [_planned_unit_value(item) for item in store.units],
+    }
+    run = {
+        "schema_version": SCHEMA_VERSION,
+        "phase": store.phase,
+        "family_id": store.family_id,
+        "run_id": store.run_id,
+        "config_sha256": store.store_config_sha256,
+        "plan_id": store.plan_id,
+        "protocol_sha256": store.protocol_sha256,
+        "model_authority_sha256": store.model_authority_sha256,
+        "development_only": True,
+        "final_family_access": False,
+        "execution_ready": False,
+    }
+    return config, expected, run
+
+
+def _canonical_bytes(value: object) -> bytes:
+    return canonical_json_bytes(value) + b"\n"
+
+
+def _stable_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    if not stat.S_ISREG(value.st_mode):
+        raise Phase3ResultStoreError("result record is not a regular file")
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_mode),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
+def _read_stable_json_at(directory_fd: int, name: str) -> Any:
+    """Read once from one file descriptor and reject in-place mutation."""
+
+    try:
+        with secure_fs.open_regular_file_at(directory_fd, name) as file_fd:
+            before = _stable_file_identity(os.fstat(file_fd))
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(file_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            content = b"".join(chunks)
+            after = _stable_file_identity(os.fstat(file_fd))
+        if before != after or len(content) != before[3]:
+            raise Phase3ResultStoreError(f"result record changed during read: {name}")
+        return json.loads(content)
+    except Phase3ResultStoreError:
+        raise
+    except (OSError, secure_fs.SecureFilesystemError, UnicodeError, json.JSONDecodeError) as exc:
+        raise Phase3ResultStoreError(f"cannot safely read result record: {name}") from exc
+
+
+def _mkdir_child(parent_fd: int, name: str) -> int:
+    try:
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            pass
+        return secure_fs.open_child_directory(parent_fd, name)
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        raise Phase3ResultStoreError(f"cannot securely prepare directory: {name}") from exc
+
+
+def _write_or_verify(fd: int, name: str, value: object) -> None:
+    expected = _canonical_bytes(value)
+    try:
+        observed = secure_fs.read_bytes_at(fd, name)
+    except secure_fs.SecureFilesystemError as exc:
+        # Missing entries are the only entries that may be published.  The
+        # secure primitive also rejects symlinks and non-regular files.
+        cause = exc.__cause__
+        if not isinstance(cause, FileNotFoundError):
+            raise Phase3ResultStoreError(f"cannot read prepared metadata: {name}") from exc
+        try:
+            temp = f".{name}.{uuid.uuid4().hex}.tmp"
+            temp_fd = os.open(
+                temp,
+                os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=fd,
+            )
+            try:
+                with os.fdopen(temp_fd, "wb") as handle:
+                    handle.write(expected)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.link(temp, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+                os.fsync(fd)
+            finally:
+                try:
+                    os.unlink(temp, dir_fd=fd)
+                except FileNotFoundError:
+                    pass
+            return
+        except FileExistsError:
+            # A concurrent publisher won; verify its complete canonical bytes.
+            observed = secure_fs.read_bytes_at(fd, name)
+        except (OSError, secure_fs.SecureFilesystemError) as write_exc:
+            raise Phase3ResultStoreError(f"cannot publish prepared metadata: {name}") from write_exc
+    if observed != expected:
+        raise Phase3ResultStoreError(f"prepared metadata differs from canonical {name}")
+
+
+def _validate_run_entries(run_fd: int) -> None:
+    """Allow only canonical metadata files plus the two result directories."""
+
+    allowed = set(_STORE_FILES) | {"units", "attempts"}
+    try:
+        with os.scandir(run_fd) as iterator:
+            names: set[str] = set()
+            for entry in iterator:
+                if entry.name not in allowed or entry.is_symlink():
+                    raise Phase3ResultStoreError("run directory contains extra or symlinked entries")
+                if entry.name in {"units", "attempts"}:
+                    if not entry.is_dir(follow_symlinks=False):
+                        raise Phase3ResultStoreError("result namespace is not a directory")
+                elif not entry.is_file(follow_symlinks=False):
+                    raise Phase3ResultStoreError("run metadata is not a regular file")
+                names.add(entry.name)
+    except Phase3ResultStoreError:
+        raise
+    except OSError as exc:
+        raise Phase3ResultStoreError("cannot enumerate prepared run directory") from exc
+    if names != allowed:
+        raise Phase3ResultStoreError("run directory contains extra or missing metadata")
+
+
+def _verify_record_identity(
+    record: UnitRecord | AttemptRecord,
+    store: Phase3ResultStoreSpec,
+    expected_by_id: dict[str, Phase3PlannedUnit],
+    *,
+    filename: str,
+) -> None:
+    expected_unit = expected_by_id.get(record.unit_id)
+    if expected_unit is None:
+        raise Phase3ResultStoreError(f"foreign result record: {filename}")
+    expected_name = f"{record.unit_id}.json" if isinstance(record, UnitRecord) else (
+        f"{record.unit_id}.attempt-{record.attempt:04d}.json"
+    )
+    if (
+        filename != expected_name
+        or record.run_id != store.run_id
+        or record.config_sha256 != store.store_config_sha256
+        or record.key != expected_unit.unit.key
+        or record.seeds != expected_unit.unit.seeds
+        or (
+            isinstance(record, UnitRecord)
+            and record.exposure_manifest_sha256 != expected_unit.unit.exposure_manifest_sha256
+        )
+    ):
+        raise Phase3ResultStoreError(f"result record identity mismatch: {filename}")
+
+
+@dataclass(frozen=True, slots=True)
+class Phase3ResultStore:
+    """One prepared, development-only family namespace.
+
+    Preparation validates and publishes only immutable metadata.  The result
+    namespace is deliberately inert: activation and all result writes belong
+    to a later, private readiness transaction.
+    """
+
+    spec: Phase3ResultStoreSpec
+    root: Path
+    run_dir: Path
+    root_identity: tuple[int, int]
+    family_identity: tuple[int, int]
+    run_identity: tuple[int, int]
+    units_identity: tuple[int, int]
+    attempts_identity: tuple[int, int]
+    execution_ready: bool = False
+
+    def __post_init__(self) -> None:
+        if self.execution_ready is not False:
+            raise Phase3ResultStoreError(
+                "prepared Phase 3 result stores cannot be constructed execution-ready"
+            )
+
+    @property
+    def family_id(self) -> str:
+        return self.spec.family_id
+
+    @property
+    def run_id(self) -> str:
+        return self.spec.run_id
+
+    @property
+    def config_sha256(self) -> str:
+        return self.spec.store_config_sha256
+
+    def _capture_current_identities(self) -> dict[str, tuple[int, int]]:
+        stack = ExitStack()
+        stack.__enter__()
+        try:
+            root_fd = secure_fs.open_directory_chain(self.root)
+            stack.callback(os.close, root_fd)
+            family_fd = secure_fs.open_child_directory(root_fd, self.family_id)
+            stack.callback(os.close, family_fd)
+            run_fd = secure_fs.open_child_directory(family_fd, self.run_id)
+            stack.callback(os.close, run_fd)
+            units_fd = secure_fs.open_child_directory(run_fd, "units")
+            stack.callback(os.close, units_fd)
+            attempts_fd = secure_fs.open_child_directory(run_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            return {
+                "root": secure_fs.directory_identity(root_fd),
+                "family": secure_fs.directory_identity(family_fd),
+                "run": secure_fs.directory_identity(run_fd),
+                "units": secure_fs.directory_identity(units_fd),
+                "attempts": secure_fs.directory_identity(attempts_fd),
+            }
+        except (OSError, secure_fs.SecureFilesystemError) as exc:
+            raise Phase3ResultStoreError("cannot securely open prepared result store") from exc
+        finally:
+            stack.close()
+
+    def _expected_identities(self) -> dict[str, tuple[int, int]]:
+        return {
+            "root": self.root_identity,
+            "family": self.family_identity,
+            "run": self.run_identity,
+            "units": self.units_identity,
+            "attempts": self.attempts_identity,
+        }
+
+    @contextmanager
+    def _open_pinned(self) -> Iterator[dict[str, int]]:
+        """Hold every result descriptor for one operation, then recheck paths."""
+
+        expected = self._expected_identities()
+        stack = ExitStack()
+        stack.__enter__()
+        descriptors: dict[str, int] = {}
+        try:
+            root_fd = secure_fs.open_directory_chain(self.root)
+            stack.callback(os.close, root_fd)
+            descriptors["root"] = root_fd
+            family_fd = secure_fs.open_child_directory(root_fd, self.family_id)
+            stack.callback(os.close, family_fd)
+            descriptors["family"] = family_fd
+            run_fd = secure_fs.open_child_directory(family_fd, self.run_id)
+            stack.callback(os.close, run_fd)
+            descriptors["run"] = run_fd
+            units_fd = secure_fs.open_child_directory(run_fd, "units")
+            stack.callback(os.close, units_fd)
+            descriptors["units"] = units_fd
+            attempts_fd = secure_fs.open_child_directory(run_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            descriptors["attempts"] = attempts_fd
+            observed = {
+                name: secure_fs.directory_identity(fd) for name, fd in descriptors.items()
+            }
+            if observed != expected:
+                raise Phase3ResultStoreError("prepared result directory identity changed")
+            yield descriptors
+        except Phase3ResultStoreError:
+            raise
+        except (OSError, secure_fs.SecureFilesystemError) as exc:
+            raise Phase3ResultStoreError("cannot securely access prepared result store") from exc
+        finally:
+            stack.close()
+            # All reads/writes above used the original pinned tree.  Reopening
+            # only after those descriptors close detects a concurrent rename or
+            # same-byte replacement without ever following the replacement.
+            if self._capture_current_identities() != expected:
+                raise Phase3ResultStoreError(
+                    "prepared result directory identity changed during operation"
+                )
+
+    def _validated_records(
+        self, units_fd: int, attempts_fd: int
+    ) -> tuple[tuple[UnitRecord, ...], tuple[AttemptRecord, ...]]:
+        """Open and validate every record exactly once, returning those objects."""
+
+        expected_by_id = {item.unit.unit_id: item for item in self.spec.units}
+        try:
+            unit_entries = secure_fs.strict_regular_entries(units_fd)
+            expected_names = {f"{unit_id}.json" for unit_id in expected_by_id}
+            if not set(unit_entries) <= expected_names:
+                raise Phase3ResultStoreError("units namespace contains extra or foreign records")
+            units: list[UnitRecord] = []
+            for name in unit_entries:
+                try:
+                    record = UnitRecord.model_validate(_read_stable_json_at(units_fd, name))
+                except Exception as exc:
+                    raise Phase3ResultStoreError(f"invalid unit record: {name}") from exc
+                _verify_record_identity(record, self.spec, expected_by_id, filename=name)
+                units.append(record)
+
+            attempt_entries = secure_fs.strict_regular_entries(attempts_fd)
+            attempts: list[AttemptRecord] = []
+            for name in attempt_entries:
+                match = _ATTEMPT_RE.fullmatch(name)
+                if match is None or match.group("unit") not in expected_by_id:
+                    raise Phase3ResultStoreError("attempts namespace contains extra or foreign records")
+                try:
+                    record = AttemptRecord.model_validate(
+                        _read_stable_json_at(attempts_fd, name)
+                    )
+                except Exception as exc:
+                    raise Phase3ResultStoreError(f"invalid attempt record: {name}") from exc
+                _verify_record_identity(record, self.spec, expected_by_id, filename=name)
+                attempts.append(record)
+            by_unit_id = {record.unit_id: record for record in units}
+            return (
+                tuple(
+                    by_unit_id[item.unit.unit_id]
+                    for item in self.spec.units
+                    if item.unit.unit_id in by_unit_id
+                ),
+                tuple(attempts),
+            )
+        except secure_fs.SecureFilesystemError as exc:
+            raise Phase3ResultStoreError("unsafe result namespace") from exc
+
+    def _validate_pinned(
+        self, descriptors: dict[str, int]
+    ) -> tuple[tuple[UnitRecord, ...], tuple[AttemptRecord, ...]]:
+        config, expected, run = _store_metadata(self.spec)
+        for name, value in zip(_STORE_FILES, (config, expected, run), strict=True):
+            observed = secure_fs.read_bytes_at(descriptors["run"], name)
+            if observed != _canonical_bytes(value):
+                raise Phase3ResultStoreError(f"prepared metadata differs from canonical {name}")
+        _validate_run_entries(descriptors["run"])
+        return self._validated_records(descriptors["units"], descriptors["attempts"])
+
+    def validate_resume(self) -> None:
+        """Strictly validate an existing prepared namespace without writing."""
+
+        with self._open_pinned() as descriptors:
+            self._validate_pinned(descriptors)
+
+    def completed_records(self) -> tuple[UnitRecord, ...]:
+        with self._open_pinned() as descriptors:
+            records, _ = self._validate_pinned(descriptors)
+            return records
+
+    def write_completed(self, *_args: Any, **_kwargs: Any) -> bool:
+        raise Phase3ResultStoreError("prepared Phase 3 result stores are not execution-ready")
+
+    def write_attempt(self, *_args: Any, **_kwargs: Any) -> None:
+        raise Phase3ResultStoreError("prepared Phase 3 result stores are not execution-ready")
+
+
+PreparedPhase3ResultStore = Phase3ResultStore
+
+
+def _prepare_one_store(spec: Phase3ResultStoreSpec, output_root: Path) -> Phase3ResultStore:
+    root = Path(os.path.abspath(output_root))
+    # The caller must create the single output root explicitly.  Requiring an
+    # existing root avoids a check-then-mkdir path race; every descendant is
+    # created and opened relative to the pinned root descriptor below.
+    try:
+        with ExitStack() as stack:
+            root_fd = secure_fs.open_directory_chain(root)
+            stack.callback(os.close, root_fd)
+            family_fd = _mkdir_child(root_fd, spec.family_id)
+            stack.callback(os.close, family_fd)
+            run_fd = _mkdir_child(family_fd, spec.run_id)
+            stack.callback(os.close, run_fd)
+            units_fd = _mkdir_child(run_fd, "units")
+            stack.callback(os.close, units_fd)
+            attempts_fd = _mkdir_child(run_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            config, expected, run = _store_metadata(spec)
+            for name, value in zip(_STORE_FILES, (config, expected, run), strict=True):
+                _write_or_verify(run_fd, name, value)
+            prepared = Phase3ResultStore(
+                spec=spec,
+                root=root,
+                run_dir=root / spec.family_id / spec.run_id,
+                root_identity=secure_fs.directory_identity(root_fd),
+                family_identity=secure_fs.directory_identity(family_fd),
+                run_identity=secure_fs.directory_identity(run_fd),
+                units_identity=secure_fs.directory_identity(units_fd),
+                attempts_identity=secure_fs.directory_identity(attempts_fd),
+            )
+            prepared._validate_pinned(
+                {
+                    "root": root_fd,
+                    "family": family_fd,
+                    "run": run_fd,
+                    "units": units_fd,
+                    "attempts": attempts_fd,
+                }
+            )
+        prepared.validate_resume()
+        return prepared
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        raise Phase3ResultStoreError("cannot prepare Phase 3 result namespace") from exc
+
+
+def prepare_phase3_result_store(
+    output_root: str | Path,
+    validated_plan: ValidatedPhase3Plan,
+    authority: Phase3ModelArtifactAuthority,
+    *,
+    family_id: str,
+) -> Phase3ResultStore:
+    expected = build_phase3_expected_plan(validated_plan, authority)
+    try:
+        spec = expected.store_for_family(family_id)
+    except Phase3ResultStorePlanError:
+        raise
+    return _prepare_one_store(spec, Path(output_root))
+
+
+def prepare_phase3_result_stores(
+    output_root: str | Path,
+    validated_plan: ValidatedPhase3Plan,
+    authority: Phase3ModelArtifactAuthority,
+) -> tuple[Phase3ResultStore, ...]:
+    """Prepare all six family stores; never activates or executes them."""
+
+    expected = build_phase3_expected_plan(validated_plan, authority)
+    prepared: list[Phase3ResultStore] = []
+    try:
+        for spec in expected.stores:
+            prepared.append(_prepare_one_store(spec, Path(output_root)))
+        return tuple(prepared)
+    except BaseException:
+        # Preparation is idempotent and intentionally does not roll back a
+        # previously prepared store; callers may inspect/resume the namespace.
+        raise
+
+
 # A descriptive alias keeps call sites readable when they only need the six
 # family store specifications.
 build_phase3_result_store_plan = build_phase3_expected_plan
@@ -364,11 +855,16 @@ __all__ = [
     "EXPECTED_FAMILY_UNIT_COUNT",
     "EXPECTED_PHASE3_MODEL_AUTHORITY_SHA256",
     "EXPECTED_TOTAL_UNIT_COUNT",
+    "Phase3ResultStore",
+    "PreparedPhase3ResultStore",
     "Phase3ExpectedPlan",
+    "Phase3ResultStoreError",
     "Phase3ResultStorePlanError",
     "Phase3ResultStoreSpec",
     "SCHEMA_VERSION",
     "build_phase3_expected_plan",
     "build_phase3_result_store_plan",
+    "prepare_phase3_result_store",
+    "prepare_phase3_result_stores",
     "validate_phase3_expected_plan",
 ]
