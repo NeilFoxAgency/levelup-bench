@@ -19,9 +19,12 @@ import torch
 
 from levelup.core.trajectory import ActionRecord, Trajectory, TrajectoryStep
 from levelup.experiments.milestone6_baselines import ObservableEnvironment
-from levelup.experiments.milestone6_phase3_models import (
-    Phase3ModelPreparation,
-    validate_phase3_model_preparation,
+from levelup.experiments.milestone6_phase3_execution_models import (
+    AuthorizedPhase3LoadedModel,
+    validate_authorized_phase3_loaded_model,
+)
+from levelup.experiments.milestone6_phase3_model_authority import (
+    Phase3ModelArtifactAuthority,
 )
 from levelup.experiments.milestone6_phase3_plan import (
     Phase3PlannedUnit,
@@ -114,6 +117,7 @@ def _model_and_lineage(
     *,
     planned_unit: Phase3PlannedUnit | None,
     plan_authority: ValidatedPhase3Plan | None,
+    model_authority: Phase3ModelArtifactAuthority | None,
     task_id: str,
     seed: int,
     temperature: float,
@@ -128,21 +132,28 @@ def _model_and_lineage(
     unit_id: str | None,
     allow_test_model: bool,
 ) -> Any:
-    """Unwrap a prepared Phase 3 model and enforce known capacity identities.
+    """Unwrap an authorized Phase 3 model and enforce frozen execution identity.
 
     Test doubles may be duck-typed, but real state/history scorer instances are
-    checked strictly.  A prepared model owner, when present, must name the same
+    checked strictly.  An authorized model owner, when present, must name the same
     condition as the execution request.
     """
 
     if not allow_test_model:
-        if not isinstance(model, Phase3ModelPreparation):
-            raise ValueError("production generation requires a prepared Phase 3 model")
-        validate_phase3_model_preparation(model)
+        if type(model) is not AuthorizedPhase3LoadedModel:
+            raise ValueError("production generation requires an authorized Phase 3 model")
         if planned_unit is None:
             raise ValueError("production generation requires a frozen Phase 3 unit")
         if not isinstance(plan_authority, ValidatedPhase3Plan):
             raise ValueError("production generation requires validated plan authority")
+        if not isinstance(model_authority, Phase3ModelArtifactAuthority):
+            raise ValueError("production generation requires model authority")
+        validate_authorized_phase3_loaded_model(
+            model,
+            model_authority,
+            plan_authority,
+            planned_unit,
+        )
         plan_authority.require_unit(planned_unit)
         planned = planned_unit.unit
         if unit_id != planned.unit_id:
@@ -171,28 +182,33 @@ def _model_and_lineage(
             or history_shuffle_base != FROZEN_HISTORY_SHUFFLE_BASE
         ):
             raise ValueError("generation budget differs from the frozen Phase 3 protocol")
+        if model.planned_unit != planned_unit:
+            raise ValueError("authorized model unit differs from the generation unit")
         owner = model.owner
-        view = model.view.view
+        key = model.key
         if (
             owner.owner_id != planned_unit.model_owner_id
             or owner.view_id != planned_unit.view_id
-            or view.view_id != planned_unit.view_id
             or owner.condition_id != condition_id
-            or view.condition_id != condition_id
             or owner.fold_id != fold_id
-            or view.fold_id != fold_id
             or owner.heldout_family != planned_unit.heldout_family
-            or view.heldout_family != planned_unit.heldout_family
             or owner.replicate != replicate
-            or view.replicate != replicate
             or owner.training_tuple_id != planned_unit.training_tuple_id
             or planned_unit.tuple_id not in owner.search_temperature_ids
+            or key.owner_id != owner.owner_id
+            or key.view_id != owner.view_id
+            or key.condition_id != owner.condition_id
+            or key.fold_id != owner.fold_id
+            or key.heldout_family != owner.heldout_family
+            or key.replicate != owner.replicate
+            or key.training_tuple_id != owner.training_tuple_id
+            or key.model_seed != owner.model_seed
         ):
-            raise ValueError("prepared model owner/view differs from the frozen unit")
+            raise ValueError("authorized model owner/key differs from the frozen unit")
     owner = getattr(model, "owner", None)
     owner_condition = getattr(owner, "condition_id", None)
     if owner_condition is not None and owner_condition != condition_id:
-        raise ValueError("prepared model condition lineage does not match generation")
+        raise ValueError("authorized model condition lineage does not match generation")
     raw = getattr(model, "model", model)
     declared = getattr(raw, "condition_id", None)
     if declared is not None and declared != condition_id:
@@ -261,7 +277,7 @@ def _candidate_sha256(
     return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 
-def generate_phase3_candidates_with_observable_policy(
+def _generate_phase3_candidates_impl(
     environment: ObservableEnvironment,
     *,
     task_id: str,
@@ -282,7 +298,8 @@ def generate_phase3_candidates_with_observable_policy(
     unit_id: str | None = None,
     planned_unit: Phase3PlannedUnit | None = None,
     plan_authority: ValidatedPhase3Plan | None = None,
-    _allow_test_model: bool = False,
+    model_authority: Phase3ModelArtifactAuthority | None = None,
+    allow_test_model: bool,
 ) -> Phase3GeneratedSearch:
     """Generate a complete fixed-budget candidate batch for one Phase 3 unit.
 
@@ -301,7 +318,7 @@ def generate_phase3_candidates_with_observable_policy(
         raise ValueError("replicate and episode/action budgets are invalid")
     if not 0 <= prior_adaptation_actions <= total_adaptation_action_cap:
         raise ValueError("prior adaptation actions exceed the total cap")
-    if not _allow_test_model and unit_id is None:
+    if not allow_test_model and unit_id is None:
         raise ValueError("production generation requires the frozen unit identity")
     if temperature <= 0:
         raise ValueError("temperature must be positive")
@@ -310,6 +327,7 @@ def generate_phase3_candidates_with_observable_policy(
         condition_id,
         planned_unit=planned_unit,
         plan_authority=plan_authority,
+        model_authority=model_authority,
         task_id=task_id,
         seed=seed,
         temperature=temperature,
@@ -322,7 +340,7 @@ def generate_phase3_candidates_with_observable_policy(
         phase=phase,
         history_shuffle_base=history_shuffle_base,
         unit_id=unit_id,
-        allow_test_model=_allow_test_model,
+        allow_test_model=allow_test_model,
     )
     rng = random.Random(seed)
     started = time.perf_counter()
@@ -498,6 +516,72 @@ def generate_phase3_candidates_with_observable_policy(
             history_shuffle_sha256=(diagnostics.permutation_map_sha256 if diagnostics else None),
         ),
         history_shuffle=diagnostics,
+    )
+
+
+def generate_phase3_candidates_with_observable_policy(
+    environment: ObservableEnvironment,
+    *,
+    task_id: str,
+    forbidden_aliases: frozenset[str],
+    affordances: AffordanceTable,
+    model: AuthorizedPhase3LoadedModel,
+    seed: int,
+    temperature: float,
+    max_episodes: int,
+    max_actions_per_episode: int,
+    total_adaptation_action_cap: int,
+    prior_adaptation_actions: int,
+    condition_id: str,
+    fold_id: str = "phase3",
+    replicate: int = 0,
+    phase: str = "validation",
+    history_shuffle_base: int = FROZEN_HISTORY_SHUFFLE_BASE,
+    unit_id: str | None = None,
+    planned_unit: Phase3PlannedUnit | None = None,
+    plan_authority: ValidatedPhase3Plan | None = None,
+    model_authority: Phase3ModelArtifactAuthority | None = None,
+) -> Phase3GeneratedSearch:
+    """Run the strict production path; no caller-visible test bypass exists."""
+
+    return _generate_phase3_candidates_impl(
+        environment,
+        task_id=task_id,
+        forbidden_aliases=forbidden_aliases,
+        affordances=affordances,
+        model=model,
+        seed=seed,
+        temperature=temperature,
+        max_episodes=max_episodes,
+        max_actions_per_episode=max_actions_per_episode,
+        total_adaptation_action_cap=total_adaptation_action_cap,
+        prior_adaptation_actions=prior_adaptation_actions,
+        condition_id=condition_id,
+        fold_id=fold_id,
+        replicate=replicate,
+        phase=phase,
+        history_shuffle_base=history_shuffle_base,
+        unit_id=unit_id,
+        planned_unit=planned_unit,
+        plan_authority=plan_authority,
+        model_authority=model_authority,
+        allow_test_model=False,
+    )
+
+
+def _generate_phase3_candidates_with_test_model(
+    environment: ObservableEnvironment,
+    **kwargs: Any,
+) -> Phase3GeneratedSearch:
+    """Private adapter for bounded unit tests with synthetic models and budgets."""
+
+    forbidden = {"allow_test_model", "_allow_test_model"}.intersection(kwargs)
+    if forbidden:
+        raise TypeError("test-model mode is selected only by the private adapter")
+    return _generate_phase3_candidates_impl(
+        environment,
+        **kwargs,
+        allow_test_model=True,
     )
 
 

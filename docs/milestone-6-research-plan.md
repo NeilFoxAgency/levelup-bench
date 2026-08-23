@@ -677,3 +677,27 @@ families were opened while preparing or authorizing the model store. Execution m
 each unit and owner solely through the frozen plan and canonical authority, load the authorized
 model through pinned descriptors, prohibit retraining, and preserve fixed-budget generation,
 independent replay, and reporting-only post-generation optimum classification.
+
+The first execution-gate slice now enforces that boundary for one planned unit. It accepts only the
+exact published authority, the complete canonical plan body, one typed unit from that plan, and the
+authority-named model-store root. Model keys, owners, architectures, tensors, reports, and costs are
+descriptor-reloaded and revalidated; the loaded model is eval-only, state-hash checked before and
+after use, and held under an active context lease. Namespace replacement, model mutation, wrapper
+forgery, plan-body substitution, and setup/body/recheck/teardown failures all fail closed without
+silently masking concurrent errors.
+
+Production generation no longer exposes the synthetic-model test bypass. The one-unit executor
+derives the exact development task from the hash-pinned task manifest, pays the frozen 64-action
+probe, runs the complete 150-episode/2,048-total-action candidate budget without an optimum input,
+closes and revalidates the model context, independently replays the completed batch, and only then
+queries the reporting oracle. Failures carry typed fixed-endpoint censoring at 2,048; the reducer's
+declared 2,049 sentinel remains a later aggregation rule. Training accounting is zero during unit
+execution, and the candidate-generation hash excludes replay and oracle values.
+The authorized model's capacity, optimizer-step, forward-pass, recurrent-step, and example counts
+are copied into typed numeric diagnostics so the frozen reducer can verify and deduplicate the
+unique model-owner cost tie-break without treating those preparation costs as unit-local training.
+
+This slice still does not authorize a Phase 3 run. The six exact result-store configs, immutable
+source/readiness snapshot, transactional activation, resume driver, and complete 11,520-unit matrix
+gate must be implemented and independently audited before any development outcome is generated or
+inspected. Final-family access remains forbidden.

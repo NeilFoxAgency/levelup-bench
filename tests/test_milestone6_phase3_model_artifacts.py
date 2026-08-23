@@ -14,6 +14,7 @@ from levelup.experiments.milestone6_phase3_model_artifacts import (
     Phase3ModelArtifactError,
     Phase3ModelArtifactKey,
     load_phase3_model_bundle_from_at,
+    load_phase3_model_index_at,
     load_phase3_model_manifest,
     load_phase3_model_manifest_at,
     open_phase3_model_artifact_reader,
@@ -109,9 +110,11 @@ def test_round_trip_reloads_typed_bundle(tmp_path: Path) -> None:
     loaded = load_phase3_model_manifest(root, manifest.artifact_id)
     assert loaded == manifest
     with open_phase3_model_artifact_reader(root) as reader:
+        loaded_index = load_phase3_model_index_at(reader, manifest.key.key_id)
         index, cost, descriptor_manifest, state = load_phase3_model_bundle_from_at(
             reader, manifest.key
         )
+    assert loaded_index == index
     assert index.artifact_id == manifest.artifact_id
     assert cost.artifact_id == manifest.artifact_id
     assert descriptor_manifest == manifest

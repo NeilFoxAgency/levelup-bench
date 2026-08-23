@@ -536,16 +536,15 @@ def open_phase3_model_artifact_reader(
 ) -> Iterator[PinnedPhase3ModelArtifactReader]:
     """Pin the three Phase 3 artifact namespaces with O_NOFOLLOW descriptors."""
 
-    root_fd: int | None = None
     try:
         root_fd = secure_fs.open_directory_chain(output_root)
-        with open_phase3_model_artifact_reader_at(root_fd) as reader:
-            yield reader
     except (secure_fs.SecureFilesystemError, OSError, TypeError, ValueError) as exc:
         raise Phase3ModelArtifactError("cannot securely pin Phase 3 model artifacts") from exc
+    try:
+        with open_phase3_model_artifact_reader_at(root_fd) as reader:
+            yield reader
     finally:
-        if root_fd is not None:
-            os.close(root_fd)
+        os.close(root_fd)
 
 
 @contextmanager
@@ -554,8 +553,8 @@ def open_phase3_model_artifact_reader_at(
 ) -> Iterator[PinnedPhase3ModelArtifactReader]:
     """Pin Phase 3 namespaces below an already-pinned run/output fd."""
 
-    try:
-        with ExitStack() as stack:
+    with ExitStack() as stack:
+        try:
             descriptors: dict[str, int] = {}
             for field, name in (
                 ("keys_fd", KEYS_DIR),
@@ -565,9 +564,11 @@ def open_phase3_model_artifact_reader_at(
                 child = secure_fs.open_child_directory(root_fd, name)
                 stack.callback(os.close, child)
                 descriptors[field] = child
-            yield PinnedPhase3ModelArtifactReader(**descriptors)
-    except (secure_fs.SecureFilesystemError, OSError, TypeError, ValueError) as exc:
-        raise Phase3ModelArtifactError("cannot securely pin Phase 3 model namespaces") from exc
+        except (secure_fs.SecureFilesystemError, OSError, TypeError, ValueError) as exc:
+            raise Phase3ModelArtifactError(
+                "cannot securely pin Phase 3 model namespaces"
+            ) from exc
+        yield PinnedPhase3ModelArtifactReader(**descriptors)
 
 
 def _state_tensors(model: torch.nn.Module) -> dict[str, tuple[tuple[int, ...], bytes]]:
@@ -892,7 +893,12 @@ def _load_manifest_at(reader: PinnedPhase3ModelArtifactReader, artifact_id: str)
             raise Phase3ModelArtifactError("Phase 3 artifact ID mismatch")
         tensors_fd = secure_fs.open_child_directory(artifact_fd, TENSORS_DIR)
         try:
-            observed = set(secure_fs.regular_entries_at(tensors_fd))
+            try:
+                observed = set(secure_fs.regular_entries_at(tensors_fd))
+            except secure_fs.SecureFilesystemError as exc:
+                raise Phase3ModelArtifactError(
+                    "Phase 3 tensor inventory is not regular"
+                ) from exc
             expected = {item.filename for item in manifest.tensors}
             if observed != expected:
                 raise Phase3ModelArtifactError("Phase 3 tensor inventory differs")
@@ -932,6 +938,25 @@ def load_phase3_model_index(
         if _digest(manifest.model_dump(mode="json")) != index.manifest_sha256:
             raise Phase3ModelArtifactError("Phase 3 model index manifest digest mismatch")
         return index
+
+
+def load_phase3_model_index_at(
+    reader: PinnedPhase3ModelArtifactReader,
+    key_id: str,
+) -> Phase3ModelArtifactIndex:
+    """Load one canonical key-index commit marker through pinned descriptors."""
+
+    if len(key_id) != 64 or any(c not in "0123456789abcdef" for c in key_id):
+        raise Phase3ModelArtifactError("invalid Phase 3 key ID")
+    index = _fd_model(
+        Phase3ModelArtifactIndex,
+        _fd_json(reader.keys_fd, f"{key_id}.json"),
+        "model index",
+    )
+    assert isinstance(index, Phase3ModelArtifactIndex)
+    if index.key_id != key_id or index.key.key_id != key_id:
+        raise Phase3ModelArtifactError("Phase 3 model index key ID mismatch")
+    return index
 
 
 def load_phase3_model_cost(
@@ -1047,6 +1072,7 @@ __all__ = [
     "load_phase3_model_manifest",
     "load_phase3_model_manifest_at",
     "load_phase3_model_from_at",
+    "load_phase3_model_index_at",
     "open_phase3_model_artifact_reader",
     "open_phase3_model_artifact_reader_at",
     "open_phase3_model_output",
