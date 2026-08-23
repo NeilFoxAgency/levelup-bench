@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import replace
 from pathlib import Path
@@ -9,6 +11,41 @@ from pathlib import Path
 import pytest
 
 from levelup.experiments import milestone6_phase3_readiness as readiness
+from levelup.experiments.runner.config import canonical_json_bytes
+
+
+def _report_snapshot(snapshot: readiness.Phase3ReadinessSnapshot) -> readiness.AuthorityFileSnapshot:
+    return next(
+        item
+        for item in snapshot.files
+        if item.relative_path == readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+    )
+
+
+def _snapshot_with_report_bytes(
+    snapshot: readiness.Phase3ReadinessSnapshot,
+    content: bytes,
+) -> readiness.Phase3ReadinessSnapshot:
+    original = _report_snapshot(snapshot)
+    replacement = replace(
+        original,
+        content=content,
+        sha256=hashlib.sha256(content).hexdigest(),
+    )
+    return replace(
+        snapshot,
+        files=tuple(
+            replacement if item is original else item for item in snapshot.files
+        ),
+    )
+
+
+def _canonical_report_body(snapshot: readiness.Phase3ReadinessSnapshot) -> dict[str, object]:
+    body = json.loads(_report_snapshot(snapshot).content)
+    unsigned = dict(body)
+    unsigned.pop("report_sha256", None)
+    body["report_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
+    return body
 
 
 def test_readiness_captures_all_published_development_authorities() -> None:
@@ -19,7 +56,8 @@ def test_readiness_captures_all_published_development_authorities() -> None:
     assert readiness.PHASE3_ANCHOR_RELATIVE in paths
     assert readiness.PHASE3_EVIDENCE_RELATIVE in paths
     assert readiness.PHASE3_MODEL_AUTHORITY_RELATIVE in paths
-    assert len(paths) == 11
+    assert readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE in paths
+    assert len(paths) == 12
     assert len(snapshot.directories) == 4
     assert {Path(item.relative_path).name for item in snapshot.directories} >= {
         "phase3-model-artifact-keys",
@@ -27,7 +65,106 @@ def test_readiness_captures_all_published_development_authorities() -> None:
         "phase3-model-artifacts",
     }
     assert snapshot.plan_id == readiness.PHASE3_PLAN_ID
+    assert (
+        snapshot.training_shuffle_report_sha256
+        == readiness.PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
+    )
+    assert (
+        snapshot.training_shuffle_report_file_sha256
+        == readiness.PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256
+    )
     snapshot.recheck()
+
+
+def test_training_shuffle_report_missing_is_rejected() -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    missing = replace(
+        snapshot,
+        files=tuple(
+            item
+            for item in snapshot.files
+            if item.relative_path != readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+        ),
+    )
+    with pytest.raises(readiness.Phase3ReadinessError, match="report is missing"):
+        readiness._validate_authority_files(missing)
+
+
+def test_training_shuffle_report_schema_is_rejected() -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    body = _canonical_report_body(snapshot)
+    body.pop("scope")
+    content = canonical_json_bytes(body)
+    invalid = _snapshot_with_report_bytes(snapshot, content)
+    with pytest.raises(readiness.Phase3ReadinessError, match="not canonical"):
+        readiness._validate_authority_files(invalid)
+
+
+def test_training_shuffle_report_self_hash_is_rejected() -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    body = json.loads(_report_snapshot(snapshot).content)
+    body["report_sha256"] = "0" * 64
+    invalid = _snapshot_with_report_bytes(snapshot, canonical_json_bytes(body))
+    with pytest.raises(readiness.Phase3ReadinessError, match="not canonical"):
+        readiness._validate_authority_files(invalid)
+
+
+def test_training_shuffle_report_view_lineage_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    body = _canonical_report_body(snapshot)
+    for view in body["views"]:
+        view["plan_id"] = "0" * 64
+    unsigned = dict(body)
+    unsigned.pop("report_sha256")
+    body["report_sha256"] = hashlib.sha256(
+        canonical_json_bytes(unsigned)
+    ).hexdigest()
+    content = canonical_json_bytes(body)
+    monkeypatch.setattr(
+        readiness,
+        "PHASE3_TRAINING_SHUFFLE_REPORT_SHA256",
+        body["report_sha256"],
+    )
+    monkeypatch.setattr(
+        readiness,
+        "PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256",
+        hashlib.sha256(content).hexdigest(),
+    )
+    invalid = _snapshot_with_report_bytes(snapshot, content)
+    with pytest.raises(readiness.Phase3ReadinessError, match="view lineage"):
+        readiness._validate_authority_files(invalid)
+
+
+def test_training_shuffle_report_noncanonical_bytes_are_rejected() -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    invalid = _snapshot_with_report_bytes(
+        snapshot, _report_snapshot(snapshot).content + b"\n"
+    )
+    with pytest.raises(readiness.Phase3ReadinessError, match="not canonical"):
+        readiness._validate_authority_files(invalid)
+
+
+def test_training_shuffle_report_same_byte_replacement_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = readiness.capture_phase3_readiness()
+    original_read = readiness._read_source
+    report_path = readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+
+    def replaced(repository: Path, relative_path: str) -> readiness.AuthorityFileSnapshot:
+        current = original_read(repository, relative_path)
+        if relative_path == report_path:
+            return replace(
+                current,
+                file_identity=(current.file_identity[0], current.file_identity[1] + 1),
+            )
+        return current
+
+    monkeypatch.setattr(readiness, "_read_source", replaced)
+    with pytest.raises(readiness.Phase3ReadinessError, match="source changed"):
+        snapshot.recheck()
 
 
 def test_source_byte_mutation_is_detected(tmp_path: Path) -> None:
@@ -137,6 +274,38 @@ def test_activation_lease_holds_all_sources_and_deactivates(
     assert lease.active is False
     with pytest.raises(readiness.Phase3ReadinessError, match="no longer active"):
         lease.require_active()
+
+
+def test_activation_lease_rechecks_report_after_yield(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = replace(readiness.capture_phase3_readiness(), git_dirty=False)
+    monkeypatch.setattr(
+        readiness,
+        "_git_state",
+        lambda _repository: (snapshot.git_commit_sha, False),
+    )
+    original_read = readiness._read_source
+    report_path = readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+
+    def replaced(
+        repository: Path,
+        relative_path: str,
+    ) -> readiness.AuthorityFileSnapshot:
+        current = original_read(repository, relative_path)
+        if relative_path == report_path:
+            return replace(
+                current,
+                file_identity=(current.file_identity[0], current.file_identity[1] + 1),
+            )
+        return current
+
+    with pytest.raises(readiness.Phase3ReadinessError, match="source changed"):
+        with snapshot.hold_for_activation(
+            expected_git_commit=snapshot.git_commit_sha
+        ) as lease:
+            assert report_path in lease.file_descriptors
+            monkeypatch.setattr(readiness, "_read_source", replaced)
 
 
 def test_activation_lease_cannot_be_forged() -> None:

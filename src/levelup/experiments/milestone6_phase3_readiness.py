@@ -30,6 +30,12 @@ from levelup.experiments.milestone6_phase3_model_authority import (
     load_phase3_model_artifact_authority_bytes,
 )
 from levelup.experiments.milestone6_phase3_protocol import ROOT
+from levelup.experiments.milestone6_phase3_training_shuffle_report import (
+    Phase3TrainingShuffleReportError,
+)
+from levelup.experiments.milestone6_phase3_training_shuffle_report import (
+    _validate_body as _validate_training_shuffle_report_body,
+)
 from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
 
@@ -50,6 +56,15 @@ PHASE3_PLAN_LOCK_RELATIVE = "configs/milestone6/phase3_plan_lock.json"
 PHASE3_ANCHOR_RELATIVE = "configs/milestone6/phase3_anchor_manifest.json"
 PHASE3_EVIDENCE_RELATIVE = "configs/milestone6/phase3_evidence_lock.json"
 PHASE3_MODEL_AUTHORITY_RELATIVE = "configs/milestone6/phase3_model_artifact_authority.json"
+PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE = (
+    "configs/milestone6/phase3_training_shuffle_report.json"
+)
+PHASE3_TRAINING_SHUFFLE_REPORT_SHA256 = (
+    "75da05f5fd2d33a6788d69110a526b19255800760f8181bcda656cfb0b180adc"
+)
+PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256 = (
+    "e84221531638dedf21ca14f903ea9c52a1a43f4570c8d9eb6a4b78abc95ddd2d"
+)
 PREPARATION_PROVENANCE_NAME = "phase3-model-preparation-provenance.json"
 PREPARATION_PROGRESS_NAME = "phase3-model-preparation-progress.json"
 
@@ -375,6 +390,8 @@ class Phase3ReadinessSnapshot:
     model_authority_sha256: str
     preparation_git_commit_sha: str
     generation_git_commit_sha: str
+    training_shuffle_report_sha256: str
+    training_shuffle_report_file_sha256: str
 
     @property
     def files_by_path(self) -> Mapping[str, AuthorityFileSnapshot]:
@@ -511,6 +528,32 @@ def _git_state(repository: Path) -> tuple[str, bool]:
 
 def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
     files = snapshot.files_by_path
+    try:
+        shuffle_report_snapshot = files[PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE]
+    except KeyError as exc:
+        raise Phase3ReadinessError(
+            "published Phase 3 training shuffle report is missing"
+        ) from exc
+    shuffle_report = _json(
+        shuffle_report_snapshot,
+        "Phase 3 training shuffle report",
+        canonical=True,
+    )
+    try:
+        _validate_training_shuffle_report_body(shuffle_report)
+    except (Phase3TrainingShuffleReportError, TypeError, ValueError) as exc:
+        raise Phase3ReadinessError(
+            "Phase 3 training shuffle report is not canonical"
+        ) from exc
+    if (
+        shuffle_report.get("report_sha256")
+        != PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
+        or shuffle_report_snapshot.sha256
+        != PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256
+    ):
+        raise Phase3ReadinessError(
+            "published Phase 3 training shuffle report digest differs"
+        )
     protocol = _json(files[PHASE3_PROTOCOL_RELATIVE], "Phase 3 protocol")
     _reject_final(protocol, "Phase 3 protocol")
     if protocol.get("schema_version") != "milestone6.phase3_representation_ladder.v1":
@@ -563,6 +606,24 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
         or authority.evidence_file_sha256 != files[PHASE3_EVIDENCE_RELATIVE].sha256
     ):
         raise Phase3ReadinessError("published Phase 3 model authority lineage drifted")
+    if (
+        shuffle_report.get("model_authority_sha256")
+        != authority.authority_sha256
+        or shuffle_report.get("artifact_store_id")
+        != authority.artifact_store_id
+    ):
+        raise Phase3ReadinessError(
+            "Phase 3 training shuffle report model authority lineage drifted"
+        )
+    for view in shuffle_report["views"]:
+        if (
+            view.get("plan_id") != PHASE3_PLAN_ID
+            or view.get("protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256
+            or view.get("evidence_lock_sha256") != evidence_sha
+        ):
+            raise Phase3ReadinessError(
+                "Phase 3 training shuffle report view lineage drifted"
+            )
     prep = files.get(f"runs/milestone6/{authority.artifact_store_id}/{PREPARATION_PROVENANCE_NAME}")
     progress = files.get(f"runs/milestone6/{authority.artifact_store_id}/{PREPARATION_PROGRESS_NAME}")
     if prep is None or progress is None:
@@ -616,6 +677,7 @@ def capture_phase3_readiness(
         )
     )
     model_authority = load_phase3_model_artifact_authority_bytes(files[-1].content)
+    files.append(_read_source(repo, PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE))
     canonical_model_root = repo / "runs" / "milestone6" / model_authority.artifact_store_id
     model_root = (
         Path(model_store_root).absolute()
@@ -640,6 +702,21 @@ def capture_phase3_readiness(
         ),
     ]
     commit, dirty = _git_state(repo)
+    report_snapshot = next(
+        item
+        for item in files
+        if item.relative_path == PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+    )
+    report_body = _json(
+        report_snapshot,
+        "Phase 3 training shuffle report",
+        canonical=True,
+    )
+    report_sha256 = report_body.get("report_sha256")
+    if not isinstance(report_sha256, str):
+        raise Phase3ReadinessError(
+            "Phase 3 training shuffle report self-hash is missing"
+        )
     snapshot = Phase3ReadinessSnapshot(
         repository=repo,
         files=tuple(files),
@@ -651,6 +728,8 @@ def capture_phase3_readiness(
         model_authority_sha256=model_authority.authority_sha256,
         preparation_git_commit_sha=model_authority.preparation_git_commit_sha,
         generation_git_commit_sha=model_authority.generation_git_commit_sha,
+        training_shuffle_report_sha256=report_sha256,
+        training_shuffle_report_file_sha256=report_snapshot.sha256,
     )
     _validate_authority_files(snapshot)
     snapshot.recheck(execution_preflight=execution_preflight, expected_git_commit=expected_git_commit)
