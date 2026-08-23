@@ -693,9 +693,12 @@ closes and revalidates the model context, independently replays the completed ba
 queries the reporting oracle. Failures carry typed fixed-endpoint censoring at 2,048; the reducer's
 declared 2,049 sentinel remains a later aggregation rule. Training accounting is zero during unit
 execution, and the candidate-generation hash excludes replay and oracle values.
-The authorized model's capacity, optimizer-step, forward-pass, recurrent-step, and example counts
-are copied into typed numeric diagnostics so the frozen reducer can verify and deduplicate the
+The authorized model's key, artifact, and cost identities are copied into a typed shared-model
+reference, while its capacity, optimizer-step, forward-pass, recurrent-step, and example counts are
+copied into typed numeric diagnostics. The frozen reducer can therefore verify and deduplicate the
 unique model-owner cost tie-break without treating those preparation costs as unit-local training.
+H4-shuffled units additionally persist the per-unit search permutation-map SHA-256 and the complete
+effective-change counters required by the frozen sequence-order claim gate.
 
 This slice still does not authorize a Phase 3 run. The six exact result-store configs, immutable
 source/readiness snapshot, transactional activation, resume driver, and complete 11,520-unit matrix

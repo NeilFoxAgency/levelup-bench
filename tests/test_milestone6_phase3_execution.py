@@ -60,8 +60,13 @@ def _context():
     )
 
 
-def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, success: bool = False):
-    planned = _planned()
+def _patch_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    success: bool = False,
+    condition: str = "S-state-availability-listwise-optimum",
+):
+    planned = _planned(condition)
     order: list[str] = []
     monkeypatch.setattr(execution, "_resolve_planned_unit", lambda context, unit: planned)
     monkeypatch.setattr(execution, "_resolve_task", lambda unit: SimpleNamespace(
@@ -83,6 +88,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, success: bool = False):
 
     class FakeModel:
         key = SimpleNamespace(
+            key_id="1" * 64,
             report=SimpleNamespace(
                 trainable_parameters=3841,
                 optimizer_steps=120,
@@ -91,6 +97,8 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, success: bool = False):
                 training_examples=10,
             )
         )
+        index = SimpleNamespace(artifact_id="2" * 64)
+        cost = SimpleNamespace(cost_id="3" * 64)
 
     monkeypatch.setattr(execution, "AuthorizedPhase3LoadedModel", FakeModel)
 
@@ -103,6 +111,19 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, success: bool = False):
             order.append("model_closed")
 
     monkeypatch.setattr(execution, "open_authorized_phase3_model", open_model)
+    shuffle = (
+        SimpleNamespace(
+            claim_eligible=True,
+            eligible_windows=10,
+            map_nonidentity_windows=10,
+            effective_tensor_changed_windows=8,
+            duplicate_vector_no_effect_windows=2,
+            unchanged_short_windows=3,
+            permutation_map_sha256="e" * 64,
+        )
+        if condition == "H4-shuffled-history-transition-listwise-optimum"
+        else None
+    )
     generated = SimpleNamespace(
         candidates=(SimpleNamespace(episode=1, adaptation_actions=65, trajectory=object()),),
         accounting=SimpleNamespace(
@@ -115,7 +136,7 @@ def _patch_runtime(monkeypatch: pytest.MonkeyPatch, *, success: bool = False):
             unknown_affordance_decisions=1,
         ),
         candidate_generation_sha256="d" * 64,
-        history_shuffle=None,
+        history_shuffle=shuffle,
     )
     calls = []
 
@@ -179,11 +200,14 @@ def test_one_unit_uses_frozen_budgets_and_replay_before_oracle(monkeypatch: pyte
     assert calls[0]["total_adaptation_action_cap"] == 2048
     assert calls[0]["prior_adaptation_actions"] == 64
     assert payload.accounting.training.calls == 0
+    assert payload.shared_artifact is not None
+    assert payload.shared_artifact.key_id == "1" * 64
     assert payload.diagnostics["model_optimizer_steps"] == 120
     assert payload.diagnostics["model_forward_passes"] == 1000
     assert payload.diagnostics["model_recurrent_steps"] == 0
     assert payload.outcome.success is True
     assert payload.candidate_generation_sha256 == "d" * 64
+    assert payload.history_shuffle_permutation_map_sha256 is None
 
 
 def test_failed_unit_is_typed_fixed_endpoint(monkeypatch: pytest.MonkeyPatch):
@@ -192,6 +216,16 @@ def test_failed_unit_is_typed_fixed_endpoint(monkeypatch: pytest.MonkeyPatch):
     assert payload.outcome.censored is True
     assert payload.outcome.censoring_budget == 2048
     assert payload.outcome.censoring_reason == "fixed_endpoint"
+
+
+def test_shuffled_unit_persists_permutation_map_digest(monkeypatch: pytest.MonkeyPatch):
+    planned, _, _ = _patch_runtime(
+        monkeypatch,
+        condition="H4-shuffled-history-transition-listwise-optimum",
+    )
+    payload = execution.execute_phase3_unit(_context(), planned)
+    assert payload.history_shuffle_permutation_map_sha256 == "e" * 64
+    assert payload.diagnostics["history_shuffle_claim_eligible"] is True
 
 
 def test_oracle_substitution_cannot_change_candidate_hash(monkeypatch: pytest.MonkeyPatch):

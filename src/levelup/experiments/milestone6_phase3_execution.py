@@ -40,6 +40,7 @@ from levelup.experiments.milestone6_phase3_generation import (
     FROZEN_MAX_ACTIONS_PER_EPISODE,
     FROZEN_PROBE_ACTIONS,
     FROZEN_TOTAL_ADAPTATION_ACTION_CAP,
+    H4_SHUFFLED_CONDITION,
     generate_phase3_candidates_with_observable_policy,
 )
 from levelup.experiments.milestone6_phase3_model_authority import (
@@ -53,6 +54,7 @@ from levelup.experiments.runner.config import TaskIdentity
 from levelup.experiments.runner.records import (
     PhaseAccounting,
     ResourceAccounting,
+    SharedArtifactReference,
     UnitOutcome,
     UnitPayload,
 )
@@ -235,6 +237,11 @@ def execute_phase3_unit(
         if type(model) is not AuthorizedPhase3LoadedModel:
             raise TypeError("Phase 3 execution requires an authorized loaded model")
         model_report = model.key.report
+        model_reference = SharedArtifactReference(
+            key_id=model.key.key_id,
+            artifact_id=model.index.artifact_id,
+            cost_id=model.cost.cost_id,
+        )
         setup_wall = time.perf_counter() - setup_started
         probe_started = time.perf_counter()
         probe = discover_affordances(
@@ -274,6 +281,10 @@ def execute_phase3_unit(
         if event is not None:
             event("generation_complete")
 
+    if (planned.base_condition_id == H4_SHUFFLED_CONDITION) != (
+        generated.history_shuffle is not None
+    ):
+        raise RuntimeError("Phase 3 search shuffle diagnostics differ from the condition")
     if (
         generated.accounting.episodes > FROZEN_CANDIDATE_EPISODES
         or generated.accounting.actions
@@ -342,8 +353,14 @@ def execute_phase3_unit(
             ),
             evaluator=PhaseAccounting(calls=1, wall_seconds=oracle_wall),
         ),
+        shared_artifact=model_reference,
         shared_artifacts=(),
         candidate_generation_sha256=generated.candidate_generation_sha256,
+        history_shuffle_permutation_map_sha256=(
+            generated.history_shuffle.permutation_map_sha256
+            if generated.history_shuffle is not None
+            else None
+        ),
         diagnostics=_diagnostics(generated, probe, model_report, oracle_wall),
     )
 

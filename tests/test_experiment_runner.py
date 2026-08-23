@@ -215,6 +215,7 @@ def _payload(planned: PlannedUnit) -> UnitPayload:
             replay=PhaseAccounting(actions=5),
             training=PhaseAccounting(optimizer_steps=6),
         ),
+        history_shuffle_permutation_map_sha256="f" * 64,
         diagnostics={"test": True},
     )
 
@@ -339,6 +340,9 @@ def _record(store: RunStore, planned: PlannedUnit) -> UnitRecord:
         elapsed_wall_seconds=1.0,
         outcome=payload.outcome,
         accounting=payload.accounting,
+        history_shuffle_permutation_map_sha256=(
+            payload.history_shuffle_permutation_map_sha256
+        ),
         diagnostics=payload.diagnostics,
     )
 
@@ -798,7 +802,9 @@ def test_failure_is_sanitized_retained_and_retryable(tmp_path: Path) -> None:
         "interrupted": 0,
     }
     assert len(store.attempt_records()) == 1
-    assert len(store.completed_records()) == 1
+    completed = store.completed_records()
+    assert len(completed) == 1
+    assert completed[0].history_shuffle_permutation_map_sha256 == "f" * 64
 
 
 @pytest.mark.parametrize(

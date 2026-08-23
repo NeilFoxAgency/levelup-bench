@@ -107,6 +107,9 @@ class ExperimentRunner:
                     shared_artifact=payload.shared_artifact,
                     shared_artifacts=payload.shared_artifacts,
                     candidate_generation_sha256=payload.candidate_generation_sha256,
+                    history_shuffle_permutation_map_sha256=(
+                        payload.history_shuffle_permutation_map_sha256
+                    ),
                     diagnostics=payload.diagnostics,
                 )
                 stage = "unit-publication"
