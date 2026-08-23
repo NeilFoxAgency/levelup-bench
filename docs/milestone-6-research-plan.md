@@ -589,12 +589,14 @@ Phase 2 B2/C model and unit-result identities without adding new execution. The 
 their descriptor-reloaded cost records to that plan and anchor. It contains no learner payloads,
 outcomes, aggregates, or final-family material.
 
-The current Phase 3 artifact envelope is deliberately schema-only and records
-`execution_authorized=false`. It cannot authorize a development run. Execution remains blocked
-until all 480 actual model artifacts and reports are persisted, descriptor-reloaded, recomputed
-against the exact evidence-derived views, and accepted by a separate opaque model-artifact
-authority. In particular, caller-supplied tensor hashes or uniformly rehashed recurrent-step
-counts are not accepted as execution evidence.
+The schema-only Phase 3 artifact envelope still records `execution_authorized=false` and cannot
+authorize a development run. The completed model store is instead bound by the separate opaque
+[`phase3_model_artifact_authority.json`](../configs/milestone6/phase3_model_artifact_authority.json).
+That canonical authority records `execution_authorized=true` only after descriptor-reloading all
+480 actual model artifacts and reports, reconstructing every frozen Phase 2 evidence-acquisition
+identity, recomputing all tensor and manifest hashes, and matching the exact evidence-derived
+views and 11,520-unit owner mapping. Caller-supplied tensor hashes, paths, evidence rows, or
+uniformly rehashed recurrent-step counts are not accepted as execution evidence.
 
 ### Phase 3 model-preparation boundary
 
@@ -643,3 +645,35 @@ python -m levelup.experiments.milestone6_phase3_model_preparation_driver \
   --authority-repository /absolute/path/to/clean-current-phase3-checkout \
   --output-root /absolute/path/to/phase3-model-output-root
 ```
+
+The complete preparation finished at clean commit
+`cc0820791427ac56acb8c50599446d99a7e06883`. It contains exactly 30 evidence identities, 120
+representation views, and 480 model owners. Its permitted one-time preparation accounting is
+72,000 optimizer steps, 18,540,000 forward passes, and 480 serialization calls; setup, paid
+probes, reference replay, environment interaction, search, evaluator, and oracle accounting are
+all zero. An identical-owner rerun preserved every committed model/key/cost/manifest/tensor byte
+and timestamp, establishing idempotent resume before the full batch was completed.
+
+The authority publisher was independently audited and passed exact-head and `main` CI at clean
+commit `2758cdcefc1da0694573649a8b5cc4b726a38281`. The canonical authority self-hash is
+`8771eb52433faf15d6e5e935902a5c935526ec0e6b8e34621c3d6a922aea1a52`; its committed-file SHA-256
+is `eecd68707e2cdfa34e9e9b30f787fd17b87ae767db63b659944e420cb7255388`, and its frozen ordered
+unit-to-owner mapping SHA-256 is
+`f202b9b799814e3ccd044b6d5acc8cfae02e35d430c91a988462951216728631`.
+
+Publish that authority only from the exact clean generation commit and the complete local model
+store:
+
+```bash
+python -m levelup.experiments.milestone6_phase3_model_authority_driver \
+  --output-root /absolute/path/to/phase3-model-output-root \
+  --authority-repository /absolute/path/to/clean-current-phase3-checkout \
+  --output-path configs/milestone6/phase3_model_artifact_authority.json
+```
+
+This authority permits construction of the next development-only execution gate; it does not by
+itself execute a unit. No Phase 3 outcomes, aggregates, comparative development results, or final
+families were opened while preparing or authorizing the model store. Execution must still resolve
+each unit and owner solely through the frozen plan and canonical authority, load the authorized
+model through pinned descriptors, prohibit retraining, and preserve fixed-budget generation,
+independent replay, and reporting-only post-generation optimum classification.

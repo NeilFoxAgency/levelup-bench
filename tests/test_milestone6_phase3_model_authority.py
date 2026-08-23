@@ -181,6 +181,32 @@ def test_authority_bytes_are_deterministic_and_self_hashed() -> None:
     )
 
 
+def test_committed_model_authority_is_exact_and_development_only() -> None:
+    path = (
+        Path(__file__).parents[1]
+        / "configs"
+        / "milestone6"
+        / "phase3_model_artifact_authority.json"
+    )
+    content = path.read_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        "eecd68707e2cdfa34e9e9b30f787fd17b87ae767db63b659944e420cb7255388"
+    )
+    value = load_phase3_model_artifact_authority_bytes(content)
+    assert value.authority_sha256 == (
+        "8771eb52433faf15d6e5e935902a5c935526ec0e6b8e34621c3d6a922aea1a52"
+    )
+    assert value.generation_git_commit_sha == ("2758cdcefc1da0694573649a8b5cc4b726a38281")
+    assert value.preparation_git_commit_sha == ("cc0820791427ac56acb8c50599446d99a7e06883")
+    assert value.development_only is True
+    assert value.execution_authorized is True
+    assert value.final is False
+    assert value.final_family_accessed is False
+    assert len(value.models) == len(value.owner_ids) == value.expected_model_count == 480
+    assert value.expected_evidence_count == 30
+    assert value.expected_view_count == 120
+
+
 def test_authority_byte_loader_requires_exact_canonical_bytes() -> None:
     value = _authority()
     canonical = canonical_phase3_model_authority_bytes(value)
