@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
+from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -12,6 +14,59 @@ import pytest
 
 from levelup.experiments import milestone6_phase3_readiness as readiness
 from levelup.experiments.runner.config import canonical_json_bytes
+
+_MODEL_STORE_ID = "phase3-model-preparation-cc08207"
+_MODEL_METADATA_FIXTURE = (
+    Path(__file__).parent / "fixtures" / "phase3_model_preparation_metadata"
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _materialize_metadata_only_model_store() -> Iterator[None]:
+    """Provide CI with exact small metadata, never fake checkpoint contents."""
+
+    model_root = Path(readiness.ROOT) / "runs" / "milestone6" / _MODEL_STORE_ID
+    if model_root.exists():
+        yield
+        return
+
+    candidate_parents = [model_root.parent.parent, model_root.parent]
+    created_parents = [path for path in candidate_parents if not path.exists()]
+    model_root.mkdir(parents=True)
+    created_directories = [
+        model_root / "phase3-model-artifact-keys",
+        model_root / "phase3-model-artifact-costs",
+        model_root / "phase3-model-artifacts",
+    ]
+    for directory in created_directories:
+        directory.mkdir()
+    created_files = [
+        model_root / readiness.PREPARATION_PROVENANCE_NAME,
+        model_root / readiness.PREPARATION_PROGRESS_NAME,
+    ]
+    for destination in created_files:
+        source = _MODEL_METADATA_FIXTURE / destination.name
+        expected = {
+            readiness.PREPARATION_PROVENANCE_NAME: (
+                "c1c302db1f88b62902628c839cd566ade6102bdb0716bcb505d09a5a49737679"
+            ),
+            readiness.PREPARATION_PROGRESS_NAME: (
+                "e5ff3c385c6f32ca9e5dac04b4a81e229c0bfb073300ac4505edfd419ff7d11b"
+            ),
+        }[destination.name]
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == expected
+        shutil.copyfile(source, destination)
+    assert all(not any(path.iterdir()) for path in created_directories)
+    try:
+        yield
+    finally:
+        for path in reversed(created_files):
+            path.unlink(missing_ok=True)
+        for path in reversed(created_directories):
+            path.rmdir()
+        model_root.rmdir()
+        for path in reversed(created_parents):
+            path.rmdir()
 
 
 def _report_snapshot(snapshot: readiness.Phase3ReadinessSnapshot) -> readiness.AuthorityFileSnapshot:
@@ -46,6 +101,17 @@ def _canonical_report_body(snapshot: readiness.Phase3ReadinessSnapshot) -> dict[
     unsigned.pop("report_sha256", None)
     body["report_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     return body
+
+
+def test_metadata_only_fixture_matches_published_authority() -> None:
+    provenance = _MODEL_METADATA_FIXTURE / readiness.PREPARATION_PROVENANCE_NAME
+    progress = _MODEL_METADATA_FIXTURE / readiness.PREPARATION_PROGRESS_NAME
+    assert hashlib.sha256(provenance.read_bytes()).hexdigest() == (
+        "c1c302db1f88b62902628c839cd566ade6102bdb0716bcb505d09a5a49737679"
+    )
+    assert hashlib.sha256(progress.read_bytes()).hexdigest() == (
+        "e5ff3c385c6f32ca9e5dac04b4a81e229c0bfb073300ac4505edfd419ff7d11b"
+    )
 
 
 def test_readiness_captures_all_published_development_authorities() -> None:
@@ -231,7 +297,7 @@ def test_recheck_rejects_repository_commit_or_dirty_drift(monkeypatch: pytest.Mo
 
 
 def test_execution_preflight_rejects_dirty_repository(monkeypatch: pytest.MonkeyPatch) -> None:
-    snapshot = readiness.capture_phase3_readiness()
+    snapshot = replace(readiness.capture_phase3_readiness(), git_dirty=True)
     monkeypatch.setattr(readiness, "_git_state", lambda _repository: (snapshot.git_commit_sha, True))
     with pytest.raises(readiness.Phase3ReadinessError, match="clean repository"):
         snapshot.preflight(expected_git_commit=snapshot.git_commit_sha)
