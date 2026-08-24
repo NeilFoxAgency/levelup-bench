@@ -423,3 +423,60 @@ def test_authority_json_fixture_is_not_a_final_authority(authority_and_plan) -> 
     assert json.loads(
         Path("configs/milestone6/phase3_model_artifact_authority.json").read_text()
     )["final"] is False
+
+
+def test_execution_cache_rejects_forged_constructor_and_foreign_unit(authority_and_plan):
+    authority, plan = authority_and_plan
+    with pytest.raises(execution_models.Phase3ExecutionModelError, match="construction token"):
+        execution_models.Phase3ExecutionAuthorityCache(
+            authority=authority,
+            validated_plan=plan,
+            units_by_id={},
+            owners_by_id={},
+            views_by_id={},
+            rows_by_owner_id={},
+        )
+    cache = execution_models.build_phase3_execution_authority_cache(authority, plan)
+    planned = plan.plan.units[0]
+    changed = replace(
+        planned,
+        unit=planned.unit.model_copy(
+            update={"unit_id": "f" * 64}
+        ),
+    )
+    with pytest.raises(execution_models.Phase3ExecutionModelError, match="cached plan"):
+        cache.resolve_unit(changed)
+
+
+def test_execution_cache_validates_full_authority_once_across_model_opens(
+    authority_and_plan, tmp_path, monkeypatch
+):
+    authority, plan = authority_and_plan
+    calls = 0
+    original = execution_models._validate_authority_and_plan
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(execution_models, "_validate_authority_and_plan", counted)
+    cache = execution_models.build_phase3_execution_authority_cache(authority, plan)
+    assert calls == 1
+    root = tmp_path / authority.artifact_store_id
+    _synthetic_namespaces(root)
+
+    class FakeLoaded:
+        _active = True
+
+    monkeypatch.setattr(execution_models, "AuthorizedPhase3LoadedModel", FakeLoaded)
+    monkeypatch.setattr(execution_models, "_load_one", lambda *args: FakeLoaded())
+    monkeypatch.setattr(
+        execution_models, "validate_authorized_phase3_loaded_model", lambda *args: None
+    )
+    for planned in plan.plan.units[:2]:
+        with execution_models.open_authorized_phase3_model(
+            authority, plan, planned, root, authority_cache=cache
+        ):
+            pass
+    assert calls == 1

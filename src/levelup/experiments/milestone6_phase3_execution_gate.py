@@ -14,6 +14,7 @@ records after activation.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -81,6 +82,19 @@ def _record_identity(value: tuple[int, int]) -> list[int]:
     return [int(value[0]), int(value[1])]
 
 
+RecordFingerprint = tuple[int, int, int, int, int, str]
+
+
+def _stat_fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(value.st_ctime_ns),
+    )
+
+
 def _canonical(value: object) -> bytes:
     return canonical_json_bytes(value) + b"\n"
 
@@ -128,22 +142,219 @@ def _marker_bytes(marker_fd: int) -> bytes:
         raise Phase3ActivationError("cannot read pinned activation marker") from exc
 
 
-def _load_canonical_record(fd: int, name: str, model: type[UnitRecord] | type[AttemptRecord]):
+def _parse_canonical_record(
+    rendered: bytes,
+    name: str,
+    model: type[UnitRecord] | type[AttemptRecord],
+):
     try:
-        rendered = secure_fs.read_bytes_at(fd, name)
         value = json.loads(rendered)
         record = model.model_validate(value)
-    except (secure_fs.SecureFilesystemError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
         raise Phase3ActivationError(f"invalid stored result record: {name}") from exc
     if rendered != _canonical(record.model_dump(mode="json")):
         raise Phase3ActivationError(f"stored result record is not canonical: {name}")
     return record
 
 
+def _record_snapshot(fd: int, name: str) -> tuple[bytes, RecordFingerprint]:
+    """Read one record through a pinned descriptor and return stable bytes/fingerprint."""
+
+    try:
+        with secure_fs.open_regular_file_at(fd, name) as record_fd:
+            before = os.fstat(record_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise Phase3ActivationError("stored result is not a regular file")
+            path_before = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if _stat_fingerprint(path_before) != _stat_fingerprint(before):
+                raise Phase3ActivationError("stored result identity changed while opening")
+            chunks: list[bytes] = []
+            while True:
+                chunk = os.read(record_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            rendered = b"".join(chunks)
+            after = os.fstat(record_fd)
+            path_after = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if (
+                _stat_fingerprint(before) != _stat_fingerprint(after)
+                or len(rendered) != int(after.st_size)
+                or _stat_fingerprint(path_after) != _stat_fingerprint(after)
+            ):
+                raise Phase3ActivationError("stored result changed while being read")
+    except Phase3ActivationError:
+        raise
+    except (OSError, secure_fs.SecureFilesystemError, TypeError, ValueError) as exc:
+        raise Phase3ActivationError("cannot fingerprint stored result") from exc
+    return rendered, (*_stat_fingerprint(after), hashlib.sha256(rendered).hexdigest())
+
+
+def _record_fingerprint(fd: int, name: str) -> RecordFingerprint:
+    return _record_snapshot(fd, name)[1]
+
+
+def _load_canonical_record(fd: int, name: str, model: type[UnitRecord] | type[AttemptRecord]):
+    rendered, _fingerprint = _record_snapshot(fd, name)
+    return _parse_canonical_record(rendered, name, model)
+
+
+@dataclass(slots=True)
+class _ScientificAuthorityCache:
+    """Activation-scoped, descriptor-pinned scientific authority.
+
+    The authority and shuffle report are immutable readiness bytes, so parse
+    them once.  Model-key indices are loaded lazily through the held keys
+    directory and cached by owner.  We retain the entry identity and stat
+    fingerprint so a replacement or in-place mutation is detected on every
+    subsequent validation without repeatedly reparsing the 480-owner store.
+    """
+
+    lease: Phase3ActivationReadinessLease
+    authority: Any
+    rows: dict[str, Any]
+    shuffle_views: dict[str, Mapping[str, Any]]
+    keys_fd: int
+    _indices: dict[str, tuple[Any, tuple[int, int], tuple[int, int, int, int, int]]] = field(
+        default_factory=dict
+    )
+
+    @classmethod
+    def from_lease(cls, lease: Phase3ActivationReadinessLease) -> "_ScientificAuthorityCache":
+        files = lease.snapshot.files_by_path
+        try:
+            authority = load_phase3_model_artifact_authority_bytes(
+                files[PHASE3_MODEL_AUTHORITY_RELATIVE].content
+            )
+            report_content = files[PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE].content
+            report = json.loads(report_content)
+            if not isinstance(report, dict) or canonical_json_bytes(report) != report_content:
+                raise ValueError("shuffle report is not canonical")
+            views = report["views"]
+            if not isinstance(views, list):
+                raise ValueError("shuffle report views are not a list")
+            shuffle_views = {str(view["view_id"]): view for view in views}
+            if len(shuffle_views) != len(views):
+                raise ValueError("shuffle report view IDs are duplicated")
+            rows = {row.owner_id: row for row in authority.models}
+            if len(rows) != len(authority.models):
+                raise ValueError("model authority owner IDs are duplicated")
+            keys_relative = f"runs/milestone6/{authority.artifact_store_id}/{KEYS_DIR}"
+            keys_fd = lease.directory_descriptors.get(keys_relative)
+            if type(keys_fd) is not int:
+                raise ValueError("held model-key authority is unavailable")
+            return cls(lease, authority, rows, shuffle_views, keys_fd)
+        except (AttributeError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise Phase3ActivationError("activation scientific authority is invalid") from exc
+
+    @staticmethod
+    def _fingerprint(value: os.stat_result) -> tuple[int, int, int, int, int]:
+        return (
+            int(value.st_dev),
+            int(value.st_ino),
+            int(value.st_size),
+            int(value.st_mtime_ns),
+            int(value.st_ctime_ns),
+        )
+
+    def row_for(self, planned: Any) -> Any:
+        try:
+            return self.rows[planned.model_owner_id]
+        except (AttributeError, KeyError) as exc:
+            raise Phase3ActivationError(
+                "completed record has no published model-owner authority row"
+            ) from exc
+
+    def _assert_index_stable(
+        self,
+        key_id: str,
+        identity: tuple[int, int],
+        fingerprint: tuple[int, int, int, int, int],
+    ) -> None:
+        try:
+            observed = os.stat(key_id + ".json", dir_fd=self.keys_fd, follow_symlinks=False)
+            if not stat.S_ISREG(observed.st_mode):
+                raise Phase3ActivationError("held model-key authority is not a regular file")
+            if (int(observed.st_dev), int(observed.st_ino)) != identity:
+                raise Phase3ActivationError("held model-key authority identity changed")
+            if self._fingerprint(observed) != fingerprint:
+                raise Phase3ActivationError("held model-key authority changed")
+        except Phase3ActivationError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise Phase3ActivationError("held model-key authority cannot be revalidated") from exc
+
+    def index_for(self, planned: Any, row: Any) -> Any:
+        cached = self._indices.get(row.key_id)
+        if cached is not None:
+            index, identity, fingerprint = cached
+            self._assert_index_stable(row.key_id, identity, fingerprint)
+            return index
+        try:
+            with secure_fs.open_regular_file_at(self.keys_fd, f"{row.key_id}.json") as index_fd:
+                observed_before = os.fstat(index_fd)
+                identity = (int(observed_before.st_dev), int(observed_before.st_ino))
+                chunks: list[bytes] = []
+                while True:
+                    chunk = os.read(index_fd, 1024 * 1024)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                rendered_index = b"".join(chunks)
+                observed_after = os.fstat(index_fd)
+                if (
+                    self._fingerprint(observed_before)
+                    != self._fingerprint(observed_after)
+                    or len(rendered_index) != int(observed_after.st_size)
+                ):
+                    raise Phase3ActivationError(
+                        "held model-key authority changed while being read"
+                    )
+                index = Phase3ModelArtifactIndex.model_validate(json.loads(rendered_index))
+                fingerprint = self._fingerprint(observed_after)
+        except (
+            OSError,
+            secure_fs.SecureFilesystemError,
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise Phase3ActivationError("held model-key authority is invalid") from exc
+        if rendered_index != _canonical(index.model_dump(mode="json")):
+            raise Phase3ActivationError("held model-key authority is not canonical")
+        self._indices[row.key_id] = (
+            index,
+            identity,
+            fingerprint,
+        )
+        self._assert_index_stable(row.key_id, identity, fingerprint)
+        return index
+
+    def shuffle_view(self, view_id: str) -> Mapping[str, Any]:
+        try:
+            return self.shuffle_views[view_id]
+        except KeyError as exc:
+            raise Phase3ActivationError("H4-shuffled report view lineage is unavailable") from exc
+
+    def revalidate(self) -> None:
+        for key_id, (_index, identity, fingerprint) in self._indices.items():
+            self._assert_index_stable(key_id, identity, fingerprint)
+
+    def discard(self) -> None:
+        """Release parsed authority and lazy key state after the capability closes."""
+
+        self._indices.clear()
+        self.rows.clear()
+        self.shuffle_views.clear()
+        self.authority = None
+        self.keys_fd = -1
+
+
 def _scientific_record_check(
     record: UnitRecord,
     planned: Any,
-    lease: Phase3ActivationReadinessLease,
+    scientific: _ScientificAuthorityCache,
 ) -> None:
     """Validate the typed Phase 3 contract before a record is published."""
 
@@ -190,14 +401,8 @@ def _scientific_record_check(
     ):
         raise Phase3ActivationError("failed record violates fixed-endpoint censoring")
 
-    files = lease.snapshot.files_by_path
-    try:
-        authority = load_phase3_model_artifact_authority_bytes(
-            files[PHASE3_MODEL_AUTHORITY_RELATIVE].content
-        )
-        row = next(item for item in authority.models if item.owner_id == planned.model_owner_id)
-    except (AttributeError, KeyError, StopIteration, TypeError, ValueError) as exc:
-        raise Phase3ActivationError("completed record has no published model-owner authority row") from exc
+    authority = scientific.authority
+    row = scientific.row_for(planned)
     reference = record.shared_artifact
     if (
         reference is None
@@ -207,25 +412,10 @@ def _scientific_record_check(
         or reference.cost_id != row.cost_id
     ):
         raise Phase3ActivationError("completed record model reference differs from authority")
-    keys_relative = f"runs/milestone6/{authority.artifact_store_id}/{KEYS_DIR}"
-    keys_fd = lease.directory_descriptors.get(keys_relative)
-    if type(keys_fd) is not int:
-        raise Phase3ActivationError("held model-key authority is unavailable")
-    try:
-        rendered_index = secure_fs.read_bytes_at(keys_fd, f"{row.key_id}.json")
-        index = Phase3ModelArtifactIndex.model_validate(json.loads(rendered_index))
-    except (
-        secure_fs.SecureFilesystemError,
-        UnicodeError,
-        json.JSONDecodeError,
-        TypeError,
-        ValueError,
-    ) as exc:
-        raise Phase3ActivationError("held model-key authority is invalid") from exc
+    index = scientific.index_for(planned, row)
     key = index.key
     if (
-        rendered_index != _canonical(index.model_dump(mode="json"))
-        or index.key_id != row.key_id
+        index.key_id != row.key_id
         or index.artifact_id != row.artifact_id
         or index.manifest_sha256 != row.manifest_sha256
         or key.owner_id != planned.model_owner_id
@@ -302,8 +492,7 @@ def _scientific_record_check(
     if record.history_shuffle_permutation_map_sha256 is None:
         raise Phase3ActivationError("H4-shuffled record is missing its history permutation digest")
     try:
-        report = json.loads(files[PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE].content)
-        view = next(item for item in report["views"] if item["view_id"] == planned.view_id)
+        view = scientific.shuffle_view(planned.view_id)
         eligible = diagnostics.get("history_shuffle_eligible_windows")
         map_nonidentity = diagnostics.get("history_shuffle_map_nonidentity_windows")
         effective = diagnostics.get("history_shuffle_effective_tensor_changed_windows")
@@ -324,7 +513,7 @@ def _scientific_record_check(
             raise Phase3ActivationError("H4-shuffled record history digest differs from report lineage")
     except Phase3ActivationError:
         raise
-    except (KeyError, StopIteration, TypeError, ValueError, json.JSONDecodeError) as exc:
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
         raise Phase3ActivationError("H4-shuffled report view lineage is unavailable") from exc
 
 
@@ -516,9 +705,11 @@ def _open_store_descriptors(
 def _validate_store_descriptors(
     stores: tuple[Phase3ResultStore, ...],
     descriptors: tuple[dict[str, int], ...],
-    lease: Phase3ActivationReadinessLease,
+    scientific: _ScientificAuthorityCache,
+    record_fingerprints: dict[tuple[str, str, str], RecordFingerprint],
     *,
     marker_exists: bool,
+    initial_scan: bool,
 ) -> None:
     for store, descriptor in zip(stores, descriptors, strict=True):
         observed = {key: secure_fs.directory_identity(fd) for key, fd in descriptor.items()}
@@ -541,16 +732,48 @@ def _validate_store_descriptors(
             store._validate_pinned(descriptor)
             expected_by_id = {item.unit.unit_id: item for item in store.spec.units}
             for name in units:
-                record = _load_canonical_record(descriptor["units"], name, UnitRecord)
+                identity_key = (store.family_id, "units", name)
+                rendered, fingerprint = _record_snapshot(descriptor["units"], name)
+                prior_fingerprint = record_fingerprints.get(identity_key)
+                if prior_fingerprint is None:
+                    if not initial_scan:
+                        raise Phase3ActivationError("untracked result appeared during activation")
+                    record_fingerprints[identity_key] = fingerprint
+                elif prior_fingerprint != fingerprint:
+                    raise Phase3ActivationError(
+                        "completed result identity or fingerprint changed"
+                    )
+                record = _parse_canonical_record(rendered, name, UnitRecord)
                 _verify_record_identity(record, store.spec, expected_by_id, filename=name)
-                _scientific_record_check(record, expected_by_id[record.unit_id], lease)
+                _scientific_record_check(record, expected_by_id[record.unit_id], scientific)
             for name in attempts:
-                record = _load_canonical_record(descriptor["attempts"], name, AttemptRecord)
+                identity_key = (store.family_id, "attempts", name)
+                rendered, fingerprint = _record_snapshot(descriptor["attempts"], name)
+                prior_fingerprint = record_fingerprints.get(identity_key)
+                if prior_fingerprint is None:
+                    if not initial_scan:
+                        raise Phase3ActivationError("untracked result appeared during activation")
+                    record_fingerprints[identity_key] = fingerprint
+                elif prior_fingerprint != fingerprint:
+                    raise Phase3ActivationError(
+                        "attempt result identity or fingerprint changed"
+                    )
+                record = _parse_canonical_record(rendered, name, AttemptRecord)
                 _verify_record_identity(record, store.spec, expected_by_id, filename=name)
+            current_keys = {
+                (store.family_id, "units", name) for name in units
+            }
+            current_keys.update(
+                (store.family_id, "attempts", name) for name in attempts
+            )
+            for key in record_fingerprints:
+                if key[0] == store.family_id and key not in current_keys:
+                    raise Phase3ActivationError("stored result was removed during activation")
         except Phase3ActivationError:
             raise
-        except (Phase3ResultStoreError, secure_fs.SecureFilesystemError) as exc:
+        except (OSError, Phase3ResultStoreError, secure_fs.SecureFilesystemError) as exc:
             raise Phase3ActivationError(f"prepared family store is invalid: {store.family_id}") from exc
+    scientific.revalidate()
 
 
 def _reopen_identities(root: Path, stores: tuple[Phase3ResultStore, ...]) -> tuple[tuple[int, int], tuple[dict[str, tuple[int, int]], ...]]:
@@ -645,6 +868,9 @@ class _FamilyWritableStore:
     def load_completed(self, unit_id: str) -> UnitRecord | None:
         return self._batch._load_completed(self._index, unit_id)
 
+    def completed_unit_ids(self) -> tuple[str, ...]:
+        return self._batch.completed_unit_ids(self.family_id)
+
     def attempt_records(self) -> tuple[AttemptRecord, ...]:
         return self._batch.attempt_records(self.family_id)
 
@@ -666,6 +892,9 @@ class Phase3ActivatedBatch:
     _marker: bytes
     _marker_fd: int
     _marker_identity: tuple[int, int]
+    _scientific: _ScientificAuthorityCache
+    _record_fingerprints: dict[tuple[str, str, str], RecordFingerprint]
+    _unit_maps: tuple[dict[str, Any], ...]
     _token: object = field(repr=False, compare=False)
     _active: bool = True
 
@@ -721,10 +950,18 @@ class Phase3ActivatedBatch:
         except Phase3ActivationError:
             raise
 
+    def _assert_record_identity(self, index: int, kind: str, name: str) -> None:
+        family_id = self._stores[index].family_id
+        expected = self._record_fingerprints.get((family_id, kind, name))
+        if expected is None:
+            raise Phase3ActivationError("untracked result appeared during activation")
+        observed = _record_fingerprint(self._descriptors[index][kind], name)
+        if observed != expected:
+            raise Phase3ActivationError("stored result identity or fingerprint changed")
+
     def _unit(self, index: int, unit_id: str):
-        expected = {item.unit.unit_id: item for item in self._stores[index].spec.units}
         try:
-            return expected[unit_id]
+            return self._unit_maps[index][unit_id]
         except KeyError as exc:
             raise Phase3ActivationError(f"foreign Phase 3 unit: {unit_id}") from exc
 
@@ -738,9 +975,21 @@ class Phase3ActivatedBatch:
             _verify_record_identity(record, store.spec, {planned.unit.unit_id: planned}, filename=f"{record.unit_id}.json")
         except Phase3ResultStoreError as exc:
             raise Phase3ActivationError("completed record lineage differs from frozen unit") from exc
-        _scientific_record_check(record, planned, self._lease)
+        _scientific_record_check(record, planned, self._scientific)
         name = f"{record.unit_id}.json"
+        identity_key = (store.family_id, "units", name)
+        previously_tracked = identity_key in self._record_fingerprints
+        if previously_tracked:
+            self._assert_record_identity(index, "units", name)
         published = _write_record(self._descriptors[index]["units"], name, record.model_dump(mode="json"))
+        if not published and not previously_tracked:
+            raise Phase3ActivationError("completed result raced with external publication")
+        rendered, observed = _record_snapshot(self._descriptors[index]["units"], name)
+        if rendered != _canonical(record.model_dump(mode="json")):
+            raise Phase3ActivationError("completed result changed during publication")
+        if previously_tracked and observed != self._record_fingerprints[identity_key]:
+            raise Phase3ActivationError("completed result identity or fingerprint changed")
+        self._record_fingerprints[identity_key] = observed
         self._require_live()
         return published
 
@@ -757,7 +1006,19 @@ class Phase3ActivatedBatch:
             raise Phase3ActivationError("attempt record lineage differs from frozen unit") from exc
         if not 1 <= record.attempt <= 9999:
             raise Phase3ActivationError("attempt number must be between 1 and 9999")
+        identity_key = (store.family_id, "attempts", name)
+        previously_tracked = identity_key in self._record_fingerprints
+        if previously_tracked:
+            self._assert_record_identity(index, "attempts", name)
         published = _write_record(self._descriptors[index]["attempts"], name, record.model_dump(mode="json"))
+        if not published and not previously_tracked:
+            raise Phase3ActivationError("attempt result raced with external publication")
+        rendered, observed = _record_snapshot(self._descriptors[index]["attempts"], name)
+        if rendered != _canonical(record.model_dump(mode="json")):
+            raise Phase3ActivationError("attempt result changed during publication")
+        if previously_tracked and observed != self._record_fingerprints[identity_key]:
+            raise Phase3ActivationError("attempt result identity or fingerprint changed")
+        self._record_fingerprints[identity_key] = observed
         self._require_live()
         return published
 
@@ -772,8 +1033,22 @@ class Phase3ActivatedBatch:
         if name not in entries:
             return None
         try:
-            record = _load_canonical_record(self._descriptors[index]["units"], name, UnitRecord)
-            _verify_record_identity(record, self._stores[index].spec, {item.unit.unit_id: item for item in self._stores[index].spec.units}, filename=name)
+            rendered, fingerprint = _record_snapshot(
+                self._descriptors[index]["units"], name
+            )
+            expected_fingerprint = self._record_fingerprints.get(
+                (self._stores[index].family_id, "units", name)
+            )
+            if expected_fingerprint is None or fingerprint != expected_fingerprint:
+                raise Phase3ActivationError("stored result identity or fingerprint changed")
+            record = _parse_canonical_record(rendered, name, UnitRecord)
+            planned = self._unit(index, record.unit_id)
+            _verify_record_identity(
+                record,
+                self._stores[index].spec,
+                {planned.unit.unit_id: planned},
+                filename=name,
+            )
             self._scientific_check_for_unit(index, record)
         except Exception as exc:
             if isinstance(exc, Phase3ActivationError):
@@ -784,7 +1059,48 @@ class Phase3ActivatedBatch:
 
     def _scientific_check_for_unit(self, index: int, record: UnitRecord) -> None:
         planned = self._unit(index, record.unit_id)
-        _scientific_record_check(record, planned, self._lease)
+        _scientific_record_check(record, planned, self._scientific)
+
+    def completed_unit_ids(self, family_id: str | None = None) -> tuple[str, ...]:
+        """Return validated record presence without exposing outcome fields."""
+
+        self._require_live()
+        if family_id is None:
+            indices = range(len(self._stores))
+        else:
+            try:
+                indices = (FAMILIES.index(family_id),)
+            except ValueError as exc:
+                raise Phase3ActivationError(
+                    f"unknown activated family: {family_id}"
+                ) from exc
+        values: list[str] = []
+        for index in indices:
+            try:
+                names = set(
+                    secure_fs.strict_regular_entries(
+                        self._descriptors[index]["units"]
+                    )
+                )
+            except secure_fs.SecureFilesystemError as exc:
+                raise Phase3ActivationError(
+                    "cannot enumerate activated completed results"
+                ) from exc
+            expected_ids = tuple(
+                item.unit.unit_id for item in self._stores[index].spec.units
+            )
+            expected_names = {f"{unit_id}.json" for unit_id in expected_ids}
+            if not names <= expected_names:
+                raise Phase3ActivationError(
+                    "completed namespace contains a foreign record"
+                )
+            for name in names:
+                self._assert_record_identity(index, "units", name)
+            values.extend(
+                unit_id for unit_id in expected_ids if f"{unit_id}.json" in names
+            )
+        self._require_live()
+        return tuple(values)
 
     def attempt_records(self, family_id: str | None = None) -> tuple[AttemptRecord, ...]:
         self._require_live()
@@ -804,7 +1120,15 @@ class Phase3ActivatedBatch:
             for name in names:
                 if ".attempt-" not in name:
                     raise Phase3ActivationError("attempt namespace contains a foreign record")
-                record = _load_canonical_record(self._descriptors[index]["attempts"], name, AttemptRecord)
+                rendered, fingerprint = _record_snapshot(
+                    self._descriptors[index]["attempts"], name
+                )
+                expected_fingerprint = self._record_fingerprints.get(
+                    (self._stores[index].family_id, "attempts", name)
+                )
+                if expected_fingerprint is None or fingerprint != expected_fingerprint:
+                    raise Phase3ActivationError("stored result identity or fingerprint changed")
+                record = _parse_canonical_record(rendered, name, AttemptRecord)
                 planned = self._unit(index, record.unit_id)
                 try:
                     _verify_record_identity(
@@ -825,7 +1149,11 @@ class Phase3ActivatedBatch:
         self._require_live()
         if family_id is None:
             family_id = next(
-                (store.family_id for store in self._stores if any(item.unit.unit_id == unit_id for item in store.spec.units)),
+                (
+                    self._stores[index].family_id
+                    for index, unit_map in enumerate(self._unit_maps)
+                    if unit_id in unit_map
+                ),
                 None,
             )
         if family_id not in FAMILIES:
@@ -835,6 +1163,7 @@ class Phase3ActivatedBatch:
         prefix = f"{unit_id}.attempt-"
         numbers: list[int] = []
         for name in secure_fs.strict_regular_entries(self._descriptors[index]["attempts"]):
+            self._assert_record_identity(index, "attempts", name)
             if name.startswith(prefix) and name.endswith(".json"):
                 try:
                     number = int(name[len(prefix) : -5])
@@ -850,6 +1179,10 @@ class Phase3ActivatedBatch:
 
     def close(self) -> None:
         self._active = False
+        self._scientific.discard()
+        self._record_fingerprints.clear()
+        for values in self._unit_maps:
+            values.clear()
 
 
 @contextmanager
@@ -895,8 +1228,10 @@ def activate_phase3_result_stores(
     root_identity: tuple[int, int] | None = None
     identities: tuple[dict[str, tuple[int, int]], ...] | None = None
     batch: Phase3ActivatedBatch | None = None
+    record_fingerprints: dict[tuple[str, str, str], RecordFingerprint] = {}
     try:
         root_fd, descriptors, identities = _open_store_descriptors(root, typed_stores, stack)
+        scientific = _ScientificAuthorityCache.from_lease(lease)
         root_identity = identities[0]["root"]
         if any(identity["root"] != root_identity for identity in identities):
             raise Phase3ActivationError("result stores do not share one root identity")
@@ -909,7 +1244,12 @@ def activate_phase3_result_stores(
             marker_exists=marker_present,
         )
         _validate_store_descriptors(
-            typed_stores, descriptors, lease, marker_exists=marker_present
+            typed_stores,
+            descriptors,
+            scientific,
+            record_fingerprints,
+            marker_exists=marker_present,
+            initial_scan=True,
         )
         body = _marker_body(expected, typed_stores, lease, root_identity, identities)
         marker_value = _marker_with_self_hash(body)
@@ -938,6 +1278,12 @@ def activate_phase3_result_stores(
             marker_bytes,
             marker_fd,
             marker_identity,
+            scientific,
+            record_fingerprints,
+            tuple(
+                {item.unit.unit_id: item for item in store.spec.units}
+                for store in typed_stores
+            ),
             _BATCH_TOKEN,
         )
         try:
@@ -954,8 +1300,10 @@ def activate_phase3_result_stores(
                 _validate_store_descriptors(
                     typed_stores,
                     descriptors,
-                    lease,
+                    scientific,
+                    record_fingerprints,
                     marker_exists=True,
+                    initial_scan=False,
                 )
             finally:
                 batch.close()

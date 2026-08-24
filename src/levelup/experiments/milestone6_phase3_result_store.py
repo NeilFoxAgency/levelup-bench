@@ -2,10 +2,10 @@
 
 The Phase 3 logical plan is deliberately *not* represented by a synthetic
 ``ExperimentConfig``.  Its exposure hashes are part of the already-authorized
-plan and were produced by the Phase 3 authority.  This module therefore only
-partitions an opaque :class:`ValidatedPhase3Plan` into six result-store
-specifications; it never calls ``plan_expected_units`` and never opens or
-writes a result namespace.
+plan and were produced by the Phase 3 authority.  This module partitions an
+opaque :class:`ValidatedPhase3Plan` into six result-store specifications and
+can prepare their immutable, inert metadata namespaces.  It never calls
+``plan_expected_units`` and cannot activate a store or publish a result.
 """
 
 from __future__ import annotations
@@ -846,6 +846,89 @@ def prepare_phase3_result_stores(
         raise
 
 
+def _load_one_store(spec: Phase3ResultStoreSpec, output_root: Path) -> Phase3ResultStore:
+    """Load one already-published store without creating or modifying anything.
+
+    Every descendant is opened relative to a pinned root descriptor with the
+    secure, non-following primitives.  The metadata and record namespaces are
+    validated while those descriptors are held, then the returned value is
+    revalidated through its normal resume path after all descriptors close.
+    Missing or substituted entries therefore fail closed and never trigger a
+    mkdir/write fallback.
+    """
+
+    root = Path(os.path.abspath(output_root))
+    try:
+        with ExitStack() as stack:
+            root_fd = secure_fs.open_directory_chain(root)
+            stack.callback(os.close, root_fd)
+            family_fd = secure_fs.open_child_directory(root_fd, spec.family_id)
+            stack.callback(os.close, family_fd)
+            run_fd = secure_fs.open_child_directory(family_fd, spec.run_id)
+            stack.callback(os.close, run_fd)
+            units_fd = secure_fs.open_child_directory(run_fd, "units")
+            stack.callback(os.close, units_fd)
+            attempts_fd = secure_fs.open_child_directory(run_fd, "attempts")
+            stack.callback(os.close, attempts_fd)
+            prepared = Phase3ResultStore(
+                spec=spec,
+                root=root,
+                run_dir=root / spec.family_id / spec.run_id,
+                root_identity=secure_fs.directory_identity(root_fd),
+                family_identity=secure_fs.directory_identity(family_fd),
+                run_identity=secure_fs.directory_identity(run_fd),
+                units_identity=secure_fs.directory_identity(units_fd),
+                attempts_identity=secure_fs.directory_identity(attempts_fd),
+            )
+            prepared._validate_pinned(
+                {
+                    "root": root_fd,
+                    "family": family_fd,
+                    "run": run_fd,
+                    "units": units_fd,
+                    "attempts": attempts_fd,
+                }
+            )
+        prepared.validate_resume()
+        return prepared
+    except Phase3ResultStoreError:
+        raise
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        raise Phase3ResultStoreError("cannot load prepared Phase 3 result namespace") from exc
+
+
+def load_phase3_result_store(
+    output_root: str | Path,
+    validated_plan: ValidatedPhase3Plan,
+    authority: Phase3ModelArtifactAuthority,
+    *,
+    family_id: str,
+) -> Phase3ResultStore:
+    """Load one existing, inert family store without filesystem mutation."""
+
+    expected = build_phase3_expected_plan(validated_plan, authority)
+    spec = expected.store_for_family(family_id)
+    return _load_one_store(spec, Path(output_root))
+
+
+def load_phase3_result_stores(
+    output_root: str | Path,
+    validated_plan: ValidatedPhase3Plan,
+    authority: Phase3ModelArtifactAuthority,
+) -> tuple[Phase3ResultStore, ...]:
+    """Load all six existing, inert family stores without filesystem mutation.
+
+    Unlike :func:`prepare_phase3_result_stores`, this function never creates
+    directories or publishes metadata.  The complete canonical tree must
+    already exist and pass strict descriptor-relative validation.
+    """
+
+    expected = build_phase3_expected_plan(validated_plan, authority)
+    return tuple(
+        _load_one_store(spec, Path(output_root)) for spec in expected.stores
+    )
+
+
 # A descriptive alias keeps call sites readable when they only need the six
 # family store specifications.
 build_phase3_result_store_plan = build_phase3_expected_plan
@@ -864,6 +947,8 @@ __all__ = [
     "SCHEMA_VERSION",
     "build_phase3_expected_plan",
     "build_phase3_result_store_plan",
+    "load_phase3_result_store",
+    "load_phase3_result_stores",
     "prepare_phase3_result_store",
     "prepare_phase3_result_stores",
     "validate_phase3_expected_plan",

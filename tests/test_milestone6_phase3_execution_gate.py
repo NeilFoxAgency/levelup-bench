@@ -5,7 +5,6 @@ import json
 import os
 from collections.abc import Iterator
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -33,6 +32,7 @@ from levelup.experiments.milestone6_phase3_result_store import (
     build_phase3_expected_plan,
     prepare_phase3_result_stores,
 )
+from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.records import (
     AttemptRecord,
     PhaseAccounting,
@@ -210,7 +210,9 @@ def test_orphan_records_without_marker_are_rejected(prepared) -> None:
             pass
 
 
-def test_marker_tamper_and_temporary_remnant_are_rejected(prepared) -> None:
+def test_marker_tamper_and_temporary_remnant_are_rejected(
+    prepared, tmp_path: Path
+) -> None:
     root, expected, stores, _authority = prepared
     with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40):
         pass
@@ -222,16 +224,20 @@ def test_marker_tamper_and_temporary_remnant_are_rejected(prepared) -> None:
 
     # Restore the canonical marker using a fresh activation in an isolated tree
     # so the tamper test does not rely on a destructive repair.
-    with TemporaryDirectory(dir="/private/tmp") as other:
-        other_root = Path(other) / "results"
-        other_root.mkdir()
-        plan, authority = _authorities()
-        other_expected = build_phase3_expected_plan(plan, authority)
-        other_stores = prepare_phase3_result_stores(other_root, plan, authority)
-        (other_root / ".phase3-activation.leftover.tmp").write_bytes(b"x")
-        with pytest.raises(Phase3ActivationError, match="foreign.*temporary"):
-            with phase3_activation(other_stores, other_expected, _lease(other_expected), expected_git_commit="a" * 40):
-                pass
+    other_root = tmp_path / "isolated-results"
+    other_root.mkdir()
+    plan, authority = _authorities()
+    other_expected = build_phase3_expected_plan(plan, authority)
+    other_stores = prepare_phase3_result_stores(other_root, plan, authority)
+    (other_root / ".phase3-activation.leftover.tmp").write_bytes(b"x")
+    with pytest.raises(Phase3ActivationError, match="foreign.*temporary"):
+        with phase3_activation(
+            other_stores,
+            other_expected,
+            _lease(other_expected),
+            expected_git_commit="a" * 40,
+        ):
+            pass
 
 
 def test_exact_commit_is_mandatory(prepared) -> None:
@@ -299,11 +305,77 @@ def test_canonical_completed_write_load_resume_and_conflict(prepared) -> None:
     record = _valid_record(stores[0], planned, authority)
     with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
         family = batch.store_for_family(FAMILIES[0])
+        unit_map = batch._unit_maps[0]
+        assert batch._unit(0, planned.unit.unit_id) is unit_map[planned.unit.unit_id]
+        assert batch._unit_maps[0] is unit_map
         assert family.write_completed(record)
+        assert family.completed_unit_ids() == (planned.unit.unit_id,)
+        assert batch.completed_unit_ids(FAMILIES[0]) == (planned.unit.unit_id,)
         assert not family.write_completed(record)
         assert family.load_completed(planned.unit.unit_id) == record
         with pytest.raises(Phase3ActivationError, match="conflicting"):
             family.write_completed(record.model_copy(update={"candidate_generation_sha256": "e" * 64}))
+        assert len(batch._scientific._indices) == 1
+    assert not batch._scientific._indices
+
+
+def test_replacing_completed_record_while_active_fails_closed(prepared) -> None:
+    root, expected, stores, authority = prepared
+    planned = stores[0].spec.units[0]
+    record = _valid_record(stores[0], planned, authority)
+    with pytest.raises(Phase3ActivationError, match="identity"):
+        with phase3_activation(
+            stores,
+            expected,
+            _lease(expected),
+            expected_git_commit="a" * 40,
+        ) as batch:
+            family = batch.store_for_family(FAMILIES[0])
+            assert family.write_completed(record)
+            path = root / FAMILIES[0] / stores[0].run_id / "units" / f"{planned.unit.unit_id}.json"
+            replacement = path.with_name(".replacement.json")
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+            with pytest.raises(Phase3ActivationError, match="identity"):
+                batch.completed_unit_ids(FAMILIES[0])
+
+
+def test_same_inode_valid_record_mutation_fails_on_exit(prepared) -> None:
+    root, expected, stores, authority = prepared
+    planned = stores[0].spec.units[0]
+    record = _valid_record(stores[0], planned, authority)
+    path = root / FAMILIES[0] / stores[0].run_id / "units" / f"{planned.unit.unit_id}.json"
+    with pytest.raises(Phase3ActivationError, match="fingerprint|identity"):
+        with phase3_activation(
+            stores, expected, _lease(expected), expected_git_commit="a" * 40
+        ) as batch:
+            assert batch.store_for_family(FAMILIES[0]).write_completed(record)
+            mutated = record.model_copy(update={"candidate_generation_sha256": "e" * 64})
+            rendered = canonical_json_bytes(mutated.model_dump(mode="json")) + b"\n"
+            with path.open("r+b") as handle:
+                handle.seek(0)
+                handle.write(rendered)
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+
+
+def test_external_valid_canonical_publication_fails_on_exit(prepared) -> None:
+    root, expected, stores, authority = prepared
+    planned = stores[0].spec.units[1]
+    record = _valid_record(stores[0], planned, authority)
+    with pytest.raises(Phase3ActivationError, match="untracked|prepared family"):
+        with phase3_activation(
+            stores, expected, _lease(expected), expected_git_commit="a" * 40
+        ):
+            path = (
+                root
+                / FAMILIES[0]
+                / stores[0].run_id
+                / "units"
+                / f"{planned.unit.unit_id}.json"
+            )
+            path.write_bytes(canonical_json_bytes(record.model_dump(mode="json")) + b"\n")
 
 
 def test_completed_foreign_and_semantic_records_are_rejected(prepared) -> None:

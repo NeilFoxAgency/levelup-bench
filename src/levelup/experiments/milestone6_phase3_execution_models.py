@@ -14,9 +14,11 @@ from __future__ import annotations
 
 import hashlib
 import os
+from collections.abc import Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Iterator
 
 import torch
@@ -73,6 +75,107 @@ EXPECTED_PHASE3_MODEL_AUTHORITY_SHA256 = (
 
 class Phase3ExecutionModelError(ValueError):
     """Raised when a model cannot be proven to belong to the frozen authority."""
+
+
+_CACHE_CONSTRUCTION_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class Phase3ExecutionAuthorityCache:
+    """Immutable, authority-bound indexes used by repeated model resolution.
+
+    Constructing this object is the only operation which validates and hashes
+    the complete model authority and logical plan.  The maps are private,
+    read-only snapshots; callers can only resolve objects after the requested
+    object has been compared with the canonical entry for its identity.
+    """
+
+    authority: Phase3ModelArtifactAuthority
+    validated_plan: ValidatedPhase3Plan
+    _units_by_id: Mapping[str, Phase3PlannedUnit]
+    _owners_by_id: Mapping[str, Phase3ModelOwner]
+    _views_by_id: Mapping[str, object]
+    _rows_by_owner_id: Mapping[str, Phase3ModelAuthorityRow]
+    _construction_token: object
+
+    def __init__(
+        self,
+        *,
+        authority: Phase3ModelArtifactAuthority,
+        validated_plan: ValidatedPhase3Plan,
+        units_by_id: Mapping[str, Phase3PlannedUnit],
+        owners_by_id: Mapping[str, Phase3ModelOwner],
+        views_by_id: Mapping[str, object],
+        rows_by_owner_id: Mapping[str, Phase3ModelAuthorityRow],
+        _construction_token: object | None = None,
+    ) -> None:
+        if _construction_token is not _CACHE_CONSTRUCTION_TOKEN:
+            raise Phase3ExecutionModelError(
+                "Phase 3 execution authority caches require the canonical construction token"
+            )
+        if type(authority) is not Phase3ModelArtifactAuthority:
+            raise Phase3ExecutionModelError("Phase 3 cache authority is not canonical")
+        if type(validated_plan) is not ValidatedPhase3Plan:
+            raise Phase3ExecutionModelError("Phase 3 cache plan is not canonical")
+        object.__setattr__(self, "authority", authority)
+        object.__setattr__(self, "validated_plan", validated_plan)
+        object.__setattr__(self, "_units_by_id", MappingProxyType(dict(units_by_id)))
+        object.__setattr__(self, "_owners_by_id", MappingProxyType(dict(owners_by_id)))
+        object.__setattr__(self, "_views_by_id", MappingProxyType(dict(views_by_id)))
+        object.__setattr__(self, "_rows_by_owner_id", MappingProxyType(dict(rows_by_owner_id)))
+        object.__setattr__(self, "_construction_token", _CACHE_CONSTRUCTION_TOKEN)
+
+    def resolve_unit(self, planned_unit: Phase3PlannedUnit) -> Phase3PlannedUnit:
+        if type(planned_unit) is not Phase3PlannedUnit:
+            _fail("Phase 3 planned unit must be the canonical typed unit")
+        expected = self._units_by_id.get(planned_unit.unit.unit_id)
+        if expected is None or expected != planned_unit:
+            _fail("Phase 3 planned unit differs from the canonical cached plan")
+        return expected
+
+    def owner_row_for_unit(
+        self, planned: Phase3PlannedUnit
+    ) -> tuple[Phase3ModelOwner, Phase3ModelAuthorityRow]:
+        planned = self.resolve_unit(planned)
+        owner = self._owners_by_id.get(planned.model_owner_id)
+        if owner is None:
+            _fail("Phase 3 planned unit owner is absent from the cached plan")
+        row = self._rows_by_owner_id.get(owner.owner_id)
+        view = self._views_by_id.get(owner.view_id)
+        if row is None or view is None:
+            _fail("Phase 3 cached owner lineage is incomplete")
+        if (
+            owner.condition_id != planned.base_condition_id
+            or owner.view_id != planned.view_id
+            or owner.fold_id != planned.fold_id
+            or owner.heldout_family != planned.heldout_family
+            or owner.replicate != planned.unit.key.replicate
+            or owner.training_tuple_id != planned.training_tuple_id
+            or getattr(view, "condition_id", None) != owner.condition_id
+            or getattr(view, "fold_id", None) != owner.fold_id
+            or getattr(view, "heldout_family", None) != owner.heldout_family
+            or getattr(view, "replicate", None) != owner.replicate
+            or planned.unit.key.phase != "validation"
+            or planned.unit.key.family_id != planned.heldout_family
+            or planned.unit.key.condition_id != f"{planned.base_condition_id}--{planned.tuple_id}"
+        ):
+            _fail("Phase 3 planned unit and cached owner lineage differs")
+        return owner, row
+
+
+def _require_cache(
+    cache: Phase3ExecutionAuthorityCache,
+    authority: Phase3ModelArtifactAuthority,
+    validated_plan: ValidatedPhase3Plan,
+) -> Phase3ExecutionAuthorityCache:
+    if (
+        type(cache) is not Phase3ExecutionAuthorityCache
+        or cache._construction_token is not _CACHE_CONSTRUCTION_TOKEN
+        or cache.authority is not authority
+        or cache.validated_plan is not validated_plan
+    ):
+        _fail("Phase 3 execution authority cache is not canonical for these inputs")
+    return cache
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -132,6 +235,7 @@ def validate_authorized_phase3_loaded_model(
     authority: Phase3ModelArtifactAuthority,
     validated_plan: ValidatedPhase3Plan,
     planned_unit: Phase3PlannedUnit,
+    authority_cache: Phase3ExecutionAuthorityCache | None = None,
 ) -> None:
     """Revalidate one loaded wrapper against every frozen authority boundary."""
 
@@ -146,9 +250,16 @@ def validate_authorized_phase3_loaded_model(
         raise Phase3ExecutionModelError(
             "authorized Phase 3 model lease is no longer active"
         )
-    _validate_authority_and_plan(authority, validated_plan)
-    planned = _resolve_unit(validated_plan, planned_unit)
-    owner, row = _owner_for_unit(authority, validated_plan, planned)
+    if authority_cache is None:
+        _validate_authority_and_plan(authority, validated_plan)
+    else:
+        _require_cache(authority_cache, authority, validated_plan)
+    if authority_cache is None:
+        planned = _resolve_unit(validated_plan, planned_unit)
+        owner, row = _owner_for_unit(authority, validated_plan, planned)
+    else:
+        planned = _resolve_unit(validated_plan, planned_unit, authority_cache)
+        owner, row = _owner_for_unit(authority, validated_plan, planned, authority_cache)
     if (
         value.planned_unit != planned  # type: ignore[union-attr]
         or value.owner != owner  # type: ignore[union-attr]
@@ -263,10 +374,62 @@ def _validate_authority_and_plan(
         _fail("Phase 3 authority or validated plan is malformed", exc)
 
 
+def build_phase3_execution_authority_cache(
+    authority: Phase3ModelArtifactAuthority,
+    validated_plan: ValidatedPhase3Plan,
+) -> Phase3ExecutionAuthorityCache:
+    """Validate the complete frozen universe once and build O(1) indexes."""
+
+    _validate_authority_and_plan(authority, validated_plan)
+    plan = validated_plan.plan
+    units = {item.unit.unit_id: item for item in plan.units}
+    owners = {item.owner_id: item for item in plan.model_owners}
+    views = {item.view_id: item for item in plan.views}
+    rows = {row.owner_id: row for row in authority.models}
+    if (
+        len(units) != len(plan.units)
+        or len(owners) != len(plan.model_owners)
+        or len(views) != len(plan.views)
+        or len(rows) != len(authority.models)
+        or len(units) != 11520
+        or len(owners) != EXPECTED_MODELS
+        or len(views) != EXPECTED_VIEWS
+        or len(rows) != EXPECTED_MODELS
+    ):
+        _fail("Phase 3 execution authority contains duplicate or incomplete identities")
+    if set(owners) != set(authority.owner_ids) or set(rows) != set(owners):
+        _fail("Phase 3 execution authority owner universe differs")
+    if any(owner.view_id not in views for owner in owners.values()):
+        _fail("Phase 3 execution authority contains an unknown view")
+    if any(item.model_owner_id not in owners for item in units.values()):
+        _fail("Phase 3 execution authority contains an unknown model owner")
+    if any(item.view_id not in views for item in units.values()):
+        _fail("Phase 3 execution authority contains an unknown unit view")
+    cache = Phase3ExecutionAuthorityCache(
+        authority=authority,
+        validated_plan=validated_plan,
+        units_by_id=units,
+        owners_by_id=owners,
+        views_by_id=views,
+        rows_by_owner_id=rows,
+        _construction_token=_CACHE_CONSTRUCTION_TOKEN,
+    )
+    # Exercise every cached lineage edge once during construction.  This makes
+    # later unit resolution a lookup plus an equality check, never a second
+    # full-plan validation or scan.
+    for item in plan.units:
+        cache.owner_row_for_unit(item)
+    return cache
+
+
 def _resolve_unit(
     validated_plan: ValidatedPhase3Plan,
     planned_unit: Phase3PlannedUnit,
+    cache: Phase3ExecutionAuthorityCache | None = None,
 ) -> Phase3PlannedUnit:
+    if cache is not None:
+        _require_cache(cache, cache.authority, validated_plan)
+        return cache.resolve_unit(planned_unit)
     if type(planned_unit) is not Phase3PlannedUnit:
         _fail("Phase 3 planned unit must be the canonical typed unit")
     matches = [
@@ -287,7 +450,11 @@ def _owner_for_unit(
     authority: Phase3ModelArtifactAuthority,
     validated_plan: ValidatedPhase3Plan,
     planned: Phase3PlannedUnit,
+    cache: Phase3ExecutionAuthorityCache | None = None,
 ) -> tuple[Phase3ModelOwner, Phase3ModelAuthorityRow]:
+    if cache is not None:
+        _require_cache(cache, authority, validated_plan)
+        return cache.owner_row_for_unit(planned)
     owners = [
         owner
         for owner in validated_plan.plan.model_owners
@@ -459,8 +626,9 @@ def _load_one(
     validated_plan: ValidatedPhase3Plan,
     planned: Phase3PlannedUnit,
     reader: PinnedPhase3ModelArtifactReader,
+    authority_cache: Phase3ExecutionAuthorityCache | None = None,
 ) -> AuthorizedPhase3LoadedModel:
-    owner, row = _owner_for_unit(authority, validated_plan, planned)
+    owner, row = _owner_for_unit(authority, validated_plan, planned, authority_cache)
     try:
         committed_index = load_phase3_model_index_at(reader, row.key_id)
         key = committed_index.key
@@ -511,6 +679,7 @@ def _load_one(
         authority,
         validated_plan,
         planned,
+        authority_cache,
     )
     return loaded
 
@@ -530,11 +699,17 @@ def open_authorized_phase3_model(
     validated_plan: ValidatedPhase3Plan,
     planned_unit: Phase3PlannedUnit,
     artifact_output_root: str | Path,
+    *,
+    authority_cache: Phase3ExecutionAuthorityCache | None = None,
 ) -> Iterator[AuthorizedPhase3LoadedModel]:
     """Pin and load one model selected solely by the frozen planned unit."""
 
-    _validate_authority_and_plan(authority, validated_plan)
-    planned = _resolve_unit(validated_plan, planned_unit)
+    cache = (
+        build_phase3_execution_authority_cache(authority, validated_plan)
+        if authority_cache is None
+        else _require_cache(authority_cache, authority, validated_plan)
+    )
+    planned = _resolve_unit(validated_plan, planned_unit, cache)
     root_path = _check_root_name(artifact_output_root, authority)
     stack = ExitStack()
     setup_errors: list[BaseException] = []
@@ -544,7 +719,7 @@ def open_authorized_phase3_model(
         reader = stack.enter_context(open_phase3_model_artifact_reader_at(root_fd))
         identities = _namespace_identities(root_fd, reader)
         _recheck_namespaces(root_path, root_fd, reader, identities)
-        loaded = _load_one(authority, validated_plan, planned, reader)
+        loaded = _load_one(authority, validated_plan, planned, reader, cache)
         _recheck_namespaces(root_path, root_fd, reader, identities)
     except BaseException as exc:
         if isinstance(exc, Phase3ExecutionModelError):
@@ -584,6 +759,7 @@ def open_authorized_phase3_model(
             authority,
             validated_plan,
             planned,
+            cache,
         )
         _recheck_namespaces(root_path, root_fd, reader, identities)
     except BaseException as exc:
@@ -609,7 +785,9 @@ def open_authorized_phase3_model(
 __all__ = [
     "AuthorizedPhase3LoadedModel",
     "EXPECTED_PHASE3_MODEL_AUTHORITY_SHA256",
+    "Phase3ExecutionAuthorityCache",
     "Phase3ExecutionModelError",
+    "build_phase3_execution_authority_cache",
     "open_authorized_phase3_model",
     "validate_authorized_phase3_loaded_model",
 ]

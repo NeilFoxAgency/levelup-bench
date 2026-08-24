@@ -700,7 +700,39 @@ unique model-owner cost tie-break without treating those preparation costs as un
 H4-shuffled units additionally persist the per-unit search permutation-map SHA-256 and the complete
 effective-change counters required by the frozen sequence-order claim gate.
 
-This slice still does not authorize a Phase 3 run. The six exact result-store configs, immutable
-source/readiness snapshot, transactional activation, resume driver, and complete 11,520-unit matrix
-gate must be implemented and independently audited before any development outcome is generated or
-inspected. Final-family access remains forbidden.
+The complete development execution gate is now implemented. Six family-partitioned result stores
+bind the exact 1,920-unit-per-family, 11,520-unit matrix. Preparation is inert; the execution driver
+loads the pre-existing stores through a noncreating descriptor-relative path, recaptures the clean
+repository and model-store authority, holds one live readiness lease, and activates all six stores
+with one immutable root marker. Validation-only mode never publishes that marker. Completed and
+attempt records are write-once, canonical, and tracked from activation entry to exit with stable
+descriptor-relative fingerprints covering identity, metadata, and content SHA-256. A replacement,
+same-inode rewrite, removal, or externally added canonical-looking record fails closed.
+
+The driver exposes no family, unit, seed, temperature, budget, capacity, hyperparameter, model-root,
+reducer, or analysis override. It builds the full plan/model authority cache once, then resolves each
+unit and owner through immutable constant-time maps while revalidating the selected model artifact
+and lineage for every unit. Resume inventories and attempt maxima are loaded once; incomplete units
+behind a non-retryable attempt stop the run. Successful completion requires all 11,520 expected unit
+identities, not merely exhaustion of the loop.
+
+After an inert result tree has been prepared from the committed plan and model authority, use the
+same exact clean commit for validation and execution:
+
+```bash
+python -m levelup.experiments.milestone6_phase3_execution_driver \
+  --authority-repository /absolute/path/to/levelup-bench \
+  --result-root /absolute/path/to/prepared-phase3-development-results \
+  --expected-git-commit <exact-clean-commit-sha> \
+  --validate-only
+
+python -m levelup.experiments.milestone6_phase3_execution_driver \
+  --authority-repository /absolute/path/to/levelup-bench \
+  --result-root /absolute/path/to/prepared-phase3-development-results \
+  --expected-git-commit <exact-clean-commit-sha> \
+  --execute
+```
+
+This implementation and its audits generated or inspected no Phase 3 outcomes, aggregates, or
+comparative development results. Final-family access remains forbidden. Reduction and scientific
+interpretation remain separate until the complete development matrix is durably present.

@@ -23,6 +23,8 @@ from levelup.experiments.milestone6_phase3_result_store import (
     Phase3ResultStorePlanError,
     Phase3ResultStoreSpec,
     build_phase3_expected_plan,
+    load_phase3_result_store,
+    load_phase3_result_stores,
     prepare_phase3_result_store,
     prepare_phase3_result_stores,
     validate_phase3_expected_plan,
@@ -242,6 +244,82 @@ def test_six_store_preparation_is_idempotent_and_inert(tmp_path: Path) -> None:
             store.write_completed()
         with pytest.raises(Phase3ResultStoreError, match="not execution-ready"):
             store.write_attempt()
+
+
+def test_read_only_loader_reuses_existing_tree_without_writes(tmp_path: Path) -> None:
+    plan, authority = _authorities()
+    root = tmp_path / "phase3-results"
+    root.mkdir()
+    prepared = prepare_phase3_result_stores(root, plan, authority)
+    before = sorted(
+        (path.relative_to(root), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+
+    loaded = load_phase3_result_stores(root, plan, authority)
+
+    assert tuple(store.family_id for store in loaded) == FAMILIES
+    assert tuple(store.run_id for store in loaded) == tuple(store.run_id for store in prepared)
+    assert all(store.execution_ready is False for store in loaded)
+    after = sorted(
+        (path.relative_to(root), path.stat().st_mtime_ns)
+        for path in root.rglob("*")
+        if path.is_file()
+    )
+    assert after == before
+
+    one = load_phase3_result_store(
+        root, plan, authority, family_id=FAMILIES[0]
+    )
+    assert one.family_id == FAMILIES[0]
+    assert one.run_id == prepared[0].run_id
+
+
+def test_read_only_loader_missing_tree_does_not_create_anything(tmp_path: Path) -> None:
+    plan, authority = _authorities()
+    root = tmp_path / "missing-phase3-results"
+
+    with pytest.raises(Phase3ResultStoreError):
+        load_phase3_result_stores(root, plan, authority)
+
+    assert not root.exists()
+    assert sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*")) == []
+
+
+@pytest.mark.parametrize("component", ["family", "run", "units", "attempts"])
+def test_read_only_loader_rejects_symlinked_descendant_without_repair(
+    tmp_path: Path, component: str
+) -> None:
+    plan, authority = _authorities()
+    root = tmp_path / "phase3-results"
+    root.mkdir()
+    spec = build_phase3_expected_plan(plan, authority).store_for_family(FAMILIES[0])
+    family = root / spec.family_id
+    family.mkdir()
+    run = family / spec.run_id
+    run.mkdir()
+    if component == "family":
+        run.rmdir()
+        family.rmdir()
+        target = tmp_path / "family-target"
+        target.mkdir()
+        family.symlink_to(target, target_is_directory=True)
+    elif component == "run":
+        run.rmdir()
+        target = tmp_path / "run-target"
+        target.mkdir()
+        run.symlink_to(target, target_is_directory=True)
+    else:
+        target = run / f"{component}-target"
+        target.mkdir()
+        (run / component).symlink_to(target, target_is_directory=True)
+
+    before = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    with pytest.raises(Phase3ResultStoreError):
+        load_phase3_result_store(root, plan, authority, family_id=FAMILIES[0])
+    after = sorted(path.relative_to(tmp_path) for path in tmp_path.rglob("*"))
+    assert after == before
 
 
 @pytest.mark.parametrize("kind", ["symlink", "file"])

@@ -32,6 +32,8 @@ from levelup.experiments.milestone6_phase2 import (
 from levelup.experiments.milestone6_phase2_screening import screening_child_configs
 from levelup.experiments.milestone6_phase3_execution_models import (
     AuthorizedPhase3LoadedModel,
+    Phase3ExecutionAuthorityCache,
+    build_phase3_execution_authority_cache,
     open_authorized_phase3_model,
 )
 from levelup.experiments.milestone6_phase3_generation import (
@@ -80,6 +82,19 @@ class Phase3ExecutionContext:
     authority: Phase3ModelArtifactAuthority
     plan: ValidatedPhase3Plan
     artifact_output_root: str | Path
+    authority_cache: Phase3ExecutionAuthorityCache | None = None
+
+    @classmethod
+    def canonical(
+        cls,
+        authority: Phase3ModelArtifactAuthority,
+        plan: ValidatedPhase3Plan,
+        artifact_output_root: str | Path,
+    ) -> "Phase3ExecutionContext":
+        """Validate the frozen authority/plan exactly once for this run."""
+
+        cache = build_phase3_execution_authority_cache(authority, plan)
+        return cls(authority, plan, artifact_output_root, cache)
 
 
 def _default_optimum_provider(environment: Any, family_id: str) -> float:
@@ -104,6 +119,12 @@ def _resolve_planned_unit(
         raise ValueError("Phase 3 execution accepts validation units only")
     if context.plan.plan.final_family_access:
         raise ValueError("Phase 3 execution plan permits final-family access")
+    cache = context.authority_cache
+    if cache is not None:
+        try:
+            return cache.resolve_unit(planned_unit)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("planned unit is not in the validated Phase 3 plan") from exc
     try:
         context.plan.require_unit(planned_unit)
     except (AttributeError, TypeError, ValueError) as exc:
@@ -221,6 +242,14 @@ def execute_phase3_unit(
 ) -> UnitPayload:
     """Execute exactly one frozen development unit."""
 
+    if (
+        type(context.authority) is Phase3ModelArtifactAuthority
+        and type(context.plan) is ValidatedPhase3Plan
+        and context.authority_cache is None
+    ):
+        raise ValueError(
+            "canonical Phase 3 execution contexts require an authority-bound cache"
+        )
     planned = _resolve_planned_unit(context, planned_unit)
     task = _resolve_task(planned)
     setup_started = time.perf_counter()
@@ -233,6 +262,7 @@ def execute_phase3_unit(
         context.plan,
         planned,
         context.artifact_output_root,
+        authority_cache=context.authority_cache,
     ) as model:
         if type(model) is not AuthorizedPhase3LoadedModel:
             raise TypeError("Phase 3 execution requires an authorized loaded model")
