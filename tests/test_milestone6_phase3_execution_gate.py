@@ -12,6 +12,7 @@ import levelup.experiments.milestone6_phase3_readiness as readiness
 from levelup.experiments.milestone6_phase3_execution_gate import (
     ACTIVATION_MARKER_NAME,
     Phase3ActivationError,
+    open_activated_phase3_results,
     phase3_activation,
 )
 from levelup.experiments.milestone6_phase3_model_authority import (
@@ -95,10 +96,7 @@ def _lease(expected, *, active: bool = True) -> Phase3ActivationReadinessLease:
     authority = load_phase3_model_artifact_authority_bytes(
         Path(readiness.PHASE3_MODEL_AUTHORITY_RELATIVE).read_bytes()
     )
-    keys_relative = (
-        f"runs/milestone6/{authority.artifact_store_id}/"
-        "phase3-model-artifact-keys"
-    )
+    keys_relative = f"runs/milestone6/{authority.artifact_store_id}/phase3-model-artifact-keys"
     lease = Phase3ActivationReadinessLease(
         snapshot,
         {},
@@ -110,12 +108,18 @@ def _lease(expected, *, active: bool = True) -> Phase3ActivationReadinessLease:
     return lease
 
 
-def _valid_record(store, planned, authority, *, success: bool = False, history_digest: str | None = None) -> UnitRecord:
-    owner = next(item for item in _authorities()[0].plan.model_owners if item.owner_id == planned.model_owner_id)
+def _valid_record(
+    store, planned, authority, *, success: bool = False, history_digest: str | None = None
+) -> UnitRecord:
+    owner = next(
+        item
+        for item in _authorities()[0].plan.model_owners
+        if item.owner_id == planned.model_owner_id
+    )
     row = next(item for item in authority.models if item.owner_id == owner.owner_id)
-    report = json.loads((MODEL_KEY_FIXTURE_PATH / f"{row.key_id}.json").read_bytes())[
-        "key"
-    ]["report"]
+    report = json.loads((MODEL_KEY_FIXTURE_PATH / f"{row.key_id}.json").read_bytes())["key"][
+        "report"
+    ]
     history = planned.base_condition_id == "H4-shuffled-history-transition-listwise-optimum"
     diagnostics = {
         "model_trainable_parameters": report["trainable_parameters"],
@@ -160,7 +164,11 @@ def _valid_record(store, planned, authority, *, success: bool = False, history_d
             search=PhaseAccounting(episodes=1, actions=1, environment_steps=1, forward_passes=1),
             replay=PhaseAccounting(actions=1, environment_steps=1),
         ),
-        shared_artifact={"key_id": row.key_id, "artifact_id": row.artifact_id, "cost_id": row.cost_id},
+        shared_artifact={
+            "key_id": row.key_id,
+            "artifact_id": row.artifact_id,
+            "cost_id": row.cost_id,
+        },
         candidate_generation_sha256="d" * 64,
         history_shuffle_permutation_map_sha256=history_digest,
         diagnostics=diagnostics,
@@ -185,9 +193,100 @@ def test_activation_publishes_one_canonical_marker_and_is_idempotent(prepared) -
         assert tuple(item.family_id for item in batch.stores) == FAMILIES
     marker = root / ACTIVATION_MARKER_NAME
     first = marker.read_bytes()
-    with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as resumed:
+    with phase3_activation(
+        stores, expected, _lease(expected), expected_git_commit="a" * 40
+    ) as resumed:
         assert resumed.store_for_family(FAMILIES[0]).family_id == FAMILIES[0]
     assert marker.read_bytes() == first
+
+
+def test_read_only_open_requires_existing_marker_and_complete_matrix(prepared) -> None:
+    root, expected, stores, _authority = prepared
+    with pytest.raises(Phase3ActivationError, match="existing activation marker"):
+        with open_activated_phase3_results(
+            stores,
+            expected,
+            _lease(expected),
+            expected_git_commit="a" * 40,
+        ):
+            pass
+    assert not (root / ACTIVATION_MARKER_NAME).exists()
+
+    with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40):
+        pass
+    with pytest.raises(Phase3ActivationError, match="exact complete unit matrix"):
+        with open_activated_phase3_results(
+            stores,
+            expected,
+            _lease(expected),
+            expected_git_commit="a" * 40,
+        ):
+            pass
+
+
+def test_read_only_partial_matrix_fails_before_any_outcome_parse(
+    prepared, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _root, expected, stores, authority = prepared
+    planned = stores[0].spec.units[0]
+    with phase3_activation(
+        stores, expected, _lease(expected), expected_git_commit="a" * 40
+    ) as batch:
+        assert batch.stores[0].write_completed(_valid_record(stores[0], planned, authority))
+
+    parsed = 0
+
+    def forbidden_parse(*args, **kwargs):
+        nonlocal parsed
+        parsed += 1
+        raise AssertionError("partial read-only matrix parsed an outcome")
+
+    monkeypatch.setattr(
+        "levelup.experiments.milestone6_phase3_execution_gate._scientific_record_check",
+        forbidden_parse,
+    )
+    with pytest.raises(Phase3ActivationError, match="exact complete unit matrix"):
+        with open_activated_phase3_results(
+            stores,
+            expected,
+            _lease(expected),
+            expected_git_commit="a" * 40,
+        ):
+            pass
+    assert parsed == 0
+
+
+def test_write_disabled_activation_rejects_facade_escape(prepared) -> None:
+    _root, expected, stores, authority = prepared
+    planned = stores[0].spec.units[0]
+    with phase3_activation(
+        stores,
+        expected,
+        _lease(expected),
+        expected_git_commit="a" * 40,
+        _writes_enabled=False,
+    ) as batch:
+        with pytest.raises(Phase3ActivationError, match="read-only"):
+            batch.stores[0].write_completed(_valid_record(stores[0], planned, authority))
+        with pytest.raises(Phase3ActivationError, match="read-only"):
+            batch.stores[0].write_attempt(
+                AttemptRecord(
+                    run_id=stores[0].run_id,
+                    config_sha256=stores[0].config_sha256,
+                    unit_id=planned.unit.unit_id,
+                    key=planned.unit.key,
+                    seeds=planned.unit.seeds,
+                    attempt=1,
+                    status="failed",
+                    stage="test",
+                    exception_type="SyntheticError",
+                    sanitized_message="synthetic",
+                    started_at_utc="2026-08-23T00:00:00+00:00",
+                    finished_at_utc="2026-08-23T00:00:01+00:00",
+                    elapsed_wall_seconds=1.0,
+                    retryable=True,
+                )
+            )
 
 
 def test_forged_or_expired_lease_is_rejected(prepared) -> None:
@@ -197,7 +296,9 @@ def test_forged_or_expired_lease_is_rejected(prepared) -> None:
         with phase3_activation(stores, expected, object(), expected_git_commit="a" * 40):
             pass
     with pytest.raises(Phase3ActivationError, match="readiness lease"):
-        with phase3_activation(stores, expected, _lease(expected, active=False), expected_git_commit="a" * 40):
+        with phase3_activation(
+            stores, expected, _lease(expected, active=False), expected_git_commit="a" * 40
+        ):
             pass
 
 
@@ -210,9 +311,7 @@ def test_orphan_records_without_marker_are_rejected(prepared) -> None:
             pass
 
 
-def test_marker_tamper_and_temporary_remnant_are_rejected(
-    prepared, tmp_path: Path
-) -> None:
+def test_marker_tamper_and_temporary_remnant_are_rejected(prepared, tmp_path: Path) -> None:
     root, expected, stores, _authority = prepared
     with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40):
         pass
@@ -268,7 +367,9 @@ def test_store_matrix_shape_fails_before_marker(prepared, kind: str) -> None:
 def test_later_store_failure_leaves_no_marker(prepared) -> None:
     root, expected, stores, _authority = prepared
     run_json = root / stores[1].family_id / stores[1].run_id / "run.json"
-    run_json.write_bytes(run_json.read_bytes().replace(b'"execution_ready":false', b'"execution_ready":true'))
+    run_json.write_bytes(
+        run_json.read_bytes().replace(b'"execution_ready":false', b'"execution_ready":true')
+    )
     with pytest.raises(Phase3ActivationError):
         with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40):
             pass
@@ -278,7 +379,9 @@ def test_later_store_failure_leaves_no_marker(prepared) -> None:
 def test_same_byte_marker_inode_replacement_is_rejected(prepared) -> None:
     root, expected, stores, _authority = prepared
     with pytest.raises(Phase3ActivationError, match="marker"):
-        with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
+        with phase3_activation(
+            stores, expected, _lease(expected), expected_git_commit="a" * 40
+        ) as batch:
             marker = root / ACTIVATION_MARKER_NAME
             replacement = root / ".marker-replacement"
             replacement.write_bytes(marker.read_bytes())
@@ -290,7 +393,9 @@ def test_body_exception_runs_postcheck_and_deactivates(prepared) -> None:
     root, expected, stores, _authority = prepared
     saved = None
     with pytest.raises(RuntimeError):
-        with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
+        with phase3_activation(
+            stores, expected, _lease(expected), expected_git_commit="a" * 40
+        ) as batch:
             saved = batch
             raise RuntimeError("body failure")
     assert saved is not None and not saved.active
@@ -303,7 +408,9 @@ def test_canonical_completed_write_load_resume_and_conflict(prepared) -> None:
     _root, expected, stores, authority = prepared
     planned = stores[0].spec.units[0]
     record = _valid_record(stores[0], planned, authority)
-    with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
+    with phase3_activation(
+        stores, expected, _lease(expected), expected_git_commit="a" * 40
+    ) as batch:
         family = batch.store_for_family(FAMILIES[0])
         unit_map = batch._unit_maps[0]
         assert batch._unit(0, planned.unit.unit_id) is unit_map[planned.unit.unit_id]
@@ -314,7 +421,9 @@ def test_canonical_completed_write_load_resume_and_conflict(prepared) -> None:
         assert not family.write_completed(record)
         assert family.load_completed(planned.unit.unit_id) == record
         with pytest.raises(Phase3ActivationError, match="conflicting"):
-            family.write_completed(record.model_copy(update={"candidate_generation_sha256": "e" * 64}))
+            family.write_completed(
+                record.model_copy(update={"candidate_generation_sha256": "e" * 64})
+            )
         assert len(batch._scientific._indices) == 1
     assert not batch._scientific._indices
 
@@ -365,16 +474,8 @@ def test_external_valid_canonical_publication_fails_on_exit(prepared) -> None:
     planned = stores[0].spec.units[1]
     record = _valid_record(stores[0], planned, authority)
     with pytest.raises(Phase3ActivationError, match="untracked|prepared family"):
-        with phase3_activation(
-            stores, expected, _lease(expected), expected_git_commit="a" * 40
-        ):
-            path = (
-                root
-                / FAMILIES[0]
-                / stores[0].run_id
-                / "units"
-                / f"{planned.unit.unit_id}.json"
-            )
+        with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40):
+            path = root / FAMILIES[0] / stores[0].run_id / "units" / f"{planned.unit.unit_id}.json"
             path.write_bytes(canonical_json_bytes(record.model_dump(mode="json")) + b"\n")
 
 
@@ -382,12 +483,22 @@ def test_completed_foreign_and_semantic_records_are_rejected(prepared) -> None:
     _root, expected, stores, authority = prepared
     planned = stores[0].spec.units[0]
     record = _valid_record(stores[0], planned, authority)
-    with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
+    with phase3_activation(
+        stores, expected, _lease(expected), expected_git_commit="a" * 40
+    ) as batch:
         family = batch.store_for_family(FAMILIES[0])
         with pytest.raises(Phase3ActivationError, match="foreign"):
             family.write_completed(record.model_copy(update={"unit_id": "f" * 64}))
         with pytest.raises(Phase3ActivationError, match="accounting"):
-            family.write_completed(record.model_copy(update={"outcome": record.outcome.model_copy(update={"performance_direction": "maximize"})}))
+            family.write_completed(
+                record.model_copy(
+                    update={
+                        "outcome": record.outcome.model_copy(
+                            update={"performance_direction": "maximize"}
+                        )
+                    }
+                )
+            )
         forged_diagnostics = dict(record.diagnostics)
         forged_diagnostics["model_training_examples"] += 1
         forged_diagnostics["model_forward_passes"] = (
@@ -395,9 +506,7 @@ def test_completed_foreign_and_semantic_records_are_rejected(prepared) -> None:
             * forged_diagnostics["model_training_examples"]
         )
         with pytest.raises(Phase3ActivationError, match="held model-key"):
-            family.write_completed(
-                record.model_copy(update={"diagnostics": forged_diagnostics})
-            )
+            family.write_completed(record.model_copy(update={"diagnostics": forged_diagnostics}))
         success = _valid_record(stores[0], planned, authority, success=True)
         with pytest.raises(Phase3ActivationError, match="first-hit"):
             family.write_completed(
@@ -416,8 +525,7 @@ def test_h4_search_shuffle_digest_is_distinct_from_training_view_digest(prepared
     planned = next(
         item
         for item in stores[0].spec.units
-        if item.base_condition_id
-        == "H4-shuffled-history-transition-listwise-optimum"
+        if item.base_condition_id == "H4-shuffled-history-transition-listwise-optimum"
     )
     record = _valid_record(
         stores[0],
@@ -483,7 +591,9 @@ def test_attempt_write_list_and_next_number(prepared) -> None:
         finished_at_utc="2026-08-23T00:00:01+00:00",
         elapsed_wall_seconds=1.0,
     )
-    with phase3_activation(stores, expected, _lease(expected), expected_git_commit="a" * 40) as batch:
+    with phase3_activation(
+        stores, expected, _lease(expected), expected_git_commit="a" * 40
+    ) as batch:
         family = batch.store_for_family(FAMILIES[0])
         assert family.write_attempt(attempt)
         assert batch.next_attempt_number(planned.unit.unit_id, FAMILIES[0]) == 2

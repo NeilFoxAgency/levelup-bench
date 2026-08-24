@@ -736,3 +736,49 @@ python -m levelup.experiments.milestone6_phase3_execution_driver \
 This implementation and its audits generated or inspected no Phase 3 outcomes, aggregates, or
 comparative development results. Final-family access remains forbidden. Reduction and scientific
 interpretation remain separate until the complete development matrix is durably present.
+
+### Phase 3 selection and read-only analysis boundary
+
+The development selector is frozen before any Phase 3 outcome is generated or inspected. The
+committed [`phase3_anchor_selection_metrics.json`](../configs/milestone6/phase3_anchor_selection_metrics.json)
+is the compact, development-only authority for the already selected Phase 2 B2 and historical C/T
+anchor metrics. Its canonical self-hash is
+`7f1f0a1c30ff0e93b512028df6bca5f42276477ebdf78ae031e003684f10e9c7`; its committed-file
+SHA-256 is `1c7e5fb296ed397c96665ff77613be4aabf7702d968bf55c1da04a08562758a2`.
+It binds the Phase 2 selection lock, Phase 3 anchor manifest, and frozen representation protocol
+without depending at runtime on the ignored raw Phase 2 aggregate.
+
+Selection is independent within each of S, H0, H4, and H4-shuffled. Each condition must contain
+the exact 12 declared tuples and 240 units per tuple, with 40 units from each of the six development
+families. The selector first maximizes minimum-family exact-optimum success, retains every tuple
+within an inclusive absolute 0.05 of that best primary value, then minimizes worst-family median
+restricted interactions, macro family median, unique-owner optimizer steps, forward passes, and
+recurrent steps, followed by ascending numeric tuple order. Claim thresholds remain strict:
+improvements must be greater than 0.05. The history claim requires H4 to clear both T and H0; the
+sequence claim requires H4 to clear H4-shuffled and both frozen shuffle-eligibility gates; advancing
+to paired objectives additionally requires both claims and no B2 family or minimum-family success
+drop greater than 0.05.
+
+The post-execution analysis command is intentionally incapable of preparing or activating an inert
+store. It opens only an already activated six-family result tree through a read-only facade, pins
+the activation marker, stores, and every result fingerprint for the whole reduction, requires the
+exact 11,520-unit matrix, and republishes only outside the result root. The primary and restricted
+interaction metrics consume only typed first-hit or fixed-endpoint censoring fields; replay, oracle,
+resets, wall time, and non-cost diagnostics cannot enter them. The separately declared cost
+tie-break uses only deduplicated model-owner optimizer, forward-pass, and recurrent-step totals.
+Every reported rational selection quantity includes its exact numerator and denominator. Run the
+analysis only after the execution driver reports the complete frozen matrix:
+
+```bash
+python -m levelup.experiments.milestone6_phase3_selection_analysis \
+  --repository /absolute/path/to/levelup-bench \
+  --result-root /absolute/path/to/completed-phase3-development-results \
+  --expected-git-commit <exact-clean-commit-sha> \
+  --output /absolute/path/outside-result-root/phase3-selection-analysis.json
+```
+
+The execution implementation commit `baec6b6b2b1af3b4e2825f7daa93218f70d4fa6a` passed its
+exact-head GitHub Actions run before this selector boundary was added. That confirms the execution
+baseline only; the selector tranche requires its own exact-head CI success before preparing a
+development result store. No Phase 3 result store has yet been prepared, no comparative Phase 3
+development outcome has been inspected, and no final family has been created, unlocked, or read.

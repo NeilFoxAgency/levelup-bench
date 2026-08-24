@@ -114,9 +114,7 @@ def _read_file(fd: int, name: str) -> bytes:
 
 def _open_marker(root_fd: int, stack: ExitStack) -> tuple[int, tuple[int, int]]:
     try:
-        marker_fd = os.open(
-            ACTIVATION_MARKER_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd
-        )
+        marker_fd = os.open(ACTIVATION_MARKER_NAME, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root_fd)
         stack.callback(os.close, marker_fd)
         observed = os.fstat(marker_fd)
         if not stat.S_ISREG(observed.st_mode):
@@ -302,14 +300,10 @@ class _ScientificAuthorityCache:
                     chunks.append(chunk)
                 rendered_index = b"".join(chunks)
                 observed_after = os.fstat(index_fd)
-                if (
-                    self._fingerprint(observed_before)
-                    != self._fingerprint(observed_after)
-                    or len(rendered_index) != int(observed_after.st_size)
-                ):
-                    raise Phase3ActivationError(
-                        "held model-key authority changed while being read"
-                    )
+                if self._fingerprint(observed_before) != self._fingerprint(observed_after) or len(
+                    rendered_index
+                ) != int(observed_after.st_size):
+                    raise Phase3ActivationError("held model-key authority changed while being read")
                 index = Phase3ModelArtifactIndex.model_validate(json.loads(rendered_index))
                 fingerprint = self._fingerprint(observed_after)
         except (
@@ -437,8 +431,7 @@ def _scientific_record_check(
     )
     diagnostics = record.diagnostics
     if any(
-        type(diagnostics.get(name)) is not int or diagnostics[name] < 0
-        for name in required_names
+        type(diagnostics.get(name)) is not int or diagnostics[name] < 0 for name in required_names
     ):
         raise Phase3ActivationError("completed record lacks required model diagnostics")
     if any(
@@ -454,8 +447,12 @@ def _scientific_record_check(
     if diagnostics["model_forward_passes"] != (
         diagnostics["model_optimizer_steps"] * diagnostics["model_training_examples"]
     ):
-        raise Phase3ActivationError("completed record model forward-pass diagnostic is inconsistent")
-    expected_parameters = S_PARAMETERS if planned.base_condition_id == S_CONDITION else HISTORY_PARAMETERS
+        raise Phase3ActivationError(
+            "completed record model forward-pass diagnostic is inconsistent"
+        )
+    expected_parameters = (
+        S_PARAMETERS if planned.base_condition_id == S_CONDITION else HISTORY_PARAMETERS
+    )
     try:
         expected_epochs = int(planned.training_tuple_id.rsplit("-e", 1)[1])
     except (IndexError, ValueError) as exc:
@@ -463,8 +460,7 @@ def _scientific_record_check(
     if (
         diagnostics["model_trainable_parameters"] != expected_parameters
         or diagnostics["model_optimizer_steps"] != expected_epochs
-        or diagnostics["model_trainable_parameters"]
-        != key.report.trainable_parameters
+        or diagnostics["model_trainable_parameters"] != key.report.trainable_parameters
         or diagnostics["model_optimizer_steps"] != key.report.optimizer_steps
         or diagnostics["model_forward_passes"] != key.report.forward_passes
         or diagnostics["model_recurrent_steps"] != key.report.recurrent_steps
@@ -510,7 +506,9 @@ def _scientific_record_check(
             or effective > map_nonidentity
             or claim is not (eligible > 0 and effective / eligible >= 0.80)
         ):
-            raise Phase3ActivationError("H4-shuffled record history digest differs from report lineage")
+            raise Phase3ActivationError(
+                "H4-shuffled record history digest differs from report lineage"
+            )
     except Phase3ActivationError:
         raise
     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -613,9 +611,7 @@ def _marker_body(
                 "family_id": store.family_id,
                 "run_id": store.run_id,
                 "config_sha256": store.config_sha256,
-                "identities": {
-                    key: _record_identity(value) for key, value in identity.items()
-                },
+                "identities": {key: _record_identity(value) for key, value in identity.items()},
             }
             for store, identity in zip(stores, identities, strict=True)
         ],
@@ -740,9 +736,7 @@ def _validate_store_descriptors(
                         raise Phase3ActivationError("untracked result appeared during activation")
                     record_fingerprints[identity_key] = fingerprint
                 elif prior_fingerprint != fingerprint:
-                    raise Phase3ActivationError(
-                        "completed result identity or fingerprint changed"
-                    )
+                    raise Phase3ActivationError("completed result identity or fingerprint changed")
                 record = _parse_canonical_record(rendered, name, UnitRecord)
                 _verify_record_identity(record, store.spec, expected_by_id, filename=name)
                 _scientific_record_check(record, expected_by_id[record.unit_id], scientific)
@@ -755,28 +749,59 @@ def _validate_store_descriptors(
                         raise Phase3ActivationError("untracked result appeared during activation")
                     record_fingerprints[identity_key] = fingerprint
                 elif prior_fingerprint != fingerprint:
-                    raise Phase3ActivationError(
-                        "attempt result identity or fingerprint changed"
-                    )
+                    raise Phase3ActivationError("attempt result identity or fingerprint changed")
                 record = _parse_canonical_record(rendered, name, AttemptRecord)
                 _verify_record_identity(record, store.spec, expected_by_id, filename=name)
-            current_keys = {
-                (store.family_id, "units", name) for name in units
-            }
-            current_keys.update(
-                (store.family_id, "attempts", name) for name in attempts
-            )
+            current_keys = {(store.family_id, "units", name) for name in units}
+            current_keys.update((store.family_id, "attempts", name) for name in attempts)
             for key in record_fingerprints:
                 if key[0] == store.family_id and key not in current_keys:
                     raise Phase3ActivationError("stored result was removed during activation")
         except Phase3ActivationError:
             raise
         except (OSError, Phase3ResultStoreError, secure_fs.SecureFilesystemError) as exc:
-            raise Phase3ActivationError(f"prepared family store is invalid: {store.family_id}") from exc
+            raise Phase3ActivationError(
+                f"prepared family store is invalid: {store.family_id}"
+            ) from exc
     scientific.revalidate()
 
 
-def _reopen_identities(root: Path, stores: tuple[Phase3ResultStore, ...]) -> tuple[tuple[int, int], tuple[dict[str, tuple[int, int]], ...]]:
+def _require_complete_unit_matrix_before_record_validation(
+    stores: tuple[Phase3ResultStore, ...],
+    descriptors: tuple[dict[str, int], ...],
+) -> None:
+    """Prove exact completed-record presence without opening any record.
+
+    Selection analysis uses this inside the same descriptor-held activation
+    transaction that will later parse records.  A partial or foreign matrix
+    therefore fails before any outcome field can enter memory.
+    """
+
+    observed_total = 0
+    expected_total = 0
+    for store, descriptor in zip(stores, descriptors, strict=True):
+        try:
+            observed_names = set(secure_fs.strict_regular_entries(descriptor["units"]))
+        except secure_fs.SecureFilesystemError as exc:
+            raise Phase3ActivationError(
+                f"cannot enumerate completed results before analysis: {store.family_id}"
+            ) from exc
+        expected_names = {f"{item.unit.unit_id}.json" for item in store.spec.units}
+        if observed_names != expected_names:
+            raise Phase3ActivationError(
+                "read-only Phase 3 analysis requires the exact complete unit matrix"
+            )
+        observed_total += len(observed_names)
+        expected_total += len(expected_names)
+    if observed_total != expected_total or expected_total != 11_520:
+        raise Phase3ActivationError(
+            "read-only Phase 3 analysis requires exactly 11,520 completed units"
+        )
+
+
+def _reopen_identities(
+    root: Path, stores: tuple[Phase3ResultStore, ...]
+) -> tuple[tuple[int, int], tuple[dict[str, tuple[int, int]], ...]]:
     try:
         with ExitStack() as stack:
             root_fd = secure_fs.open_directory_chain(root)
@@ -792,13 +817,15 @@ def _reopen_identities(root: Path, stores: tuple[Phase3ResultStore, ...]) -> tup
                 stack.callback(os.close, units_fd)
                 attempts_fd = secure_fs.open_child_directory(run_fd, "attempts")
                 stack.callback(os.close, attempts_fd)
-                values.append({
-                    "root": root_identity,
-                    "family": secure_fs.directory_identity(family_fd),
-                    "run": secure_fs.directory_identity(run_fd),
-                    "units": secure_fs.directory_identity(units_fd),
-                    "attempts": secure_fs.directory_identity(attempts_fd),
-                })
+                values.append(
+                    {
+                        "root": root_identity,
+                        "family": secure_fs.directory_identity(family_fd),
+                        "run": secure_fs.directory_identity(run_fd),
+                        "units": secure_fs.directory_identity(units_fd),
+                        "attempts": secure_fs.directory_identity(attempts_fd),
+                    }
+                )
             return root_identity, tuple(values)
     except (OSError, secure_fs.SecureFilesystemError) as exc:
         raise Phase3ActivationError("result output root or store was substituted") from exc
@@ -815,7 +842,9 @@ def _write_record(fd: int, name: str, value: object) -> bool:
         temporary = f".{name}.{uuid.uuid4().hex}.tmp"
         temp_fd: int | None = None
         try:
-            temp_fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+            temp_fd = os.open(
+                temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600, dir_fd=fd
+            )
             with os.fdopen(temp_fd, "wb") as handle:
                 temp_fd = None
                 handle.write(rendered)
@@ -878,6 +907,47 @@ class _FamilyWritableStore:
         return self._batch.next_attempt_number(unit_id, self.family_id)
 
 
+@dataclass(frozen=True, slots=True)
+class Phase3ReadOnlyFamilyStore:
+    """Outcome reader that exposes no result-publication capability."""
+
+    _batch: "Phase3ActivatedBatch"
+    _index: int
+
+    @property
+    def family_id(self) -> str:
+        return self._batch._stores[self._index].family_id
+
+    def completed_unit_ids(self) -> tuple[str, ...]:
+        return self._batch.completed_unit_ids(self.family_id)
+
+    def load_completed(self, unit_id: str) -> UnitRecord | None:
+        return self._batch._load_completed(self._index, unit_id)
+
+    def attempt_records(self) -> tuple[AttemptRecord, ...]:
+        return self._batch.attempt_records(self.family_id)
+
+
+@dataclass(frozen=True, slots=True)
+class Phase3ReadOnlyBatch:
+    """Read-only facade over an already activated, fingerprint-pinned batch."""
+
+    _batch: "Phase3ActivatedBatch"
+
+    @property
+    def stores(self) -> tuple[Phase3ReadOnlyFamilyStore, ...]:
+        self._batch._require_live()
+        return tuple(
+            Phase3ReadOnlyFamilyStore(self._batch, index) for index in range(len(FAMILIES))
+        )
+
+    def completed_unit_ids(self) -> tuple[str, ...]:
+        return self._batch.completed_unit_ids()
+
+    def attempt_records(self) -> tuple[AttemptRecord, ...]:
+        return self._batch.attempt_records()
+
+
 @dataclass(slots=True)
 class Phase3ActivatedBatch:
     """Capability-bearing activated batch; usable only inside its context."""
@@ -896,6 +966,7 @@ class Phase3ActivatedBatch:
     _record_fingerprints: dict[tuple[str, str, str], RecordFingerprint]
     _unit_maps: tuple[dict[str, Any], ...]
     _token: object = field(repr=False, compare=False)
+    _writes_enabled: bool = field(repr=False, compare=False)
     _active: bool = True
 
     @property
@@ -929,7 +1000,9 @@ class Phase3ActivatedBatch:
                 with ExitStack() as marker_stack:
                     current_root_fd = secure_fs.open_directory_chain(self._root)
                     marker_stack.callback(os.close, current_root_fd)
-                    with secure_fs.open_regular_file_at(current_root_fd, ACTIVATION_MARKER_NAME) as current_marker_fd:
+                    with secure_fs.open_regular_file_at(
+                        current_root_fd, ACTIVATION_MARKER_NAME
+                    ) as current_marker_fd:
                         current_marker = os.fstat(current_marker_fd)
                         current_identity = (int(current_marker.st_dev), int(current_marker.st_ino))
                         if current_identity != self._marker_identity:
@@ -967,21 +1040,32 @@ class Phase3ActivatedBatch:
 
     def _write_completed(self, index: int, record: UnitRecord) -> bool:
         self._require_live()
+        if not self._writes_enabled:
+            raise Phase3ActivationError("read-only Phase 3 activation cannot publish results")
         if type(record) is not UnitRecord:
             raise Phase3ActivationError("completed result must be a typed UnitRecord")
         store = self._stores[index]
         planned = self._unit(index, record.unit_id)
         try:
-            _verify_record_identity(record, store.spec, {planned.unit.unit_id: planned}, filename=f"{record.unit_id}.json")
+            _verify_record_identity(
+                record,
+                store.spec,
+                {planned.unit.unit_id: planned},
+                filename=f"{record.unit_id}.json",
+            )
         except Phase3ResultStoreError as exc:
-            raise Phase3ActivationError("completed record lineage differs from frozen unit") from exc
+            raise Phase3ActivationError(
+                "completed record lineage differs from frozen unit"
+            ) from exc
         _scientific_record_check(record, planned, self._scientific)
         name = f"{record.unit_id}.json"
         identity_key = (store.family_id, "units", name)
         previously_tracked = identity_key in self._record_fingerprints
         if previously_tracked:
             self._assert_record_identity(index, "units", name)
-        published = _write_record(self._descriptors[index]["units"], name, record.model_dump(mode="json"))
+        published = _write_record(
+            self._descriptors[index]["units"], name, record.model_dump(mode="json")
+        )
         if not published and not previously_tracked:
             raise Phase3ActivationError("completed result raced with external publication")
         rendered, observed = _record_snapshot(self._descriptors[index]["units"], name)
@@ -995,13 +1079,17 @@ class Phase3ActivatedBatch:
 
     def _write_attempt(self, index: int, record: AttemptRecord) -> bool:
         self._require_live()
+        if not self._writes_enabled:
+            raise Phase3ActivationError("read-only Phase 3 activation cannot publish attempts")
         if type(record) is not AttemptRecord:
             raise Phase3ActivationError("attempt result must be a typed AttemptRecord")
         store = self._stores[index]
         planned = self._unit(index, record.unit_id)
         name = f"{record.unit_id}.attempt-{record.attempt:04d}.json"
         try:
-            _verify_record_identity(record, store.spec, {planned.unit.unit_id: planned}, filename=name)
+            _verify_record_identity(
+                record, store.spec, {planned.unit.unit_id: planned}, filename=name
+            )
         except Phase3ResultStoreError as exc:
             raise Phase3ActivationError("attempt record lineage differs from frozen unit") from exc
         if not 1 <= record.attempt <= 9999:
@@ -1010,7 +1098,9 @@ class Phase3ActivatedBatch:
         previously_tracked = identity_key in self._record_fingerprints
         if previously_tracked:
             self._assert_record_identity(index, "attempts", name)
-        published = _write_record(self._descriptors[index]["attempts"], name, record.model_dump(mode="json"))
+        published = _write_record(
+            self._descriptors[index]["attempts"], name, record.model_dump(mode="json")
+        )
         if not published and not previously_tracked:
             raise Phase3ActivationError("attempt result raced with external publication")
         rendered, observed = _record_snapshot(self._descriptors[index]["attempts"], name)
@@ -1033,9 +1123,7 @@ class Phase3ActivatedBatch:
         if name not in entries:
             return None
         try:
-            rendered, fingerprint = _record_snapshot(
-                self._descriptors[index]["units"], name
-            )
+            rendered, fingerprint = _record_snapshot(self._descriptors[index]["units"], name)
             expected_fingerprint = self._record_fingerprints.get(
                 (self._stores[index].family_id, "units", name)
             )
@@ -1071,34 +1159,20 @@ class Phase3ActivatedBatch:
             try:
                 indices = (FAMILIES.index(family_id),)
             except ValueError as exc:
-                raise Phase3ActivationError(
-                    f"unknown activated family: {family_id}"
-                ) from exc
+                raise Phase3ActivationError(f"unknown activated family: {family_id}") from exc
         values: list[str] = []
         for index in indices:
             try:
-                names = set(
-                    secure_fs.strict_regular_entries(
-                        self._descriptors[index]["units"]
-                    )
-                )
+                names = set(secure_fs.strict_regular_entries(self._descriptors[index]["units"]))
             except secure_fs.SecureFilesystemError as exc:
-                raise Phase3ActivationError(
-                    "cannot enumerate activated completed results"
-                ) from exc
-            expected_ids = tuple(
-                item.unit.unit_id for item in self._stores[index].spec.units
-            )
+                raise Phase3ActivationError("cannot enumerate activated completed results") from exc
+            expected_ids = tuple(item.unit.unit_id for item in self._stores[index].spec.units)
             expected_names = {f"{unit_id}.json" for unit_id in expected_ids}
             if not names <= expected_names:
-                raise Phase3ActivationError(
-                    "completed namespace contains a foreign record"
-                )
+                raise Phase3ActivationError("completed namespace contains a foreign record")
             for name in names:
                 self._assert_record_identity(index, "units", name)
-            values.extend(
-                unit_id for unit_id in expected_ids if f"{unit_id}.json" in names
-            )
+            values.extend(unit_id for unit_id in expected_ids if f"{unit_id}.json" in names)
         self._require_live()
         return tuple(values)
 
@@ -1120,9 +1194,7 @@ class Phase3ActivatedBatch:
             for name in names:
                 if ".attempt-" not in name:
                     raise Phase3ActivationError("attempt namespace contains a foreign record")
-                rendered, fingerprint = _record_snapshot(
-                    self._descriptors[index]["attempts"], name
-                )
+                rendered, fingerprint = _record_snapshot(self._descriptors[index]["attempts"], name)
                 expected_fingerprint = self._record_fingerprints.get(
                     (self._stores[index].family_id, "attempts", name)
                 )
@@ -1138,7 +1210,9 @@ class Phase3ActivatedBatch:
                         filename=name,
                     )
                 except Phase3ResultStoreError as exc:
-                    raise Phase3ActivationError("attempt record lineage differs from frozen unit") from exc
+                    raise Phase3ActivationError(
+                        "attempt record lineage differs from frozen unit"
+                    ) from exc
                 if not 1 <= record.attempt <= 9999:
                     raise Phase3ActivationError("attempt number must be between 1 and 9999")
                 values.append(record)
@@ -1168,7 +1242,9 @@ class Phase3ActivatedBatch:
                 try:
                     number = int(name[len(prefix) : -5])
                 except ValueError as exc:
-                    raise Phase3ActivationError("attempt namespace contains a malformed number") from exc
+                    raise Phase3ActivationError(
+                        "attempt namespace contains a malformed number"
+                    ) from exc
                 if not 1 <= number <= 9999:
                     raise Phase3ActivationError("attempt number must be between 1 and 9999")
                 numbers.append(number)
@@ -1192,6 +1268,8 @@ def activate_phase3_result_stores(
     readiness_lease: Phase3ActivationReadinessLease,
     *,
     expected_git_commit: str,
+    _require_complete_before_record_validation: bool = False,
+    _writes_enabled: bool = True,
 ) -> Iterator[Phase3ActivatedBatch]:
     """Validate and atomically activate the complete six-store result tree."""
 
@@ -1212,12 +1290,9 @@ def activate_phase3_result_stores(
     if (
         snapshot.plan_id != expected.plan_id
         or snapshot.model_authority_sha256 != expected.model_authority_sha256
-        or snapshot.files_by_path.get(
-            "configs/milestone6/phase3_representation_ladder.json"
-        ) is None
-        or snapshot.files_by_path[
-            "configs/milestone6/phase3_representation_ladder.json"
-        ].sha256
+        or snapshot.files_by_path.get("configs/milestone6/phase3_representation_ladder.json")
+        is None
+        or snapshot.files_by_path["configs/milestone6/phase3_representation_ladder.json"].sha256
         != expected.protocol_sha256
     ):
         raise Phase3ActivationError("readiness authority lineage differs from result plan")
@@ -1243,6 +1318,11 @@ def activate_phase3_result_stores(
             descriptors,
             marker_exists=marker_present,
         )
+        if _require_complete_before_record_validation:
+            _require_complete_unit_matrix_before_record_validation(
+                typed_stores,
+                descriptors,
+            )
         _validate_store_descriptors(
             typed_stores,
             descriptors,
@@ -1280,11 +1360,9 @@ def activate_phase3_result_stores(
             marker_identity,
             scientific,
             record_fingerprints,
-            tuple(
-                {item.unit.unit_id: item for item in store.spec.units}
-                for store in typed_stores
-            ),
+            tuple({item.unit.unit_id: item for item in store.spec.units} for store in typed_stores),
             _BATCH_TOKEN,
+            _writes_enabled,
         )
         try:
             yield batch
@@ -1319,16 +1397,67 @@ def activate_phase3_result_stores(
                 with ExitStack() as check_stack:
                     check_fd = secure_fs.open_directory_chain(root)
                     check_stack.callback(os.close, check_fd)
-                    with secure_fs.open_regular_file_at(check_fd, ACTIVATION_MARKER_NAME) as check_marker_fd:
+                    with secure_fs.open_regular_file_at(
+                        check_fd, ACTIVATION_MARKER_NAME
+                    ) as check_marker_fd:
                         observed = os.fstat(check_marker_fd)
                         if (
                             marker_identity is None
                             or (int(observed.st_dev), int(observed.st_ino)) != marker_identity
                             or _read_file(check_fd, ACTIVATION_MARKER_NAME) != marker_bytes
                         ):
-                            raise Phase3ActivationError("activation marker changed after activation")
+                            raise Phase3ActivationError(
+                                "activation marker changed after activation"
+                            )
             except Phase3ActivationError:
                 raise
+
+
+@contextmanager
+def open_activated_phase3_results(
+    stores: tuple[Phase3ResultStore, ...] | list[Phase3ResultStore],
+    expected: Phase3ExpectedPlan,
+    readiness_lease: Phase3ActivationReadinessLease,
+    *,
+    expected_git_commit: str,
+) -> Iterator[Phase3ReadOnlyBatch]:
+    """Open an existing activation through a facade with no write methods.
+
+    The marker is required before entering the activation transaction, so this
+    helper cannot turn an inert result tree into an active one. The underlying
+    transaction pins the marker, all store descriptors, and every record
+    fingerprint through the caller's complete read, then rechecks them on exit.
+    """
+
+    typed_stores = tuple(stores)
+    root = _validate_store_arguments(typed_stores, expected)
+    try:
+        with ExitStack() as stack:
+            root_fd = secure_fs.open_directory_chain(root)
+            stack.callback(os.close, root_fd)
+            entries = _entries(root_fd)
+            if ACTIVATION_MARKER_NAME not in entries:
+                raise Phase3ActivationError(
+                    "read-only Phase 3 results require an existing activation marker"
+                )
+            marker_fd, _ = _open_marker(root_fd, stack)
+            if not _marker_bytes(marker_fd):
+                raise Phase3ActivationError("activation marker is empty")
+    except Phase3ActivationError:
+        raise
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        raise Phase3ActivationError(
+            "cannot require the existing Phase 3 activation marker"
+        ) from exc
+    with activate_phase3_result_stores(
+        typed_stores,
+        expected,
+        readiness_lease,
+        expected_git_commit=expected_git_commit,
+        _require_complete_before_record_validation=True,
+        _writes_enabled=False,
+    ) as batch:
+        yield Phase3ReadOnlyBatch(batch)
 
 
 # The short spelling is convenient in execution drivers and retained as a
@@ -1342,7 +1471,10 @@ __all__ = [
     "ACTIVATION_SCHEMA_VERSION",
     "Phase3ActivatedBatch",
     "Phase3ActivationError",
+    "Phase3ReadOnlyBatch",
+    "Phase3ReadOnlyFamilyStore",
     "activate_phase3_batch",
     "activate_phase3_result_stores",
+    "open_activated_phase3_results",
     "phase3_activation",
 ]

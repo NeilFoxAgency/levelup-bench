@@ -16,9 +16,7 @@ from levelup.experiments import milestone6_phase3_readiness as readiness
 from levelup.experiments.runner.config import canonical_json_bytes
 
 _MODEL_STORE_ID = "phase3-model-preparation-cc08207"
-_MODEL_METADATA_FIXTURE = (
-    Path(__file__).parent / "fixtures" / "phase3_model_preparation_metadata"
-)
+_MODEL_METADATA_FIXTURE = Path(__file__).parent / "fixtures" / "phase3_model_preparation_metadata"
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -69,7 +67,9 @@ def _materialize_metadata_only_model_store() -> Iterator[None]:
             path.rmdir()
 
 
-def _report_snapshot(snapshot: readiness.Phase3ReadinessSnapshot) -> readiness.AuthorityFileSnapshot:
+def _report_snapshot(
+    snapshot: readiness.Phase3ReadinessSnapshot,
+) -> readiness.AuthorityFileSnapshot:
     return next(
         item
         for item in snapshot.files
@@ -89,9 +89,7 @@ def _snapshot_with_report_bytes(
     )
     return replace(
         snapshot,
-        files=tuple(
-            replacement if item is original else item for item in snapshot.files
-        ),
+        files=tuple(replacement if item is original else item for item in snapshot.files),
     )
 
 
@@ -123,7 +121,8 @@ def test_readiness_captures_all_published_development_authorities() -> None:
     assert readiness.PHASE3_EVIDENCE_RELATIVE in paths
     assert readiness.PHASE3_MODEL_AUTHORITY_RELATIVE in paths
     assert readiness.PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE in paths
-    assert len(paths) == 12
+    assert readiness.PHASE3_ANCHOR_SELECTION_METRICS_RELATIVE in paths
+    assert len(paths) == 13
     assert len(snapshot.directories) == 4
     assert {Path(item.relative_path).name for item in snapshot.directories} >= {
         "phase3-model-artifact-keys",
@@ -132,8 +131,7 @@ def test_readiness_captures_all_published_development_authorities() -> None:
     }
     assert snapshot.plan_id == readiness.PHASE3_PLAN_ID
     assert (
-        snapshot.training_shuffle_report_sha256
-        == readiness.PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
+        snapshot.training_shuffle_report_sha256 == readiness.PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
     )
     assert (
         snapshot.training_shuffle_report_file_sha256
@@ -184,9 +182,7 @@ def test_training_shuffle_report_view_lineage_is_rejected(
         view["plan_id"] = "0" * 64
     unsigned = dict(body)
     unsigned.pop("report_sha256")
-    body["report_sha256"] = hashlib.sha256(
-        canonical_json_bytes(unsigned)
-    ).hexdigest()
+    body["report_sha256"] = hashlib.sha256(canonical_json_bytes(unsigned)).hexdigest()
     content = canonical_json_bytes(body)
     monkeypatch.setattr(
         readiness,
@@ -205,9 +201,7 @@ def test_training_shuffle_report_view_lineage_is_rejected(
 
 def test_training_shuffle_report_noncanonical_bytes_are_rejected() -> None:
     snapshot = readiness.capture_phase3_readiness()
-    invalid = _snapshot_with_report_bytes(
-        snapshot, _report_snapshot(snapshot).content + b"\n"
-    )
+    invalid = _snapshot_with_report_bytes(snapshot, _report_snapshot(snapshot).content + b"\n")
     with pytest.raises(readiness.Phase3ReadinessError, match="not canonical"):
         readiness._validate_authority_files(invalid)
 
@@ -235,9 +229,9 @@ def test_training_shuffle_report_same_byte_replacement_is_rejected(
 
 def test_source_byte_mutation_is_detected(tmp_path: Path) -> None:
     source = tmp_path / "authority.json"
-    source.write_bytes(b"{\"x\":1}")
+    source.write_bytes(b'{"x":1}')
     original = readiness._read_source(tmp_path, "authority.json")
-    source.write_bytes(b"{\"x\":2}")
+    source.write_bytes(b'{"x":2}')
     changed = readiness._read_source(tmp_path, "authority.json")
     assert changed.content != original.content
     assert changed.sha256 != original.sha256
@@ -298,7 +292,9 @@ def test_recheck_rejects_repository_commit_or_dirty_drift(monkeypatch: pytest.Mo
 
 def test_execution_preflight_rejects_dirty_repository(monkeypatch: pytest.MonkeyPatch) -> None:
     snapshot = replace(readiness.capture_phase3_readiness(), git_dirty=True)
-    monkeypatch.setattr(readiness, "_git_state", lambda _repository: (snapshot.git_commit_sha, True))
+    monkeypatch.setattr(
+        readiness, "_git_state", lambda _repository: (snapshot.git_commit_sha, True)
+    )
     with pytest.raises(readiness.Phase3ReadinessError, match="clean repository"):
         snapshot.preflight(expected_git_commit=snapshot.git_commit_sha)
 
@@ -326,13 +322,9 @@ def test_activation_lease_holds_all_sources_and_deactivates(
         "_git_state",
         lambda _repository: (snapshot.git_commit_sha, False),
     )
-    with snapshot.hold_for_activation(
-        expected_git_commit=snapshot.git_commit_sha
-    ) as lease:
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
         assert lease.active is True
-        assert set(lease.file_descriptors) == {
-            item.relative_path for item in snapshot.files
-        }
+        assert set(lease.file_descriptors) == {item.relative_path for item in snapshot.files}
         assert set(lease.directory_descriptors) == {
             item.relative_path for item in snapshot.directories
         }
@@ -367,9 +359,7 @@ def test_activation_lease_rechecks_report_after_yield(
         return current
 
     with pytest.raises(readiness.Phase3ReadinessError, match="source changed"):
-        with snapshot.hold_for_activation(
-            expected_git_commit=snapshot.git_commit_sha
-        ) as lease:
+        with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
             assert report_path in lease.file_descriptors
             monkeypatch.setattr(readiness, "_read_source", replaced)
 

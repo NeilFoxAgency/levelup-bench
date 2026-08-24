@@ -45,9 +45,7 @@ class Phase3ReadinessError(ValueError):
 
 
 PHASE3_PLAN_ID = "2457657f77e3ef67708f1abc195bfa4ad31c554cfd314526e1bb26113cc4c9d1"
-PHASE3_MODEL_AUTHORITY_SHA256 = (
-    "8771eb52433faf15d6e5e935902a5c935526ec0e6b8e34621c3d6a922aea1a52"
-)
+PHASE3_MODEL_AUTHORITY_SHA256 = "8771eb52433faf15d6e5e935902a5c935526ec0e6b8e34621c3d6a922aea1a52"
 PHASE3_MODEL_AUTHORITY_FILE_SHA256 = (
     "eecd68707e2cdfa34e9e9b30f787fd17b87ae767db63b659944e420cb7255388"
 )
@@ -56,8 +54,13 @@ PHASE3_PLAN_LOCK_RELATIVE = "configs/milestone6/phase3_plan_lock.json"
 PHASE3_ANCHOR_RELATIVE = "configs/milestone6/phase3_anchor_manifest.json"
 PHASE3_EVIDENCE_RELATIVE = "configs/milestone6/phase3_evidence_lock.json"
 PHASE3_MODEL_AUTHORITY_RELATIVE = "configs/milestone6/phase3_model_artifact_authority.json"
-PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE = (
-    "configs/milestone6/phase3_training_shuffle_report.json"
+PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE = "configs/milestone6/phase3_training_shuffle_report.json"
+PHASE3_ANCHOR_SELECTION_METRICS_RELATIVE = "configs/milestone6/phase3_anchor_selection_metrics.json"
+PHASE3_ANCHOR_SELECTION_METRICS_SHA256 = (
+    "7f1f0a1c30ff0e93b512028df6bca5f42276477ebdf78ae031e003684f10e9c7"
+)
+PHASE3_ANCHOR_SELECTION_METRICS_FILE_SHA256 = (
+    "1c7e5fb296ed397c96665ff77613be4aabf7702d968bf55c1da04a08562758a2"
 )
 PHASE3_TRAINING_SHUFFLE_REPORT_SHA256 = (
     "75da05f5fd2d33a6788d69110a526b19255800760f8181bcda656cfb0b180adc"
@@ -258,9 +261,7 @@ def _read_directory(repository: Path, relative_path: str) -> AuthorityDirectoryS
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         if isinstance(exc, Phase3ReadinessError):
             raise
-        raise Phase3ReadinessError(
-            f"cannot safely open authority directory: {relative}"
-        ) from exc
+        raise Phase3ReadinessError(f"cannot safely open authority directory: {relative}") from exc
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -275,15 +276,11 @@ def _hold_file_from_root(
 ) -> int:
     components = expected.relative_path.split("/")
     parent_fd = root_fd
-    ancestors: list[tuple[str, tuple[int, int]]] = [
-        ("", _identity(os.fstat(root_fd)))
-    ]
+    ancestors: list[tuple[str, tuple[int, int]]] = [("", _identity(os.fstat(root_fd)))]
     for index, component in enumerate(components[:-1]):
         child_fd = secure_fs.open_child_directory(parent_fd, component)
         stack.callback(os.close, child_fd)
-        ancestors.append(
-            ("/".join(components[: index + 1]), _identity(os.fstat(child_fd)))
-        )
+        ancestors.append(("/".join(components[: index + 1]), _identity(os.fstat(child_fd))))
         parent_fd = child_fd
     file_fd = os.open(
         components[-1],
@@ -308,9 +305,7 @@ def _hold_file_from_root(
         or tuple(ancestors) != expected.ancestor_identities
         or b"".join(chunks) != expected.content
     ):
-        raise Phase3ReadinessError(
-            f"held authority source differs: {expected.relative_path}"
-        )
+        raise Phase3ReadinessError(f"held authority source differs: {expected.relative_path}")
     os.lseek(file_fd, 0, os.SEEK_SET)
     return file_fd
 
@@ -322,9 +317,7 @@ def _hold_directory_from_root(
 ) -> int:
     components = expected.relative_path.split("/")
     parent_fd = root_fd
-    ancestors: list[tuple[str, tuple[int, int]]] = [
-        ("", _identity(os.fstat(root_fd)))
-    ]
+    ancestors: list[tuple[str, tuple[int, int]]] = [("", _identity(os.fstat(root_fd)))]
     for index, component in enumerate(components):
         child_fd = secure_fs.open_child_directory(parent_fd, component)
         stack.callback(os.close, child_fd)
@@ -333,9 +326,7 @@ def _hold_directory_from_root(
             ancestors.append(("/".join(components[: index + 1]), identity))
         parent_fd = child_fd
     if identity != expected.identity or tuple(ancestors) != expected.ancestor_identities:
-        raise Phase3ReadinessError(
-            f"held authority directory differs: {expected.relative_path}"
-        )
+        raise Phase3ReadinessError(f"held authority directory differs: {expected.relative_path}")
     return parent_fd
 
 
@@ -346,7 +337,9 @@ def _json(
         value = json.loads(snapshot.content)
     except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise Phase3ReadinessError(f"{label} is not valid JSON") from exc
-    if not isinstance(value, dict) or (canonical and canonical_json_bytes(value) != snapshot.content):
+    if not isinstance(value, dict) or (
+        canonical and canonical_json_bytes(value) != snapshot.content
+    ):
         raise Phase3ReadinessError(f"{label} is not canonical JSON")
     return value
 
@@ -355,7 +348,11 @@ def _require_self_hash(body: dict[str, Any], field: str, label: str) -> str:
     supplied = body.get(field)
     unsigned = dict(body)
     unsigned.pop(field, None)
-    if not isinstance(supplied, str) or len(supplied) != 64 or _sha256(canonical_json_bytes(unsigned)) != supplied:
+    if (
+        not isinstance(supplied, str)
+        or len(supplied) != 64
+        or _sha256(canonical_json_bytes(unsigned)) != supplied
+    ):
         raise Phase3ReadinessError(f"{label} self-hash is invalid")
     return supplied
 
@@ -401,7 +398,9 @@ class Phase3ReadinessSnapshot:
     def directories_by_path(self) -> Mapping[str, AuthorityDirectorySnapshot]:
         return {item.relative_path: item for item in self.directories}
 
-    def recheck(self, *, execution_preflight: bool = False, expected_git_commit: str | None = None) -> None:
+    def recheck(
+        self, *, execution_preflight: bool = False, expected_git_commit: str | None = None
+    ) -> None:
         """Revalidate every retained byte, inode, ancestor, and authority link."""
 
         try:
@@ -430,9 +429,7 @@ class Phase3ReadinessSnapshot:
                 current.identity != expected.identity
                 or current.ancestor_identities != expected.ancestor_identities
             ):
-                raise Phase3ReadinessError(
-                    f"authority directory changed: {expected.relative_path}"
-                )
+                raise Phase3ReadinessError(f"authority directory changed: {expected.relative_path}")
         commit, dirty = _git_state(self.repository)
         if commit != self.git_commit_sha or dirty != self.git_dirty:
             raise Phase3ReadinessError("repository provenance changed since readiness capture")
@@ -444,7 +441,9 @@ class Phase3ReadinessSnapshot:
                     "execution preflight requires an explicit authorized commit"
                 )
             if commit != expected_git_commit:
-                raise Phase3ReadinessError("execution preflight repository commit is not authorized")
+                raise Phase3ReadinessError(
+                    "execution preflight repository commit is not authorized"
+                )
         _validate_authority_files(self)
 
     def preflight(self, *, expected_git_commit: str) -> None:
@@ -474,9 +473,7 @@ class Phase3ReadinessSnapshot:
                 for expected in self.files
             }
             directory_descriptors = {
-                expected.relative_path: _hold_directory_from_root(
-                    root_fd, expected, stack
-                )
+                expected.relative_path: _hold_directory_from_root(root_fd, expected, stack)
                 for expected in self.directories
             }
             lease = Phase3ActivationReadinessLease(
@@ -531,9 +528,7 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
     try:
         shuffle_report_snapshot = files[PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE]
     except KeyError as exc:
-        raise Phase3ReadinessError(
-            "published Phase 3 training shuffle report is missing"
-        ) from exc
+        raise Phase3ReadinessError("published Phase 3 training shuffle report is missing") from exc
     shuffle_report = _json(
         shuffle_report_snapshot,
         "Phase 3 training shuffle report",
@@ -542,18 +537,34 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
     try:
         _validate_training_shuffle_report_body(shuffle_report)
     except (Phase3TrainingShuffleReportError, TypeError, ValueError) as exc:
-        raise Phase3ReadinessError(
-            "Phase 3 training shuffle report is not canonical"
-        ) from exc
+        raise Phase3ReadinessError("Phase 3 training shuffle report is not canonical") from exc
     if (
-        shuffle_report.get("report_sha256")
-        != PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
-        or shuffle_report_snapshot.sha256
-        != PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256
+        shuffle_report.get("report_sha256") != PHASE3_TRAINING_SHUFFLE_REPORT_SHA256
+        or shuffle_report_snapshot.sha256 != PHASE3_TRAINING_SHUFFLE_REPORT_FILE_SHA256
     ):
+        raise Phase3ReadinessError("published Phase 3 training shuffle report digest differs")
+    try:
+        anchor_metrics_snapshot = files[PHASE3_ANCHOR_SELECTION_METRICS_RELATIVE]
+    except KeyError as exc:
         raise Phase3ReadinessError(
-            "published Phase 3 training shuffle report digest differs"
-        )
+            "published Phase 3 anchor selection metrics are missing"
+        ) from exc
+    anchor_metrics = _json(
+        anchor_metrics_snapshot,
+        "Phase 3 anchor selection metrics",
+        canonical=True,
+    )
+    anchor_metrics_sha = _require_self_hash(
+        anchor_metrics,
+        "anchor_selection_metrics_sha256",
+        "Phase 3 anchor selection metrics",
+    )
+    _reject_final(anchor_metrics, "Phase 3 anchor selection metrics")
+    if (
+        anchor_metrics_sha != PHASE3_ANCHOR_SELECTION_METRICS_SHA256
+        or anchor_metrics_snapshot.sha256 != PHASE3_ANCHOR_SELECTION_METRICS_FILE_SHA256
+    ):
+        raise Phase3ReadinessError("published Phase 3 anchor selection metrics digest differs")
     protocol = _json(files[PHASE3_PROTOCOL_RELATIVE], "Phase 3 protocol")
     _reject_final(protocol, "Phase 3 protocol")
     if protocol.get("schema_version") != "milestone6.phase3_representation_ladder.v1":
@@ -561,39 +572,90 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
     authority = protocol.get("authority")
     if not isinstance(authority, dict):
         raise Phase3ReadinessError("Phase 3 protocol authority is missing")
-    for key in ("development_protocol", "development_tasks", "phase2_candidates", "phase2_selection_lock"):
+    for key in (
+        "development_protocol",
+        "development_tasks",
+        "phase2_candidates",
+        "phase2_selection_lock",
+    ):
         source = authority.get(key)
-        if not isinstance(source, dict) or source.get("sha256") != files[_relative(source.get("path", ""))].sha256:
+        if (
+            not isinstance(source, dict)
+            or source.get("sha256") != files[_relative(source.get("path", ""))].sha256
+        ):
             raise Phase3ReadinessError(f"Phase 3 linked authority hash drifted: {key}")
-    selection = _json(files[_relative(authority["phase2_selection_lock"]["path"])], "Phase 2 selection lock")
-    if selection.get("analysis", {}).get("analysis_sha256") != authority["phase2_selection_lock"].get("analysis_sha256"):
+    selection = _json(
+        files[_relative(authority["phase2_selection_lock"]["path"])], "Phase 2 selection lock"
+    )
+    if selection.get("analysis", {}).get("analysis_sha256") != authority[
+        "phase2_selection_lock"
+    ].get("analysis_sha256"):
         raise Phase3ReadinessError("Phase 2 selection analysis hash drifted")
     _reject_final(selection, "Phase 2 selection lock")
 
+    anchor_metric_sources = anchor_metrics.get("source")
+    anchor_metric_lineage = anchor_metrics.get("anchor_lineage")
+    if not isinstance(anchor_metric_sources, dict) or not isinstance(anchor_metric_lineage, dict):
+        raise Phase3ReadinessError("Phase 3 anchor selection metric lineage is missing")
+    for source_name, expected_path in (
+        ("selection_lock", _relative(authority["phase2_selection_lock"]["path"])),
+        ("anchor_manifest", PHASE3_ANCHOR_RELATIVE),
+        ("protocol", PHASE3_PROTOCOL_RELATIVE),
+    ):
+        source = anchor_metric_sources.get(source_name)
+        if (
+            not isinstance(source, dict)
+            or _relative(source.get("path", "")) != expected_path
+            or source.get("sha256") != files[expected_path].sha256
+        ):
+            raise Phase3ReadinessError(f"Phase 3 anchor metric source drifted: {source_name}")
+    if (
+        anchor_metric_lineage.get("phase3_protocol_sha256")
+        != files[PHASE3_PROTOCOL_RELATIVE].sha256
+        or anchor_metric_lineage.get("phase2_selection_lock_sha256")
+        != files[_relative(authority["phase2_selection_lock"]["path"])].sha256
+        or anchor_metric_lineage.get("phase2_selection_analysis_sha256")
+        != selection.get("analysis", {}).get("analysis_sha256")
+    ):
+        raise Phase3ReadinessError("Phase 3 anchor metric committed lineage drifted")
+
     plan = _json(files[PHASE3_PLAN_LOCK_RELATIVE], "Phase 3 plan lock", canonical=True)
     plan_lock_sha = _require_self_hash(plan, "plan_lock_sha256", "Phase 3 plan lock")
-    if plan.get("plan_id") != PHASE3_PLAN_ID or plan.get("protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256:
+    if (
+        plan.get("plan_id") != PHASE3_PLAN_ID
+        or plan.get("protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256
+    ):
         raise Phase3ReadinessError("Phase 3 plan identity or protocol link drifted")
     if plan.get("final_family_access") is not False:
         raise Phase3ReadinessError("Phase 3 plan permits final-family access")
 
     anchor = _json(files[PHASE3_ANCHOR_RELATIVE], "Phase 3 anchor manifest", canonical=True)
     anchor_sha = _require_self_hash(anchor, "anchor_manifest_sha256", "Phase 3 anchor manifest")
+    if anchor_metric_lineage.get("phase3_anchor_manifest_sha256") != anchor_sha:
+        raise Phase3ReadinessError("Phase 3 anchor metric anchor-manifest lineage drifted")
     _reject_final(anchor, "Phase 3 anchor manifest")
     evidence = _json(files[PHASE3_EVIDENCE_RELATIVE], "Phase 3 evidence lock", canonical=True)
     evidence_sha = _require_self_hash(evidence, "evidence_lock_sha256", "Phase 3 evidence lock")
     _reject_final(evidence, "Phase 3 evidence lock")
     for label, payload in (("anchor", anchor), ("evidence", evidence)):
         lineage = payload.get("lineage")
-        if not isinstance(lineage, dict) or lineage.get("phase3_protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256:
+        if (
+            not isinstance(lineage, dict)
+            or lineage.get("phase3_protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256
+        ):
             raise Phase3ReadinessError(f"Phase 3 {label} protocol lineage drifted")
         if lineage.get("phase3_plan_id") not in (None, PHASE3_PLAN_ID):
             raise Phase3ReadinessError(f"Phase 3 {label} plan lineage drifted")
     if evidence.get("lineage", {}).get("phase3_plan_lock_sha256") not in (None, plan_lock_sha):
         raise Phase3ReadinessError("Phase 3 evidence plan-lock lineage drifted")
 
-    authority = load_phase3_model_artifact_authority_bytes(files[PHASE3_MODEL_AUTHORITY_RELATIVE].content)
-    if _sha256(files[PHASE3_MODEL_AUTHORITY_RELATIVE].content) != PHASE3_MODEL_AUTHORITY_FILE_SHA256:
+    authority = load_phase3_model_artifact_authority_bytes(
+        files[PHASE3_MODEL_AUTHORITY_RELATIVE].content
+    )
+    if (
+        _sha256(files[PHASE3_MODEL_AUTHORITY_RELATIVE].content)
+        != PHASE3_MODEL_AUTHORITY_FILE_SHA256
+    ):
         raise Phase3ReadinessError("published Phase 3 model authority bytes differ")
     if (
         authority.authority_sha256 != PHASE3_MODEL_AUTHORITY_SHA256
@@ -607,10 +669,8 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
     ):
         raise Phase3ReadinessError("published Phase 3 model authority lineage drifted")
     if (
-        shuffle_report.get("model_authority_sha256")
-        != authority.authority_sha256
-        or shuffle_report.get("artifact_store_id")
-        != authority.artifact_store_id
+        shuffle_report.get("model_authority_sha256") != authority.authority_sha256
+        or shuffle_report.get("artifact_store_id") != authority.artifact_store_id
     ):
         raise Phase3ReadinessError(
             "Phase 3 training shuffle report model authority lineage drifted"
@@ -621,11 +681,11 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
             or view.get("protocol_sha256") != files[PHASE3_PROTOCOL_RELATIVE].sha256
             or view.get("evidence_lock_sha256") != evidence_sha
         ):
-            raise Phase3ReadinessError(
-                "Phase 3 training shuffle report view lineage drifted"
-            )
+            raise Phase3ReadinessError("Phase 3 training shuffle report view lineage drifted")
     prep = files.get(f"runs/milestone6/{authority.artifact_store_id}/{PREPARATION_PROVENANCE_NAME}")
-    progress = files.get(f"runs/milestone6/{authority.artifact_store_id}/{PREPARATION_PROGRESS_NAME}")
+    progress = files.get(
+        f"runs/milestone6/{authority.artifact_store_id}/{PREPARATION_PROGRESS_NAME}"
+    )
     if prep is None or progress is None:
         raise Phase3ReadinessError("published model authority provenance inputs are missing")
     if prep.sha256 != authority.provenance_file_sha256:
@@ -639,7 +699,8 @@ def _validate_authority_files(snapshot: Phase3ReadinessSnapshot) -> None:
         or not isinstance(prep_body.get("provenance"), dict)
         or prep_body["provenance"].get("git_commit_sha") != authority.preparation_git_commit_sha
         or prep_body["provenance"].get("git_dirty") is not False
-        or progress_body.get("preparation_provenance_sha256") != authority.preparation_provenance_sha256
+        or progress_body.get("preparation_provenance_sha256")
+        != authority.preparation_provenance_sha256
         or progress_body.get("preparation_git_commit_sha") != authority.preparation_git_commit_sha
     ):
         raise Phase3ReadinessError("preparation git provenance lineage drifted")
@@ -665,7 +726,12 @@ def capture_phase3_readiness(
     protocol = _json(protocol_snapshot, "Phase 3 protocol")
     authority = protocol.get("authority", {})
     files: list[AuthorityFileSnapshot] = [protocol_snapshot]
-    for key in ("development_protocol", "development_tasks", "phase2_candidates", "phase2_selection_lock"):
+    for key in (
+        "development_protocol",
+        "development_tasks",
+        "phase2_candidates",
+        "phase2_selection_lock",
+    ):
         files.append(_read_source(repo, _relative(authority[key]["path"])))
     files.extend(
         _read_source(repo, path)
@@ -678,18 +744,19 @@ def capture_phase3_readiness(
     )
     model_authority = load_phase3_model_artifact_authority_bytes(files[-1].content)
     files.append(_read_source(repo, PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE))
+    files.append(_read_source(repo, PHASE3_ANCHOR_SELECTION_METRICS_RELATIVE))
     canonical_model_root = repo / "runs" / "milestone6" / model_authority.artifact_store_id
     model_root = (
-        Path(model_store_root).absolute()
-        if model_store_root is not None
-        else canonical_model_root
+        Path(model_store_root).absolute() if model_store_root is not None else canonical_model_root
     )
     if model_root != canonical_model_root:
         raise Phase3ReadinessError("model artifact root differs from published authority")
     try:
         model_relative = model_root.relative_to(repo)
     except ValueError as exc:
-        raise Phase3ReadinessError("model artifact root must be inside authority repository") from exc
+        raise Phase3ReadinessError(
+            "model artifact root must be inside authority repository"
+        ) from exc
     for name in (PREPARATION_PROVENANCE_NAME, PREPARATION_PROGRESS_NAME):
         rel = "/".join((*model_relative.parts, name))
         files.append(_read_source(repo, rel))
@@ -703,9 +770,7 @@ def capture_phase3_readiness(
     ]
     commit, dirty = _git_state(repo)
     report_snapshot = next(
-        item
-        for item in files
-        if item.relative_path == PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
+        item for item in files if item.relative_path == PHASE3_TRAINING_SHUFFLE_REPORT_RELATIVE
     )
     report_body = _json(
         report_snapshot,
@@ -714,9 +779,7 @@ def capture_phase3_readiness(
     )
     report_sha256 = report_body.get("report_sha256")
     if not isinstance(report_sha256, str):
-        raise Phase3ReadinessError(
-            "Phase 3 training shuffle report self-hash is missing"
-        )
+        raise Phase3ReadinessError("Phase 3 training shuffle report self-hash is missing")
     snapshot = Phase3ReadinessSnapshot(
         repository=repo,
         files=tuple(files),
@@ -732,7 +795,9 @@ def capture_phase3_readiness(
         training_shuffle_report_file_sha256=report_snapshot.sha256,
     )
     _validate_authority_files(snapshot)
-    snapshot.recheck(execution_preflight=execution_preflight, expected_git_commit=expected_git_commit)
+    snapshot.recheck(
+        execution_preflight=execution_preflight, expected_git_commit=expected_git_commit
+    )
     return snapshot
 
 
@@ -750,6 +815,9 @@ def phase3_readiness(**kwargs: Any) -> Iterator[Phase3ReadinessSnapshot]:
 __all__ = [
     "AuthorityDirectorySnapshot",
     "AuthorityFileSnapshot",
+    "PHASE3_ANCHOR_SELECTION_METRICS_FILE_SHA256",
+    "PHASE3_ANCHOR_SELECTION_METRICS_RELATIVE",
+    "PHASE3_ANCHOR_SELECTION_METRICS_SHA256",
     "PHASE3_MODEL_AUTHORITY_SHA256",
     "PHASE3_MODEL_AUTHORITY_FILE_SHA256",
     "PHASE3_PLAN_ID",
