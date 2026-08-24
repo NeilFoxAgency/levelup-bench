@@ -780,5 +780,43 @@ python -m levelup.experiments.milestone6_phase3_selection_analysis \
 The execution implementation commit `baec6b6b2b1af3b4e2825f7daa93218f70d4fa6a` passed its
 exact-head GitHub Actions run before this selector boundary was added. That confirms the execution
 baseline only; the selector tranche requires its own exact-head CI success before preparing a
-development result store. No Phase 3 result store has yet been prepared, no comparative Phase 3
-development outcome has been inspected, and no final family has been created, unlocked, or read.
+development result store. At the time this boundary was frozen, no Phase 3 result store had been
+prepared, no comparative Phase 3 development outcome had been inspected, and no final family had
+been created, unlocked, or read.
+
+### Phase 3 development result (append-only)
+
+The frozen selector tranche was committed at
+`b9f50db1348eb46e157d2c5961987b3e37f1154b`, passed 679 local tests and exact-head GitHub
+Actions, and then executed the complete 11,520-unit development matrix. The driver reported
+11,520 completed, zero failed, zero interrupted, and zero skipped. The frozen read-only reducer
+published 48 candidate summaries with analysis self-hash
+`85c2e9ba05f30beaa9374855185a4345f8335ae7a5a51d9b335274cffda4e898` and file SHA-256
+`995e671c2fedddfb030fafaaea9a4ff397c803305ec7dfea4a06482d4bd49edf`.
+
+The compact committed result is
+[`phase3_development_selection.json`](../configs/milestone6/phase3_development_selection.json),
+whose self-hash is `93cbf942ea0ee81f10692ad39b503aa5afad67b576deca77909eac2be18cd001`.
+It preserves exact rational metrics, family success counts, authority hashes, selected tuples, and
+claim decisions while the full analysis and unit records remain ignored local artifacts.
+
+All predeclared representation claims failed:
+
+- T minus S minimum-family success was -0.350, so transition outcomes did not help beyond the
+  state/availability representation.
+- H4 tied T at 0.075 and exceeded H0 by exactly 0.050. The history gate required both gains to be
+  strictly greater than 0.050, so it failed.
+- H4 exceeded the shuffled control by 0.025. Both training and held-out effective-change gates
+  passed, making this a clean negative for the four-transition sequence-order claim.
+- H4 remained 0.325 below B2 on minimum-family success, with the same 0.325 deficit on Heat, so it
+  does not advance to paired objectives.
+
+S is the useful diagnostic result. Its selected tuple reached 0.425 minimum-family success versus
+B2's 0.400, but the 0.025 difference lies inside the frozen inclusive 0.050 non-claim band. Its
+macro median was also slightly worse (7957/12 versus 1975/3), and every condition retained the
+same 2,049 worst-family sentinel. This supports further development-only diagnosis of which
+state/availability features are useful; it does not establish robust superiority over B2.
+
+B2 therefore remains the strong reference. Final families remain locked and unaccessed. The next
+permitted work is the predeclared non-selection diagnostics on development evidence; the failed
+claims must not be repaired by changing thresholds, reinterpretation, or post-hoc final access.
