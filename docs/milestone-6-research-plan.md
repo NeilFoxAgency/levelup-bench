@@ -820,3 +820,42 @@ state/availability features are useful; it does not establish robust superiority
 B2 therefore remains the strong reference. Final families remain locked and unaccessed. The next
 permitted work is the predeclared non-selection diagnostics on development evidence; the failed
 claims must not be repaired by changing thresholds, reinterpretation, or post-hoc final access.
+
+### Phase 3 outcome-group diagnostic freeze
+
+The completed records do not support honest reconstruction of all six diagnostics named before the
+run. Heat pressure-cap logits were not persisted; state-action coverage and unknown-affordance rate
+lack their required denominators; label frequency was not operationally defined or persisted; and
+the available-history-length distribution was reduced to aggregate recurrent-step counts. Only the
+shuffle effective-change rate has an explicit typed numerator, denominator, and lineage. These
+missing diagnostics are recorded as unavailable rather than estimated from model hashes or outcome
+summaries.
+
+The next experiment is therefore a separate post-hoc, development-only outcome-group diagnostic,
+frozen in
+[`phase3_outcome_group_diagnostic.json`](../configs/milestone6/phase3_outcome_group_diagnostic.json)
+with self-hash `88b348600ba66494fc2d64af3c86f5a33989c2c8c2bb6d5aea3eda15809214c3`.
+It does not modify the Phase 3 protocol, selector, authority, or result stores.
+
+Two exact 54-input, 3,841-parameter S-based conditions are permitted:
+
+- S-RP adds only resource delta, pressure delta, after-resource, and after-pressure.
+- S-PEC adds only progress delta, elapsed delta, and completion.
+
+Both derive from the same ordered T examples and preserve labels, candidate order, current state,
+pre-state summaries, availability, coverage, architecture, optimizer, seeds, and budgets. Their
+intersection is exactly S and their union is exactly T within every transition-summary block. The
+full 12-tuple grid is retained to equalize hyperparameter-selection opportunity with the locked
+references, while the S-selected tuple is also a mandatory fixed-tuple sensitivity check.
+
+The new matrix is 2 conditions x 12 tuples x 6 families x 5 replicates x 8 tasks = 5,760 units,
+using the exact 30 existing evidence artifacts in a separate inert namespace. A channel-group gain
+must exceed 0.05 over S both after the unchanged per-condition selection rule and at the fixed S
+tuple, with no family drop over 0.05. Even then it is an exploratory representation diagnostic, not
+a retroactive transition claim. It cannot advance to paired objectives, select a final method, or
+unlock final families.
+
+Store preparation and execution remain forbidden until a later readiness gate binds the authorized
+post-freeze git commit, immutable protocol and authority bytes, and descriptor identities; rejects
+symlinked repository and output roots; and revalidates every byte and identity immediately before
+execution.

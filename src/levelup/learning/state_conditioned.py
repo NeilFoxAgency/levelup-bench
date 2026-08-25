@@ -12,7 +12,7 @@ import itertools
 import json
 from collections import Counter
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import torch
 from torch import nn
@@ -36,6 +36,10 @@ TRANSITION_SUMMARY_FEATURE_COUNT = 12
 STATE_AVAILABILITY_INPUT_WIDTH = STATE_CONDITIONED_FEATURE_COUNT
 STATE_AVAILABILITY_RETAINED_INDICES = (0, 1, 2, 3, 11)
 STATE_AVAILABILITY_ZEROED_INDICES = (4, 5, 6, 7, 8, 9, 10)
+RESOURCE_PRESSURE_RETAINED_INDICES = (0, 1, 2, 3, 6, 7, 8, 9, 11)
+RESOURCE_PRESSURE_ZEROED_INDICES = (4, 5, 10)
+PROGRESS_ELAPSED_COMPLETION_RETAINED_INDICES = (0, 1, 2, 3, 4, 5, 10, 11)
+PROGRESS_ELAPSED_COMPLETION_ZEROED_INDICES = (6, 7, 8, 9)
 HISTORY_FEATURE_COUNT = TRANSITION_FEATURE_COUNT
 HISTORY_LENGTH = 4
 HISTORY_HIDDEN_WIDTH = 8
@@ -123,6 +127,16 @@ class DecisionExample:
             raise ValueError("unexpected state-conditioned feature width")
         if not 0 <= self.selected_index < self.candidate_features.shape[0]:
             raise ValueError("selected index is outside the candidate set")
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeGroupExampleViews:
+    """Four masks derived from one exact ordered tuple of T examples."""
+
+    transition: tuple[DecisionExample, ...]
+    state_availability: tuple[DecisionExample, ...]
+    resource_pressure: tuple[DecisionExample, ...]
+    progress_elapsed_completion: tuple[DecisionExample, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,32 +429,119 @@ def transition_features(transition: ObservedTransition) -> tuple[float, ...]:
     )
 
 
-def apply_state_availability_mask(features: torch.Tensor) -> torch.Tensor:
-    """Apply the frozen S-condition transform to T candidate features.
+def apply_transition_summary_mask(
+    features: torch.Tensor,
+    retained_indices: Sequence[int],
+    *,
+    zeroed_indices: Sequence[int] | None = None,
+) -> torch.Tensor:
+    """Apply one deterministic outcome-group mask to T candidate features.
 
-    The first five channels (current observable state) and the coverage channel are
-    retained.  Within each of the four 12-channel empirical transition-summary
-    blocks, only the four pre-state channels and availability count are retained;
-    measured after-state, delta, and completion channels are zeroed.  The operation
-    is out-of-place so that T/H examples can be reused byte-for-byte.
+    ``retained_indices`` and ``zeroed_indices`` are relative to each 12-channel
+    transition-summary block.  The five current-state channels and final
+    coverage channel are always retained.  The transform is out-of-place so a
+    single tuple of T examples can be reused byte-for-byte by S, RP, and PEC.
     """
 
     if features.ndim != 2 or features.shape[1] != STATE_AVAILABILITY_INPUT_WIDTH:
-        raise ValueError("unexpected state-availability feature tensor")
+        raise ValueError("unexpected state-conditioned feature tensor")
+    retained = tuple(retained_indices)
+    if (
+        not retained
+        or len(set(retained)) != len(retained)
+        or any(
+            not isinstance(index, int) or not 0 <= index < TRANSITION_SUMMARY_FEATURE_COUNT
+            for index in retained
+        )
+    ):
+        raise ValueError("transition-summary retained indices are invalid")
+    zeroed = (
+        tuple(zeroed_indices)
+        if zeroed_indices is not None
+        else tuple(
+            index for index in range(TRANSITION_SUMMARY_FEATURE_COUNT) if index not in retained
+        )
+    )
+    if (
+        len(set(zeroed)) != len(zeroed)
+        or any(
+            not isinstance(index, int) or not 0 <= index < TRANSITION_SUMMARY_FEATURE_COUNT
+            for index in zeroed
+        )
+        or set(retained) | set(zeroed) != set(range(TRANSITION_SUMMARY_FEATURE_COUNT))
+        or set(retained) & set(zeroed)
+    ):
+        raise ValueError("transition-summary retained and zeroed indices must partition one block")
+
     masked = features.clone()
     affordance = masked[:, STATE_FEATURE_COUNT:]
     for block in range(TRANSITION_SUMMARY_BLOCK_COUNT):
         start = block * TRANSITION_SUMMARY_FEATURE_COUNT
-        keep = tuple(start + index for index in STATE_AVAILABILITY_RETAINED_INDICES)
-        zero = tuple(start + index for index in STATE_AVAILABILITY_ZEROED_INDICES)
+        keep = tuple(start + index for index in retained)
+        zero = tuple(start + index for index in zeroed)
         affordance[:, list(zero)] = 0.0
-        # Assignment is deliberately explicit: it documents that retained channels
-        # are copied unchanged even if a future implementation changes the mask.
-        affordance[:, list(keep)] = features[
-            :, [STATE_FEATURE_COUNT + index for index in keep]
-        ]
+        affordance[:, list(keep)] = features[:, [STATE_FEATURE_COUNT + index for index in keep]]
     masked[:, STATE_FEATURE_COUNT:] = affordance
     return masked
+
+
+def apply_state_availability_mask(features: torch.Tensor) -> torch.Tensor:
+    """Apply the frozen S-condition transform to T candidate features."""
+
+    return apply_transition_summary_mask(
+        features,
+        STATE_AVAILABILITY_RETAINED_INDICES,
+        zeroed_indices=STATE_AVAILABILITY_ZEROED_INDICES,
+    )
+
+
+def apply_resource_pressure_mask(features: torch.Tensor) -> torch.Tensor:
+    """Add resource/pressure outcomes to the frozen S representation."""
+
+    return apply_transition_summary_mask(
+        features,
+        RESOURCE_PRESSURE_RETAINED_INDICES,
+        zeroed_indices=RESOURCE_PRESSURE_ZEROED_INDICES,
+    )
+
+
+def apply_progress_elapsed_completion_mask(features: torch.Tensor) -> torch.Tensor:
+    """Add progress, elapsed, and completion outcomes to frozen S."""
+
+    return apply_transition_summary_mask(
+        features,
+        PROGRESS_ELAPSED_COMPLETION_RETAINED_INDICES,
+        zeroed_indices=PROGRESS_ELAPSED_COMPLETION_ZEROED_INDICES,
+    )
+
+
+def mask_decision_examples(
+    examples: Sequence[DecisionExample],
+    feature_mask: Callable[[torch.Tensor], torch.Tensor],
+) -> tuple[DecisionExample, ...]:
+    """Apply an out-of-place feature mask while preserving labels and order."""
+
+    source = tuple(examples)
+    return tuple(
+        DecisionExample(feature_mask(example.candidate_features), example.selected_index)
+        for example in source
+    )
+
+
+def outcome_group_optimum_example_views(
+    samples: Sequence[tuple[ObservableTrace, AffordanceTable]],
+) -> OutcomeGroupExampleViews:
+    """Derive T, S, resource/pressure, and progress/payoff views from one source tuple."""
+
+    transition = tuple(optimum_imitation_examples(samples))
+    return OutcomeGroupExampleViews(
+        transition=transition,
+        state_availability=mask_decision_examples(transition, apply_state_availability_mask),
+        resource_pressure=mask_decision_examples(transition, apply_resource_pressure_mask),
+        progress_elapsed_completion=mask_decision_examples(
+            transition, apply_progress_elapsed_completion_mask
+        ),
+    )
 
 
 # Short aliases used by experiment code and notebooks; all route through the one
@@ -454,12 +555,26 @@ def state_availability_optimum_examples(
 ) -> tuple[DecisionExample, ...]:
     """Build S examples from the exact T examples with only the frozen mask applied."""
 
-    return tuple(
-        DecisionExample(
-            apply_state_availability_mask(example.candidate_features),
-            example.selected_index,
-        )
-        for example in optimum_imitation_examples(samples)
+    return mask_decision_examples(
+        optimum_imitation_examples(samples), apply_state_availability_mask
+    )
+
+
+def resource_pressure_optimum_examples(
+    samples: Sequence[tuple[ObservableTrace, AffordanceTable]],
+) -> tuple[DecisionExample, ...]:
+    """Build resource/pressure examples from exact T examples with only the mask applied."""
+
+    return mask_decision_examples(optimum_imitation_examples(samples), apply_resource_pressure_mask)
+
+
+def progress_elapsed_completion_optimum_examples(
+    samples: Sequence[tuple[ObservableTrace, AffordanceTable]],
+) -> tuple[DecisionExample, ...]:
+    """Build progress/elapsed/completion examples from exact T examples with only the mask."""
+
+    return mask_decision_examples(
+        optimum_imitation_examples(samples), apply_progress_elapsed_completion_mask
     )
 
 

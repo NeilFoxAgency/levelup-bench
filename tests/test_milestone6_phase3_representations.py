@@ -14,6 +14,8 @@ from levelup.learning.state_conditioned import (
     ObservableTrace,
     ObservedTransition,
     TrainingSpec,
+    apply_progress_elapsed_completion_mask,
+    apply_resource_pressure_mask,
     apply_state_availability_mask,
     canonical_permutation_map_bytes,
     causal_history_optimum_examples,
@@ -21,8 +23,12 @@ from levelup.learning.state_conditioned import (
     history_optimum_examples,
     lexicographic_derangements,
     null_history_optimum_examples,
+    optimum_imitation_examples,
+    outcome_group_optimum_example_views,
     parse_observation,
     permutation_map_sha256,
+    progress_elapsed_completion_optimum_examples,
+    resource_pressure_optimum_examples,
     shuffled_history_optimum_examples,
     state_availability_optimum_examples,
     train_history_optimum_model,
@@ -76,14 +82,84 @@ def test_state_availability_mask_keeps_state_and_support_but_zeroes_outcomes() -
 
 def test_s_examples_are_exact_t_examples_with_only_mask_transform() -> None:
     samples = _samples(2)
-    from levelup.learning.state_conditioned import optimum_imitation_examples
-
     t_examples = optimum_imitation_examples(samples)
     s_examples = state_availability_optimum_examples(samples)
     assert len(s_examples) == len(t_examples)
     for source, masked in zip(t_examples, s_examples):
         assert masked.selected_index == source.selected_index
-        assert torch.equal(masked.candidate_features, apply_state_availability_mask(source.candidate_features))
+        assert torch.equal(
+            masked.candidate_features, apply_state_availability_mask(source.candidate_features)
+        )
+
+
+@pytest.mark.parametrize(
+    ("mask", "retained", "zeroed"),
+    [
+        (apply_resource_pressure_mask, (0, 1, 2, 3, 6, 7, 8, 9, 11), (4, 5, 10)),
+        (
+            apply_progress_elapsed_completion_mask,
+            (0, 1, 2, 3, 4, 5, 10, 11),
+            (6, 7, 8, 9),
+        ),
+    ],
+)
+def test_outcome_group_masks_retain_exact_bytes_and_zero_complements(
+    mask, retained, zeroed
+) -> None:
+    features = torch.arange(54, dtype=torch.float32).reshape(1, 54)
+    masked = mask(features)
+    assert torch.equal(features[:, :5], masked[:, :5])
+    assert masked[0, 53] == features[0, 53]
+    for block in range(4):
+        start = 5 + block * 12
+        for index in retained:
+            assert masked[0, start + index] == features[0, start + index]
+        for index in zeroed:
+            assert masked[0, start + index] == 0
+    assert torch.equal(features, torch.arange(54, dtype=torch.float32).reshape(1, 54))
+
+
+def test_s_mask_is_idempotent_and_outcome_masks_form_structural_union() -> None:
+    features = torch.linspace(-1.03125, 2.71875, steps=108, dtype=torch.float32).reshape(2, 54)
+    state_only = apply_state_availability_mask(features)
+    assert torch.equal(state_only, apply_state_availability_mask(state_only))
+    resource_pressure = apply_resource_pressure_mask(features)
+    progress_payoff = apply_progress_elapsed_completion_mask(features)
+    reconstructed = state_only.clone()
+    for block in range(4):
+        start = 5 + block * 12
+        for index in (6, 7, 8, 9):
+            reconstructed[:, start + index] = resource_pressure[:, start + index]
+        for index in (4, 5, 10):
+            reconstructed[:, start + index] = progress_payoff[:, start + index]
+    assert torch.equal(reconstructed.view(torch.int32), features.view(torch.int32))
+
+
+def test_outcome_group_examples_preserve_t_labels_and_order() -> None:
+    samples = _samples(4)
+    views = outcome_group_optimum_example_views(samples)
+    t_examples = views.transition
+    for examples, regenerated, mask in (
+        (
+            views.resource_pressure,
+            resource_pressure_optimum_examples(samples),
+            apply_resource_pressure_mask,
+        ),
+        (
+            views.progress_elapsed_completion,
+            progress_elapsed_completion_optimum_examples(samples),
+            apply_progress_elapsed_completion_mask,
+        ),
+    ):
+        assert [item.selected_index for item in examples] == [
+            item.selected_index for item in t_examples
+        ]
+        assert [item.candidate_features.shape for item in examples] == [
+            item.candidate_features.shape for item in t_examples
+        ]
+        for source, masked, compatibility in zip(t_examples, examples, regenerated):
+            assert torch.equal(masked.candidate_features, mask(source.candidate_features))
+            assert torch.equal(masked.candidate_features, compatibility.candidate_features)
 
 
 def test_history_examples_share_labels_and_use_causal_windows() -> None:

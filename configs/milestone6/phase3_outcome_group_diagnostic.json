@@ -1,0 +1,187 @@
+{
+  "schema_version": "milestone6.phase3.outcome-group-diagnostic.v1",
+  "status": "frozen-before-outcome-group-diagnostic-results",
+  "scope": "known-development-only",
+  "freeze_record": {
+    "frozen_at_local_date": "2026-08-24",
+    "source_result_lock_commit_sha": "9ff9596bf64ef341d69759c0e0db680c51e768f9",
+    "phase3_comparative_results_used_for_diagnosis": true,
+    "outcome_group_results_inspected": false,
+    "classification": "post-hoc exploratory development diagnostic",
+    "reason": "S was competitive with B2 while T and H4 collapsed on development Heat; isolate which measured outcome-channel group changes the S representation without changing data, architecture, objective, or budget"
+  },
+  "authority": {
+    "phase3_protocol": {
+      "path": "configs/milestone6/phase3_representation_ladder.json",
+      "sha256": "287b43ff8a3d7231162b6dfd9580af04073ad6d7b6eb030ac41fbf2121dd7afa"
+    },
+    "phase3_plan": {
+      "path": "configs/milestone6/phase3_plan_lock.json",
+      "sha256": "58ed9935fc0dceb2d6d55fb55422f725e9a085aa41b9fb699afc6af90a28c81b",
+      "plan_id": "2457657f77e3ef67708f1abc195bfa4ad31c554cfd314526e1bb26113cc4c9d1"
+    },
+    "phase3_evidence": {
+      "path": "configs/milestone6/phase3_evidence_lock.json",
+      "sha256": "82644954b94bd6ff495c425ffe921d18157a98ccbe230d922c24218a4faad875",
+      "evidence_lock_sha256": "7db4ad251f1e20ea14902c2643425ebfc2ef1064c4ea5ca5c90eb0629c2386b3"
+    },
+    "phase3_model_authority": {
+      "path": "configs/milestone6/phase3_model_artifact_authority.json",
+      "sha256": "eecd68707e2cdfa34e9e9b30f787fd17b87ae767db63b659944e420cb7255388",
+      "authority_sha256": "8771eb52433faf15d6e5e935902a5c935526ec0e6b8e34621c3d6a922aea1a52"
+    },
+    "phase3_anchor_metrics": {
+      "path": "configs/milestone6/phase3_anchor_selection_metrics.json",
+      "sha256": "1c7e5fb296ed397c96665ff77613be4aabf7702d968bf55c1da04a08562758a2",
+      "anchor_selection_metrics_sha256": "7f1f0a1c30ff0e93b512028df6bca5f42276477ebdf78ae031e003684f10e9c7"
+    },
+    "phase3_development_selection": {
+      "path": "configs/milestone6/phase3_development_selection.json",
+      "sha256": "2c68910beb1e9fbf16289176b6204f95f1753d4da6e8a341fdc3c78f57435232",
+      "selection_lock_sha256": "93cbf942ea0ee81f10692ad39b503aa5afad67b576deca77909eac2be18cd001",
+      "analysis_sha256": "85c2e9ba05f30beaa9374855185a4345f8335ae7a5a51d9b335274cffda4e898"
+    }
+  },
+  "scientific_question": {
+    "question": "Did the development Heat collapse arise from adding the resource/pressure outcome channels, the progress/elapsed/completion channels, or their interaction under the current pooled transition summary?",
+    "claim_limit": "Only the effect of adding the named learner-visible measured channels to S under this exact representation, training, and search protocol may be discussed; this cannot retroactively establish the failed Phase 3 transition claim, justify pairing, or support final-family access."
+  },
+  "conditions": [
+    {
+      "condition_id": "S-RP-state-resource-pressure-outcome-listwise-optimum",
+      "base_condition_id": "S-state-availability-listwise-optimum",
+      "representation": {
+        "input_width": 54,
+        "retained_indices_per_summary_block": [0, 1, 2, 3, 6, 7, 8, 9, 11],
+        "zeroed_indices_per_summary_block": [4, 5, 10],
+        "added_to_S": [6, 7, 8, 9],
+        "added_channels": ["resource_delta", "pressure_delta", "after_resource", "after_pressure"],
+        "state_indices": [0, 1, 2, 3, 4],
+        "coverage_index": 53
+      },
+      "trainable_parameters": 3841
+    },
+    {
+      "condition_id": "S-PEC-state-progress-elapsed-completion-listwise-optimum",
+      "base_condition_id": "S-state-availability-listwise-optimum",
+      "representation": {
+        "input_width": 54,
+        "retained_indices_per_summary_block": [0, 1, 2, 3, 4, 5, 10, 11],
+        "zeroed_indices_per_summary_block": [6, 7, 8, 9],
+        "added_to_S": [4, 5, 10],
+        "added_channels": ["progress_delta", "elapsed_delta", "completed"],
+        "state_indices": [0, 1, 2, 3, 4],
+        "coverage_index": 53
+      },
+      "trainable_parameters": 3841
+    }
+  ],
+  "structural_controls": {
+    "same_source_examples": "derive S, S-RP, S-PEC, and T from one exact ordered tuple of optimum-imitation DecisionExample records; labels, candidate order, and example order are byte-identical before masking",
+    "S_idempotence": "applying the S mask to an S tensor changes no byte",
+    "mask_partition": "within every 12-channel summary block, S-RP intersection S-PEC equals S and S-RP union S-PEC equals the complete T block",
+    "retained_byte_identity": "every retained current-state, summary, and coverage value equals the corresponding T value byte-for-byte; every excluded value is exactly zero",
+    "architecture": "all new conditions use the unchanged StateConditionedScorer 54-to-48-to-24-to-1 MLP with exactly 3,841 trainable parameters",
+    "strong_references": ["B2-global-listwise-optimum", "S-state-availability-listwise-optimum", "T-markov-state-transition-listwise-optimum"],
+    "reference_policy": "reuse locked metrics and exact lineage; do not retrain, rerun, restrict, or retune B2, S, or T"
+  },
+  "development_matrix": {
+    "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+    "fold_kind": "leave-one-family-out",
+    "replicates": [0, 1, 2, 3, 4],
+    "heldout_tasks_per_family": 8,
+    "new_conditions": 2,
+    "candidate_tuples_per_condition": 12,
+    "units_per_condition_tuple": 240,
+    "units_per_condition": 2880,
+    "new_units": 5760,
+    "canonical_evidence_artifacts_reused": 30,
+    "new_views": 60,
+    "training_tuples_per_view": 4,
+    "new_model_owners": 240,
+    "model_consumers_per_owner": 24
+  },
+  "data_and_seed_identity": {
+    "evidence": "reuse the exact 30 Phase 3 evidence payloads and trajectory identities byte-for-byte; regeneration and new evidence probes are forbidden",
+    "examples": "optimum-only listwise next-action examples with the exact S/T identities, labels, count, order, and batches",
+    "condition_pairing": "each new unit uses the exact S model, probe, search, data-order, environment, family, task, fold, replicate, and candidate-tuple seed identities for its matched unit",
+    "seed_bases": {"model": 6100000, "probe": 6200000, "search": 6300000, "data_order": 6400000},
+    "eligible_hyperparameters": ["learning_rate", "training_epochs", "search_temperature"],
+    "ineligible_hyperparameters": ["architecture", "hidden_widths", "weight_decay", "optimizer", "probe_budget", "search_budget", "interaction_budget", "seeds", "feature_mask", "training_objective"]
+  },
+  "candidate_tuples": [
+    {"tuple_id": "lr0p003-e120-t0p6", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e120-t0p9", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e120-t1p2", "training_tuple_id": "lr0p003-e120", "learning_rate": 0.003, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p003-e180-t0p6", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p003-e180-t0p9", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p003-e180-t1p2", "training_tuple_id": "lr0p003-e180", "learning_rate": 0.003, "training_epochs": 180, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e120-t0p6", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e120-t0p9", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e120-t1p2", "training_tuple_id": "lr0p01-e120", "learning_rate": 0.01, "training_epochs": 120, "search_temperature": 1.2},
+    {"tuple_id": "lr0p01-e180-t0p6", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.6},
+    {"tuple_id": "lr0p01-e180-t0p9", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 0.9},
+    {"tuple_id": "lr0p01-e180-t1p2", "training_tuple_id": "lr0p01-e180", "learning_rate": 0.01, "training_epochs": 180, "search_temperature": 1.2}
+  ],
+  "fixed_training_and_search": {
+    "objective": "optimum-only listwise next-action imitation",
+    "optimizer": "adam",
+    "weight_decay": 0.0001,
+    "device": "cpu",
+    "torch_threads": 1,
+    "processes": 1,
+    "probe_actions_per_task": 64,
+    "probe_coverage_target_samples_per_alias": 8,
+    "probe_actions_per_attempt": 16,
+    "candidate_episodes_per_task": 150,
+    "adaptation_actions_per_task": 2048,
+    "maximum_actions_per_candidate_episode": 64,
+    "exact_optimum_affects_search_control_flow": false,
+    "oracle_timing": "after the complete fixed candidate batch and independent replay"
+  },
+  "selection_and_reporting": {
+    "classification": "development-only exploratory diagnostic; not final method selection",
+    "condition_selection": "independently apply the unchanged Phase 3 rule to each new condition over the complete 12-tuple grid",
+    "primary_metric": "minimum_family_exact_optimum_success_rate",
+    "success_tolerance_absolute": 0.05,
+    "failure_sentinel": 2049,
+    "tie_break_order": [
+      "worst_family_median_restricted_interactions",
+      "macro_average_family_median_restricted_interactions",
+      "summed_unique_model_owner_optimizer_steps",
+      "summed_unique_model_owner_forward_passes",
+      "summed_unique_model_owner_recurrent_steps",
+      "numeric_learning_rate_epochs_temperature"
+    ],
+    "matched_S_tuple": "lr0p01-e120-t1p2",
+    "required_reports": ["all 12 tuple summaries", "independently selected tuple", "matched-S-tuple summary", "six family success counts", "exact rational deltas", "deduplicated model cost"],
+    "changes_after_results": "forbidden"
+  },
+  "diagnostic_claim_rules": {
+    "robust_group_gain": "the independently selected condition and its matched-S tuple must each beat locked selected S minimum-family success by strictly more than 0.05, with no development-family success drop greater than 0.05 in either comparison",
+    "robust_group_harm": "locked selected S must beat both the independently selected condition and its matched-S tuple by strictly more than 0.05",
+    "within_tolerance": "absolute differences at or below 0.05 are inconclusive for a robust group effect",
+    "interaction_diagnostic": "if both groups separately avoid robust harm but full T remains worse, record a possible group-interaction or optimization-burden hypothesis without a causal claim",
+    "forbidden_conclusions": ["retroactive Phase 3 transition claim", "general causal feature importance", "advancement to paired objectives", "final method selection", "final family unlock"]
+  },
+  "predeclared_diagnostic_availability": {
+    "Heat pressure-cap decision logits": "unavailable from the completed Phase 3 records; logits and a frozen decision scope were not persisted, so no reconstruction is permitted",
+    "state-action coverage": "unavailable as a rate; the completed records do not persist an exact visible state-action denominator",
+    "unknown-affordance rate": "unavailable as a rate; an unknown-alias count exists but the visible-action-slot denominator was not persisted",
+    "label frequency": "not persisted and operationally under-specified; do not derive a post-hoc statistic for selection or claims",
+    "history length actually available": "only aggregate recurrent-step totals are persisted, not the predeclared length distribution; do not invent a histogram",
+    "shuffle realized-change rate": "available only from the typed H4 training and held-out eligible/effective counters with exact lineage; it remains non-selection evidence"
+  },
+  "execution_boundary": {
+    "separate_from_phase3_store": true,
+    "new_inert_result_namespace": true,
+    "phase3_artifacts_immutable": true,
+    "complete_matrix_before_comparative_read": true,
+    "clean_exact_commit_readiness_required": true,
+    "runtime_authority_requirement": "before store preparation or execution, bind an authorized post-freeze git commit and immutable protocol/authority bytes plus descriptor identities; reject a symlinked repository or output root and revalidate every byte and identity immediately before execution",
+    "final_family_access": false,
+    "final_method_selection": false,
+    "advancement_to_paired_objectives": false
+  },
+  "diagnostic_protocol_sha256": "88b348600ba66494fc2d64af3c86f5a33989c2c8c2bb6d5aea3eda15809214c3"
+}
