@@ -997,12 +997,46 @@ def load_outcome_model_artifact_at(
 ]:
     """Load and semantically authorize one model through a held descriptor pin."""
     reader = _require_reader(reader)
+    record, index, state = load_outcome_model_artifact_payload_at(reader, owner_id)
+    try:
+        authorization = validate_outcome_model_artifact_against_plan(
+            record,
+            state,
+            training_evidence,
+            plan,
+            snapshot,
+            preparation_git_commit_sha=preparation_git_commit_sha,
+            preparation_provenance_sha256=preparation_provenance_sha256,
+        )
+    except (TypeError, ValueError, OutcomeDiagnosticModelArtifactError) as exc:
+        raise OutcomeModelStoreError("stored model failed canonical plan validation") from exc
+    reader.recheck()
+    return record, state, authorization
+
+
+def load_outcome_model_artifact_payload_at(
+    reader: PinnedOutcomeModelStoreReader | PinnedOutcomeModelStore,
+    owner_id: str,
+) -> tuple[OutcomeDiagnosticModelArtifactRecord, OutcomeModelStateIndex, PinnedOutcomeModelState]:
+    """Load one stored payload after checking its complete local lineage.
+
+    This is deliberately non-authorizing: it does not inspect a plan, training
+    evidence, outcomes, or any evaluator.  It only proves that the descriptor-
+    pinned manifest, record, state index, and tensor bytes form one canonical
+    owner payload.  Callers needing scientific authorization must apply their
+    separate plan/evidence checks after this boundary.
+    """
+
+    reader = _require_reader(reader)
     manifest = _load_manifest(reader)
     entry = next((item for item in manifest.entries if item.owner_id == owner_id), None)
     if entry is None:
         raise OutcomeModelStoreError("model owner is absent from store manifest")
     record_raw = _read_stable(reader.records_fd, _record_name(owner_id))
-    record = load_outcome_model_artifact_record_bytes(record_raw)
+    try:
+        record = load_outcome_model_artifact_record_bytes(record_raw)
+    except (TypeError, ValueError, OutcomeDiagnosticModelArtifactError) as exc:
+        raise OutcomeModelStoreError("stored model record is invalid") from exc
     if (
         record.record_id != entry.record_id
         or record.key.owner_id != owner_id
@@ -1019,20 +1053,8 @@ def load_outcome_model_artifact_at(
         or index.model_state_sha256 != record.key.model_state_sha256
     ):
         raise OutcomeModelStoreError("model state manifest lineage differs")
-    try:
-        authorization = validate_outcome_model_artifact_against_plan(
-            record,
-            state,
-            training_evidence,
-            plan,
-            snapshot,
-            preparation_git_commit_sha=preparation_git_commit_sha,
-            preparation_provenance_sha256=preparation_provenance_sha256,
-        )
-    except (TypeError, ValueError, OutcomeDiagnosticModelArtifactError) as exc:
-        raise OutcomeModelStoreError("stored model failed canonical plan validation") from exc
     reader.recheck()
-    return record, state, authorization
+    return record, index, state
 
 
 def load_outcome_model_manifest_at(
@@ -1159,6 +1181,7 @@ __all__ = [
     "PinnedOutcomeModelStore",
     "PinnedOutcomeModelStoreReader",
     "load_outcome_model_artifact_at",
+    "load_outcome_model_artifact_payload_at",
     "load_outcome_model_manifest_at",
     "open_existing_outcome_model_store",
     "open_outcome_model_store",

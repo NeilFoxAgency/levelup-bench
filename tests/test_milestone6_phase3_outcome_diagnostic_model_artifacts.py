@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -374,7 +375,7 @@ def test_complete_pinned_store_round_trip_builds_the_same_compact_authority(
             )
     monkeypatch.setattr(
         model_authority,
-        "_validate_persisted_progress_and_provenance",
+        "validate_outcome_model_preparation_metadata_at",
         lambda *args, **kwargs: None,
     )
     observed = model_authority.build_outcome_model_artifact_authority_from_store(
@@ -385,6 +386,70 @@ def test_complete_pinned_store_round_trip_builds_the_same_compact_authority(
         **_authority_kwargs(),
     )
     assert observed == expected_authority
+
+
+def test_non_authorizing_payload_loader_checks_lineage_and_does_not_write(
+    complete_artifacts, tmp_path
+) -> None:
+    records, payloads, _evidence, _authority = complete_artifacts
+    store_root = tmp_path / "payload-loader-store"
+    with model_store.open_outcome_model_store(store_root) as pinned:
+        for record in records:
+            model_store.write_outcome_model_artifact(
+                store_root,
+                record,
+                payloads[record.key.owner_id],
+                pinned_output=pinned,
+            )
+    owner = records[0].key.owner_id
+    manifest_path = store_root / model_store.MANIFEST_NAME
+    index_path = (
+        store_root / model_store.STATES_DIR / owner / model_store.STATE_MANIFEST_NAME
+    )
+    tensor_name = model_store.OutcomeModelStateIndex.model_validate(
+        json.loads(index_path.read_bytes())
+    ).tensors[0].filename
+    tensor_path = store_root / model_store.STATES_DIR / owner / model_store.TENSORS_DIR / tensor_name
+    tracked = tuple(
+        (path.relative_to(store_root).as_posix(), os.stat(path).st_ino, path.read_bytes())
+        for path in (manifest_path, index_path, tensor_path)
+    )
+
+    with model_store.open_existing_outcome_model_store(store_root) as pinned:
+        record, index, state = model_store.load_outcome_model_artifact_payload_at(
+            pinned.reader, owner
+        )
+        assert record.key.owner_id == owner
+        assert index.owner_id == owner
+        assert state.tensors
+
+        original_manifest = manifest_path.read_bytes()
+        manifest = json.loads(original_manifest)
+        manifest_entry = next(item for item in manifest["entries"] if item["owner_id"] == owner)
+        manifest_entry["record_sha256"] = "f" * 64
+        manifest_path.write_bytes(model_store.canonical_json_bytes(manifest) + b"\n")
+        with pytest.raises(model_store.OutcomeModelStoreError):
+            model_store.load_outcome_model_artifact_payload_at(pinned.reader, owner)
+        manifest_path.write_bytes(original_manifest)
+
+        original_index = index_path.read_bytes()
+        index_body = json.loads(original_index)
+        index_body["record_id"] = "f" * 64
+        index_path.write_bytes(model_store.canonical_json_bytes(index_body) + b"\n")
+        with pytest.raises(model_store.OutcomeModelStoreError):
+            model_store.load_outcome_model_artifact_payload_at(pinned.reader, owner)
+        index_path.write_bytes(original_index)
+
+        original_tensor = tensor_path.read_bytes()
+        tensor_path.write_bytes(bytes([original_tensor[0] ^ 1]) + original_tensor[1:])
+        with pytest.raises(model_store.OutcomeModelStoreError):
+            model_store.load_outcome_model_artifact_payload_at(pinned.reader, owner)
+        tensor_path.write_bytes(original_tensor)
+
+    assert tracked == tuple(
+        (path.relative_to(store_root).as_posix(), os.stat(path).st_ino, path.read_bytes())
+        for path in (manifest_path, index_path, tensor_path)
+    )
 
 
 @pytest.mark.parametrize("plan_id", ("", "g" * 64, "a" * 63, "A" * 64))

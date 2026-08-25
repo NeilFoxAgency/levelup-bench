@@ -11,6 +11,8 @@ clean, explicitly authorised commit has been checked again.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import stat
@@ -41,6 +43,24 @@ from levelup.experiments.milestone6_phase3_readiness import (
 )
 from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
+
+# The compact outcome-model authority is intentionally kept separate from the
+# older Phase 3 representation-ladder authority.  This module only pins the
+# development diagnostic inputs; it never opens an environment or result
+# namespace.
+OUTCOME_MODEL_AUTHORITY_RELATIVE = (
+    "configs/milestone6/phase3_outcome_model_artifact_authority.json"
+)
+
+
+def _outcome_model_authority_path(repository: Path, value: str | os.PathLike[str] | None) -> Path:
+    canonical = repository / OUTCOME_MODEL_AUTHORITY_RELATIVE
+    path = canonical if value is None else _absolute_path(repository, value, "outcome model authority")
+    if path != canonical:
+        raise OutcomeDiagnosticReadinessError(
+            "outcome model authority must use the exact canonical path"
+        )
+    return path
 
 
 class OutcomeDiagnosticReadinessError(ValueError):
@@ -646,10 +666,559 @@ def capture_outcome_group_diagnostic_readiness(
     return snapshot
 
 
+@dataclass(slots=True, init=False)
+class OutcomeDiagnosticModelReadinessLease:
+    """Descriptor lease for the complete, prepared development model store.
+
+    The lease is deliberately not an activation lease.  It only keeps the
+    read-only store descriptors open while readiness is being consumed, so a
+    path replacement cannot redirect a later authority recheck.
+    """
+
+    _store: object
+    _stack: ExitStack
+    _owner_ids: tuple[str, ...]
+    _identities: object
+    _active: bool
+    _sealed: bool
+
+    def __init__(
+        self,
+        store: object,
+        stack: ExitStack,
+        owner_ids: tuple[str, ...],
+        identities: object,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _LEASE_TOKEN:
+            raise OutcomeDiagnosticReadinessError("model readiness lease cannot be forged")
+        object.__setattr__(self, "_store", store)
+        object.__setattr__(self, "_stack", stack)
+        object.__setattr__(self, "_owner_ids", owner_ids)
+        object.__setattr__(self, "_identities", identities)
+        object.__setattr__(self, "_active", True)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False) and name != "_active":
+            raise AttributeError("model readiness lease is immutable while active")
+        object.__setattr__(self, name, value)
+
+    @property
+    def active(self) -> bool:
+        return self._active
+
+    @property
+    def store(self) -> object:
+        return self._store
+
+    @property
+    def identities(self) -> object:
+        return self._identities
+
+    def require_active(self) -> "OutcomeDiagnosticModelReadinessLease":
+        if not self._active:
+            raise OutcomeDiagnosticReadinessError("model readiness lease is no longer active")
+        try:
+            self._store.recheck()  # type: ignore[attr-defined]
+            from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_store import (
+                snapshot_outcome_model_store_identities_at,
+            )
+
+            current = snapshot_outcome_model_store_identities_at(
+                self._store, self._owner_ids
+            )
+        except Exception as exc:
+            if isinstance(exc, OutcomeDiagnosticReadinessError):
+                raise
+            raise OutcomeDiagnosticReadinessError(
+                "prepared outcome model store cannot be rechecked"
+            ) from exc
+        if current != self._identities:
+            raise OutcomeDiagnosticReadinessError(
+                "prepared outcome model store identities changed"
+            )
+        return self
+
+    def close(self) -> None:
+        if not self._active:
+            return
+        object.__setattr__(self, "_active", False)
+        self._stack.close()
+
+
+@dataclass(slots=True, init=False)
+class OutcomeDiagnosticModelReadinessSnapshot:
+    """Read-only readiness snapshot for the compact model authority and store."""
+
+    base: OutcomeDiagnosticReadinessSnapshot
+    authority: object
+    authority_file: AuthorityFileSnapshot
+    model_store_root: Path
+    owner_ids: tuple[str, ...]
+    lease: OutcomeDiagnosticModelReadinessLease
+    _sealed: bool
+
+    def __init__(
+        self,
+        base: OutcomeDiagnosticReadinessSnapshot,
+        authority: object,
+        authority_file: AuthorityFileSnapshot,
+        model_store_root: Path,
+        owner_ids: tuple[str, ...],
+        lease: OutcomeDiagnosticModelReadinessLease,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _SNAPSHOT_TOKEN:
+            raise OutcomeDiagnosticReadinessError(
+                "model readiness snapshot requires the canonical capture boundary"
+            )
+        object.__setattr__(self, "base", base)
+        object.__setattr__(self, "authority", authority)
+        object.__setattr__(self, "authority_file", authority_file)
+        object.__setattr__(self, "model_store_root", model_store_root)
+        object.__setattr__(self, "owner_ids", owner_ids)
+        object.__setattr__(self, "lease", lease)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("model readiness snapshot is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def protocol(self) -> OutcomeDiagnosticProtocolSnapshot:
+        return self.base.protocol
+
+    @property
+    def git_commit_sha(self) -> str:
+        return self.base.git_commit_sha
+
+    @property
+    def output_root(self) -> Path:
+        return self.base.output_root
+
+    @property
+    def model_store(self) -> object:
+        return self.lease.store
+
+    @property
+    def authority_bytes(self) -> bytes:
+        return self.authority_file.content
+
+    def recheck(self, *, expected_git_commit: str) -> None:
+        self.base.recheck(expected_git_commit=expected_git_commit)
+        self.lease.require_active()
+        current = _read_source(
+            self.base.repository, OUTCOME_MODEL_AUTHORITY_RELATIVE
+        )
+        if current != self.authority_file:
+            raise OutcomeDiagnosticReadinessError(
+                "outcome model authority bytes or identity changed"
+            )
+        _validate_outcome_model_authority(
+            current.content, self.base.protocol, self.base.repository
+        )
+
+    def preflight(self, *, expected_git_commit: str) -> None:
+        self.recheck(expected_git_commit=expected_git_commit)
+
+    def close(self) -> None:
+        self.lease.close()
+
+    def __enter__(self) -> "OutcomeDiagnosticModelReadinessSnapshot":
+        self.lease.require_active()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
+def _validate_outcome_model_authority(
+    content: bytes,
+    protocol: OutcomeDiagnosticProtocolSnapshot,
+    repository: Path,
+) -> object:
+    try:
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts import (
+            OutcomeDiagnosticModelArtifactAuthority,
+            canonical_outcome_model_artifact_authority_bytes,
+            load_outcome_model_artifact_authority_bytes,
+            outcome_artifact_store_id,
+        )
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
+            bind_validated_outcome_diagnostic_plan,
+            build_outcome_group_diagnostic_plan,
+        )
+
+        authority = load_outcome_model_artifact_authority_bytes(content)
+        if not isinstance(authority, OutcomeDiagnosticModelArtifactAuthority):
+            raise ValueError("typed outcome model authority is required")
+        if canonical_outcome_model_artifact_authority_bytes(authority) != content:
+            raise ValueError("outcome model authority bytes are not canonical")
+        validated_plan = bind_validated_outcome_diagnostic_plan(
+            build_outcome_group_diagnostic_plan(protocol),
+            snapshot=protocol,
+        )
+        plan = validated_plan.plan
+        if authority.plan_id != plan.plan_id:
+            raise ValueError("outcome model authority plan identity differs")
+        if authority.plan_parent_commit_sha != plan.parent_commit_sha:
+            raise ValueError("outcome model authority plan parent differs")
+        if authority.protocol_sha256 != plan.protocol_sha256:
+            raise ValueError("outcome model authority protocol identity differs")
+        if authority.protocol_self_sha256 != protocol.payload.get("diagnostic_protocol_sha256"):
+            raise ValueError("outcome model authority protocol self-hash differs")
+        if authority.protocol_file_sha256 != protocol.sha256:
+            raise ValueError("outcome model authority protocol file identity differs")
+        if authority.artifact_store_id != outcome_artifact_store_id(plan.plan_id):
+            raise ValueError("outcome model authority store identity differs")
+        if tuple(authority.condition_ids) != tuple(plan.condition_ids):
+            raise ValueError("outcome model authority condition universe differs")
+        evidence_rows = {}
+        for raw in plan.evidence_lineage_rows:
+            source = json.loads(raw)
+            evidence_rows[(source["family_id"], source["replicate"])] = (
+                hashlib.sha256(raw).hexdigest(),
+                source["payload_sha256"],
+                source["payload_bytes"],
+                tuple(source["ordered_training_task_ids"]),
+            )
+        if {
+            (row.heldout_family, row.replicate): (
+                row.evidence_row_sha256,
+                row.evidence_payload_sha256,
+                row.evidence_payload_bytes,
+                tuple(row.ordered_training_task_ids),
+            )
+            for row in authority.evidence
+        } != evidence_rows:
+            raise ValueError("outcome model authority evidence universe differs")
+        if {
+            row.view_id: (
+                row.condition_id,
+                row.heldout_family,
+                row.replicate,
+                row.evidence_row_sha256,
+                row.feature_mask_sha256,
+                row.transformation_sha256,
+                row.representation_sha256,
+            )
+            for row in authority.views
+        } != {
+            view.view_id: (
+                view.condition_id,
+                view.heldout_family,
+                view.replicate,
+                evidence_rows[(view.heldout_family, view.replicate)][0],
+                view.feature_mask_sha256,
+                view.transformation_sha256,
+                view.representation_sha256,
+            )
+            for view in plan.views
+        }:
+            raise ValueError("outcome model authority view universe differs")
+        views_by_id = {view.view_id: view for view in plan.views}
+        if {
+            row.owner_id: (
+                row.view_id,
+                row.condition_id,
+                row.heldout_family,
+                row.fold_id,
+                row.replicate,
+                row.training_tuple_id,
+                row.model_seed,
+                row.data_order_seed,
+                row.feature_mask_sha256,
+                row.transformation_sha256,
+                row.representation_sha256,
+                row.model_identity_sha256,
+            )
+            for row in authority.artifacts
+        } != {
+            owner.owner_id: (
+                owner.view_id,
+                owner.condition_id,
+                owner.heldout_family,
+                owner.fold_id,
+                owner.replicate,
+                owner.training_tuple_id,
+                owner.model_seed,
+                views_by_id[owner.view_id].data_order_seed,
+                owner.feature_mask_sha256,
+                owner.transformation_sha256,
+                views_by_id[owner.view_id].representation_sha256,
+                owner.model_identity_sha256,
+            )
+            for owner in plan.model_owners
+        }:
+            raise ValueError("outcome model authority owner universe differs")
+        return authority
+    except Exception as exc:
+        if isinstance(exc, OutcomeDiagnosticReadinessError):
+            raise
+        raise OutcomeDiagnosticReadinessError(
+            "outcome model authority is not canonical development authority"
+        ) from exc
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _validate_store_payloads_against_authority(
+    store: object,
+    authority: object,
+    protocol: OutcomeDiagnosticProtocolSnapshot,
+) -> None:
+    """Bind every descriptor-read model payload to the compact authority and plan."""
+
+    try:
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_authority import (
+            validate_outcome_model_preparation_metadata_at,
+        )
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_store import (
+            load_outcome_model_artifact_payload_at,
+        )
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
+            bind_validated_outcome_diagnostic_plan,
+            build_outcome_group_diagnostic_plan,
+        )
+
+        plan = bind_validated_outcome_diagnostic_plan(
+            build_outcome_group_diagnostic_plan(protocol),
+            snapshot=protocol,
+        )
+        validate_outcome_model_preparation_metadata_at(
+            store.reader,  # type: ignore[attr-defined]
+            plan,
+            preparation_git_commit_sha=authority.preparation_git_commit_sha,  # type: ignore[attr-defined]
+            preparation_provenance_sha256=authority.preparation_provenance_sha256,  # type: ignore[attr-defined]
+            expected_owner_ids=tuple(  # type: ignore[attr-defined]
+                sorted(row.owner_id for row in authority.artifacts)
+            ),
+        )
+        plan = plan.plan
+        owners = {owner.owner_id: owner for owner in plan.model_owners}
+        views = {view.view_id: view for view in plan.views}
+        evidence = {
+            (row.heldout_family, row.replicate): row
+            for row in authority.evidence  # type: ignore[attr-defined]
+        }
+        for row in authority.artifacts:  # type: ignore[attr-defined]
+            owner = owners[row.owner_id]
+            view = views[owner.view_id]
+            evidence_row = evidence[(view.heldout_family, view.replicate)]
+            record, _index, _state = load_outcome_model_artifact_payload_at(
+                store, row.owner_id
+            )
+            key = record.key
+            consumers = tuple(
+                unit for unit in plan.units if unit.model_owner_id == owner.owner_id
+            )
+            expected_consumer_ids = _canonical_digest(
+                [unit.unit_id for unit in consumers]
+            )
+            expected_seed_lineage = _canonical_digest(
+                [
+                    {
+                        "unit_id": unit.unit_id,
+                        "tuple_id": unit.tuple_id,
+                        "task_id": unit.task_id,
+                        "task_index": unit.task_index,
+                        "model_seed": unit.model_seed,
+                        "environment_seed": unit.environment_seed,
+                        "probe_seed": unit.probe_seed,
+                        "search_seed": unit.search_seed,
+                        "data_order_seed": unit.data_order_seed,
+                    }
+                    for unit in consumers
+                ]
+            )
+            if (
+                len(consumers) != 24
+                or (
+                    row.owner_id,
+                    row.view_id,
+                    row.condition_id,
+                    row.heldout_family,
+                    row.fold_id,
+                    row.replicate,
+                    row.training_tuple_id,
+                    row.model_seed,
+                    row.data_order_seed,
+                    row.feature_mask_sha256,
+                    row.transformation_sha256,
+                    row.representation_sha256,
+                    row.model_identity_sha256,
+                    row.consumer_unit_ids_sha256,
+                    row.consumer_seed_lineage_sha256,
+                    row.record_id,
+                    row.key_id,
+                    row.model_state_sha256,
+                )
+                != (
+                    key.owner_id,
+                    key.view_id,
+                    key.condition_id,
+                    key.heldout_family,
+                    key.fold_id,
+                    key.replicate,
+                    key.training_tuple_id,
+                    key.model_seed,
+                    key.data_order_seed,
+                    key.feature_mask_sha256,
+                    key.transformation_sha256,
+                    key.representation_sha256,
+                    key.model_identity_sha256,
+                    key.consumer_unit_ids_sha256,
+                    key.consumer_seed_lineage_sha256,
+                    record.record_id,
+                    key.key_id,
+                    key.model_state_sha256,
+                )
+                or key.plan_id != plan.plan_id
+                or key.plan_parent_commit_sha != plan.parent_commit_sha
+                or key.protocol_sha256 != plan.protocol_sha256
+                or key.protocol_self_sha256
+                != protocol.payload.get("diagnostic_protocol_sha256")
+                or key.protocol_file_sha256 != protocol.sha256
+                or key.view_id != owner.view_id
+                or key.condition_id != owner.condition_id
+                or key.heldout_family != owner.heldout_family
+                or key.fold_id != owner.fold_id
+                or key.replicate != owner.replicate
+                or key.training_tuple_id != owner.training_tuple_id
+                or key.model_seed != owner.model_seed
+                or key.data_order_seed != view.data_order_seed
+                or key.learning_rate != owner.learning_rate
+                or key.training_epochs != owner.training_epochs
+                or key.training_accounting.optimizer_steps != owner.training_epochs
+                or tuple(key.ordered_training_task_ids) != tuple(view.training_task_ids)
+                or tuple(key.ordered_training_task_ids)
+                != tuple(evidence_row.ordered_training_task_ids)
+                or key.evidence_row_sha256 != evidence_row.evidence_row_sha256
+                or key.evidence_payload_sha256 != evidence_row.evidence_payload_sha256
+                or key.evidence_payload_bytes != evidence_row.evidence_payload_bytes
+                or key.consumer_unit_ids_sha256 != expected_consumer_ids
+                or key.consumer_seed_lineage_sha256 != expected_seed_lineage
+                or key.consumer_count != 24
+                or key.candidate_episodes_per_task != 150
+                or key.adaptation_actions_per_task != 2048
+                or key.probe_actions_per_task != 64
+                or key.maximum_actions_per_candidate_episode != 64
+                or key.preparation_git_commit_sha
+                != authority.preparation_git_commit_sha  # type: ignore[attr-defined]
+                or key.preparation_provenance_sha256
+                != authority.preparation_provenance_sha256  # type: ignore[attr-defined]
+            ):
+                raise ValueError("stored model payload differs from compact authority")
+    except Exception as exc:
+        if isinstance(exc, OutcomeDiagnosticReadinessError):
+            raise
+        raise OutcomeDiagnosticReadinessError(
+            "prepared model payloads do not match compact authority"
+        ) from exc
+
+
+def capture_outcome_group_diagnostic_model_readiness(
+    repository: str | os.PathLike[str] = ROOT,
+    *,
+    output_root: str | os.PathLike[str],
+    expected_git_commit: str,
+    model_store_root: str | os.PathLike[str] | None = None,
+    authority_path: str | os.PathLike[str] | None = None,
+) -> OutcomeDiagnosticModelReadinessSnapshot:
+    """Capture development-only model authority and a pinned complete store."""
+
+    repo = _absolute_path(Path.cwd(), repository, "repository")
+    base = capture_outcome_group_diagnostic_readiness(
+        repository=repo,
+        output_root=output_root,
+        expected_git_commit=expected_git_commit,
+    )
+    authority = _outcome_model_authority_path(repo, authority_path)
+    _reject_lexical_symlinks(authority, "outcome model authority")
+    try:
+        authority_file = _read_source(repo, OUTCOME_MODEL_AUTHORITY_RELATIVE)
+        typed_authority = _validate_outcome_model_authority(
+            authority_file.content, base.protocol, repo
+        )
+        store_root = repo / "runs" / "milestone6" / typed_authority.artifact_store_id  # type: ignore[attr-defined]
+        if model_store_root is not None and _absolute_path(repo, model_store_root, "model store") != store_root:
+            raise OutcomeDiagnosticReadinessError(
+                "model store root must match the authority artifact_store_id"
+            )
+        _reject_lexical_symlinks(store_root, "model store")
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_store import (
+            load_outcome_model_manifest_at,
+            open_existing_outcome_model_store,
+            snapshot_outcome_model_store_identities_at,
+        )
+
+        owner_ids = tuple(sorted(row.owner_id for row in typed_authority.artifacts))  # type: ignore[attr-defined]
+        if len(owner_ids) != 240 or len(set(owner_ids)) != 240:
+            raise OutcomeDiagnosticReadinessError(
+                "outcome model authority must contain exactly 240 owners"
+            )
+        stack = ExitStack()
+        stack.__enter__()
+        try:
+            store = stack.enter_context(open_existing_outcome_model_store(store_root))
+            manifest = load_outcome_model_manifest_at(store)
+            expected_manifest_rows = {
+                (row.owner_id, row.record_id, row.key_id, row.model_state_sha256)
+                for row in typed_authority.artifacts  # type: ignore[attr-defined]
+            }
+            observed_manifest_rows = {
+                (entry.owner_id, entry.record_id, entry.key_id, entry.model_state_sha256)
+                for entry in manifest.entries
+            }
+            if observed_manifest_rows != expected_manifest_rows:
+                raise OutcomeDiagnosticReadinessError(
+                    "prepared model-store manifest differs from compact authority"
+                )
+            _validate_store_payloads_against_authority(
+                store,
+                typed_authority,
+                base.protocol,
+            )
+            identities = snapshot_outcome_model_store_identities_at(store, owner_ids)
+            lease = OutcomeDiagnosticModelReadinessLease(
+                store, stack, owner_ids, identities, _token=_LEASE_TOKEN
+            )
+            snapshot = OutcomeDiagnosticModelReadinessSnapshot(
+                base,
+                typed_authority,
+                authority_file,
+                store_root,
+                owner_ids,
+                lease,
+                _token=_SNAPSHOT_TOKEN,
+            )
+            snapshot.recheck(expected_git_commit=expected_git_commit)
+            return snapshot
+        except Exception:
+            stack.close()
+            raise
+    except OutcomeDiagnosticReadinessError:
+        raise
+    except Exception as exc:
+        raise OutcomeDiagnosticReadinessError(
+            "complete prepared outcome model store cannot be pinned"
+        ) from exc
+
+
 __all__ = [
     "DIAGNOSTIC_OUTPUT_ROOT_RELATIVE",
+    "OUTCOME_MODEL_AUTHORITY_RELATIVE",
     "OutcomeDiagnosticActivationReadinessLease",
+    "OutcomeDiagnosticModelReadinessLease",
+    "OutcomeDiagnosticModelReadinessSnapshot",
     "OutcomeDiagnosticReadinessError",
     "OutcomeDiagnosticReadinessSnapshot",
     "capture_outcome_group_diagnostic_readiness",
+    "capture_outcome_group_diagnostic_model_readiness",
 ]

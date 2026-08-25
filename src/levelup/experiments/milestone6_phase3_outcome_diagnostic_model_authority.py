@@ -93,7 +93,7 @@ def _read_store_file(reader: Any, name: str) -> bytes:
         ) from exc
 
 
-def _validate_persisted_progress_and_provenance(
+def validate_outcome_model_preparation_metadata_at(
     reader: Any,
     plan: ValidatedOutcomePlan,
     *,
@@ -213,7 +213,7 @@ def build_outcome_model_artifact_authority_from_store(
             reader = _reader(store)
             reader.recheck()
             initial_identities = _store_identity_snapshot(reader, expected_owner_ids)
-            _validate_persisted_progress_and_provenance(
+            validate_outcome_model_preparation_metadata_at(
                 reader,
                 plan,
                 preparation_git_commit_sha=preparation_git_commit_sha,
@@ -280,4 +280,5 @@ def build_outcome_model_artifact_authority_from_store(
 __all__ = [
     "OutcomeDiagnosticModelAuthorityError",
     "build_outcome_model_artifact_authority_from_store",
+    "validate_outcome_model_preparation_metadata_at",
 ]

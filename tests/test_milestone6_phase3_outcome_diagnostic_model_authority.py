@@ -110,7 +110,7 @@ def _patch_complete(monkeypatch: pytest.MonkeyPatch, snapshots: list[object]) ->
     monkeypatch.setattr(authority, "_reader", lambda value: value)
     monkeypatch.setattr(
         authority,
-        "_validate_persisted_progress_and_provenance",
+        "validate_outcome_model_preparation_metadata_at",
         lambda *a, **k: None,
     )
     monkeypatch.setattr(authority, "scan_outcome_model_inventory_at", lambda *a, **k: None)
@@ -187,7 +187,7 @@ def test_authority_rejects_persisted_provenance_drift(
     _patch_complete(monkeypatch, snapshots)
     monkeypatch.setattr(
         authority,
-        "_validate_persisted_progress_and_provenance",
+        "validate_outcome_model_preparation_metadata_at",
         lambda *a, **k: (_ for _ in ()).throw(
             authority.OutcomeDiagnosticModelAuthorityError("provenance drift")
         ),
@@ -243,7 +243,7 @@ def test_persisted_progress_and_provenance_are_read_through_the_pinned_store(
             canonical_json_bytes(provenance.model_dump(mode="json")) + b"\n",
             pinned.reader.staging_fd,
         )
-        authority._validate_persisted_progress_and_provenance(
+        authority.validate_outcome_model_preparation_metadata_at(
             pinned.reader,
             plan,
             preparation_git_commit_sha=commit,
@@ -254,7 +254,7 @@ def test_persisted_progress_and_provenance_are_read_through_the_pinned_store(
             authority.OutcomeDiagnosticModelAuthorityError,
             match="another run",
         ):
-            authority._validate_persisted_progress_and_provenance(
+            authority.validate_outcome_model_preparation_metadata_at(
                 pinned.reader,
                 plan,
                 preparation_git_commit_sha="b" * 40,
