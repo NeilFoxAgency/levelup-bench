@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import shutil
 import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
@@ -15,6 +17,53 @@ from levelup.experiments import milestone6_phase3_readiness as phase3
 
 REPOSITORY = Path(readiness.ROOT)
 OUTPUT_ROOT = REPOSITORY / readiness.DIAGNOSTIC_OUTPUT_ROOT_RELATIVE
+_MODEL_STORE_ID = "phase3-model-preparation-cc08207"
+_MODEL_METADATA_FIXTURE = Path(__file__).parent / "fixtures" / "phase3_model_preparation_metadata"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _materialize_metadata_only_model_store() -> Iterator[None]:
+    """Provide CI exact published metadata without fabricating checkpoints."""
+
+    model_root = REPOSITORY / "runs" / "milestone6" / _MODEL_STORE_ID
+    if model_root.exists():
+        yield
+        return
+    candidate_parents = [model_root.parent.parent, model_root.parent]
+    created_parents = [path for path in candidate_parents if not path.exists()]
+    model_root.mkdir(parents=True)
+    created_directories = [
+        model_root / "phase3-model-artifact-keys",
+        model_root / "phase3-model-artifact-costs",
+        model_root / "phase3-model-artifacts",
+    ]
+    for directory in created_directories:
+        directory.mkdir()
+    expected_hashes = {
+        phase3.PREPARATION_PROVENANCE_NAME: (
+            "c1c302db1f88b62902628c839cd566ade6102bdb0716bcb505d09a5a49737679"
+        ),
+        phase3.PREPARATION_PROGRESS_NAME: (
+            "e5ff3c385c6f32ca9e5dac04b4a81e229c0bfb073300ac4505edfd419ff7d11b"
+        ),
+    }
+    created_files = []
+    for name, expected in expected_hashes.items():
+        source = _MODEL_METADATA_FIXTURE / name
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == expected
+        destination = model_root / name
+        shutil.copyfile(source, destination)
+        created_files.append(destination)
+    try:
+        yield
+    finally:
+        for path in reversed(created_files):
+            path.unlink(missing_ok=True)
+        for path in reversed(created_directories):
+            path.rmdir()
+        model_root.rmdir()
+        for path in reversed(created_parents):
+            path.rmdir()
 
 
 @pytest.fixture

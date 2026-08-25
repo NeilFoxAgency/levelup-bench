@@ -572,14 +572,14 @@ def capture_outcome_group_diagnostic_readiness(
     if not repo.is_dir():
         raise OutcomeDiagnosticReadinessError("repository must be an existing directory")
     output = _absolute_path(repo, output_root, "output root")
-    _reject_lexical_symlinks(output, "output root")
-    if not output.is_dir():
-        raise OutcomeDiagnosticReadinessError("output root must already exist as a directory")
     canonical_output = repo / DIAGNOSTIC_OUTPUT_ROOT_RELATIVE
     if output != canonical_output:
         raise OutcomeDiagnosticReadinessError(
             "output root must be the canonical inert diagnostic namespace"
         )
+    _reject_lexical_symlinks(output, "output root")
+    if not output.is_dir():
+        raise OutcomeDiagnosticReadinessError("output root must already exist as a directory")
     _require_empty_diagnostic_output_root(output)
     try:
         protocol = load_outcome_group_diagnostic_protocol(
