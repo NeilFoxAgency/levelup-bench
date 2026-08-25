@@ -510,6 +510,7 @@ class OutcomeDiagnosticModelArtifactAuthority(BaseModel):
     protocol_file_sha256: str = Field(pattern=HEX64)
     preparation_git_commit_sha: str = Field(pattern=PREPARATION_COMMIT)
     preparation_provenance_sha256: str = Field(pattern=HEX64)
+    generation_git_commit_sha: str = Field(pattern=PREPARATION_COMMIT)
     artifact_store_id: str = Field(min_length=1)
     condition_ids: tuple[Literal[CONDITIONS[0]], Literal[CONDITIONS[1]]]
     views: tuple[OutcomeDiagnosticViewRow, ...]
@@ -526,6 +527,8 @@ class OutcomeDiagnosticModelArtifactAuthority(BaseModel):
             raise ValueError("preparation commit provenance is required")
         if set(self.preparation_provenance_sha256) == {"0"}:
             raise ValueError("preparation provenance identity is required")
+        if set(self.generation_git_commit_sha) == {"0"}:
+            raise ValueError("authority generation commit provenance is required")
         if (
             self.artifact_store_id in {".", ".."}
             or "/" in self.artifact_store_id
@@ -1033,11 +1036,20 @@ def build_outcome_model_artifact_authority(
     *,
     preparation_git_commit_sha: str,
     preparation_provenance_sha256: str,
+    generation_git_commit_sha: str,
 ) -> OutcomeDiagnosticModelArtifactAuthority:
     canonical_plan, snapshot = _require_canonical_inputs(plan, snapshot)
     preparation_git_commit_sha, preparation_provenance_sha256 = _require_preparation_identity(
         preparation_git_commit_sha, preparation_provenance_sha256
     )
+    if (
+        not isinstance(generation_git_commit_sha, str)
+        or re.fullmatch(PREPARATION_COMMIT, generation_git_commit_sha) is None
+        or set(generation_git_commit_sha) == {"0"}
+    ):
+        raise OutcomeDiagnosticModelArtifactError(
+            "authority generation commit provenance is required"
+        )
     if len(records) != EXPECTED_MODEL_OWNERS:
         raise OutcomeDiagnosticModelArtifactError("model authority requires exactly 240 owners")
     owner_ids = {record.key.owner_id for record in records}
@@ -1138,6 +1150,7 @@ def build_outcome_model_artifact_authority(
         protocol_file_sha256=snapshot.sha256,
         preparation_git_commit_sha=preparation_git_commit_sha,
         preparation_provenance_sha256=preparation_provenance_sha256,
+        generation_git_commit_sha=generation_git_commit_sha,
         artifact_store_id=outcome_artifact_store_id(canonical_plan.plan_id),
         condition_ids=CONDITIONS,
         views=tuple(sorted(views, key=lambda item: item.view_id)),
@@ -1165,6 +1178,7 @@ def validate_outcome_model_artifact_authority(
     *,
     preparation_git_commit_sha: str,
     preparation_provenance_sha256: str,
+    generation_git_commit_sha: str,
 ) -> None:
     """Revalidate an opaque summary against every typed artifact and the plan.
 
@@ -1184,8 +1198,9 @@ def validate_outcome_model_artifact_authority(
     if (
         authority.preparation_git_commit_sha != preparation_git_commit_sha
         or authority.preparation_provenance_sha256 != preparation_provenance_sha256
+        or authority.generation_git_commit_sha != generation_git_commit_sha
     ):
-        raise OutcomeDiagnosticModelArtifactError("model authority preparation provenance differs")
+        raise OutcomeDiagnosticModelArtifactError("model authority generation provenance differs")
     canonical_plan, _fresh = _require_canonical_inputs(plan, snapshot)
     if authority.artifact_store_id != outcome_artifact_store_id(canonical_plan.plan_id):
         raise OutcomeDiagnosticModelArtifactError("model authority artifact store identity differs")
@@ -1197,6 +1212,7 @@ def validate_outcome_model_artifact_authority(
         snapshot,
         preparation_git_commit_sha=preparation_git_commit_sha,
         preparation_provenance_sha256=preparation_provenance_sha256,
+        generation_git_commit_sha=generation_git_commit_sha,
     )
     if authority != expected:
         raise OutcomeDiagnosticModelArtifactError(

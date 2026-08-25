@@ -59,6 +59,7 @@ TRAINING = (
 TEMPERATURES = ("t0p6", "t0p9", "t1p2")
 PREPARATION_COMMIT = "a" * 40
 PREPARATION_PROVENANCE = "b" * 64
+GENERATION_COMMIT = "c" * 40
 
 
 def _prep_kwargs() -> dict[str, str]:
@@ -66,6 +67,10 @@ def _prep_kwargs() -> dict[str, str]:
         "preparation_git_commit_sha": PREPARATION_COMMIT,
         "preparation_provenance_sha256": PREPARATION_PROVENANCE,
     }
+
+
+def _authority_kwargs() -> dict[str, str]:
+    return {**_prep_kwargs(), "generation_git_commit_sha": GENERATION_COMMIT}
 
 
 @pytest.fixture(scope="module")
@@ -289,7 +294,7 @@ def complete_artifacts(canonical_inputs):
         training_evidence,
         validated,
         snapshot,
-        **_prep_kwargs(),
+        **_authority_kwargs(),
     )
     return tuple(records), payloads, training_evidence, authority
 
@@ -360,7 +365,7 @@ def test_complete_pinned_store_round_trip_builds_the_same_compact_authority(
         validated,
         snapshot,
         evidence,
-        **_prep_kwargs(),
+        **_authority_kwargs(),
     )
     assert observed == expected_authority
 
@@ -643,7 +648,7 @@ def test_authority_reconstruction_rejects_rehashed_lineage_and_reordering(
     snapshot, _plan, validated = canonical_inputs
     records, payloads, evidence, authority = complete_artifacts
     validate_outcome_model_artifact_authority(
-        authority, records, payloads, evidence, validated, snapshot, **_prep_kwargs()
+        authority, records, payloads, evidence, validated, snapshot, **_authority_kwargs()
     )
     body = authority.model_dump(mode="json")
     body["plan_parent_commit_sha"] = "c" * 40
@@ -653,7 +658,7 @@ def test_authority_reconstruction_rejects_rehashed_lineage_and_reordering(
     mutated = OutcomeDiagnosticModelArtifactAuthority.model_validate(body)
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="differs"):
         validate_outcome_model_artifact_authority(
-            mutated, records, payloads, evidence, validated, snapshot, **_prep_kwargs()
+            mutated, records, payloads, evidence, validated, snapshot, **_authority_kwargs()
         )
     reordered = authority.model_dump(mode="json")
     reordered["artifacts"] = list(reversed(reordered["artifacts"]))
@@ -671,6 +676,7 @@ def test_authority_binds_provenance_store_and_every_record(
     records, payloads, evidence, authority = complete_artifacts
     assert authority.preparation_git_commit_sha == PREPARATION_COMMIT
     assert authority.preparation_provenance_sha256 == PREPARATION_PROVENANCE
+    assert authority.generation_git_commit_sha == GENERATION_COMMIT
     assert authority.artifact_store_id.startswith("phase3-outcome-diagnostic-models-")
     mixed = _rehashed_record(records[0], preparation_git_commit_sha="c" * 40)
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="record differs|provenance"):
@@ -680,7 +686,7 @@ def test_authority_binds_provenance_store_and_every_record(
             evidence,
             validated,
             snapshot,
-            **_prep_kwargs(),
+            **_authority_kwargs(),
         )
     body = authority.model_dump(mode="json")
     body["artifact_store_id"] = "foreign-model-store"
@@ -689,6 +695,16 @@ def test_authority_binds_provenance_store_and_every_record(
     )
     with pytest.raises(ValueError, match="store"):
         OutcomeDiagnosticModelArtifactAuthority.model_validate(body)
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="generation"):
+        validate_outcome_model_artifact_authority(
+            authority,
+            records,
+            payloads,
+            evidence,
+            validated,
+            snapshot,
+            **{**_authority_kwargs(), "generation_git_commit_sha": "d" * 40},
+        )
 
 
 def test_canonical_serializers_revalidate_constructed_objects(complete_artifacts) -> None:
@@ -712,7 +728,7 @@ def test_partial_duplicate_extra_and_foreign_records_fail(
     records, payloads, evidence, _authority = complete_artifacts
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="240"):
         build_outcome_model_artifact_authority(
-            records[:-1], payloads, evidence, validated, snapshot, **_prep_kwargs()
+            records[:-1], payloads, evidence, validated, snapshot, **_authority_kwargs()
         )
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="partial|foreign"):
         build_outcome_model_artifact_authority(
@@ -721,5 +737,5 @@ def test_partial_duplicate_extra_and_foreign_records_fail(
             evidence,
             validated,
             snapshot,
-            **_prep_kwargs(),
+            **_authority_kwargs(),
         )

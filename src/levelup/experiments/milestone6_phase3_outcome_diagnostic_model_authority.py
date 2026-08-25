@@ -174,6 +174,7 @@ def build_outcome_model_artifact_authority_from_store(
     *,
     preparation_git_commit_sha: str,
     preparation_provenance_sha256: str,
+    generation_git_commit_sha: str,
 ) -> OutcomeDiagnosticModelArtifactAuthority:
     """Build the canonical compact authority from one complete model store.
 
@@ -253,6 +254,7 @@ def build_outcome_model_artifact_authority_from_store(
                 snapshot,
                 preparation_git_commit_sha=preparation_git_commit_sha,
                 preparation_provenance_sha256=preparation_provenance_sha256,
+                generation_git_commit_sha=generation_git_commit_sha,
             )
             final_identities = _store_identity_snapshot(reader, expected_owner_ids)
             if final_identities != initial_identities:

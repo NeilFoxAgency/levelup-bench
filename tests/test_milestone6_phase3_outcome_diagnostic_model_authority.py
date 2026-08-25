@@ -147,11 +147,13 @@ def test_authority_build_is_deterministic_and_reads_complete_owner_matrix(
         "models", plan, _snapshot(), evidence,
         preparation_git_commit_sha="a" * 40,
         preparation_provenance_sha256="b" * 64,
+        generation_git_commit_sha="c" * 40,
     )
     second = authority.build_outcome_model_artifact_authority_from_store(
         "models", plan, _snapshot(), evidence,
         preparation_git_commit_sha="a" * 40,
         preparation_provenance_sha256="b" * 64,
+        generation_git_commit_sha="c" * 40,
     )
     assert first == second == "authority"
 
@@ -173,6 +175,7 @@ def test_authority_rejects_partial_owner_plan_before_opening_store(
             "models", _plan(239), _snapshot(), {"3" * 64: _evidence()},
             preparation_git_commit_sha="a" * 40,
             preparation_provenance_sha256="b" * 64,
+            generation_git_commit_sha="c" * 40,
         )
     assert not opened
 
@@ -194,6 +197,7 @@ def test_authority_rejects_persisted_provenance_drift(
             "models", _plan(), _snapshot(), {"3" * 64: _evidence()},
             preparation_git_commit_sha="a" * 40,
             preparation_provenance_sha256="b" * 64,
+            generation_git_commit_sha="c" * 40,
         )
 
 
@@ -207,6 +211,7 @@ def test_authority_rejects_store_identity_drift_after_semantic_load(
             "models", _plan(), _snapshot(), {"3" * 64: _evidence()},
             preparation_git_commit_sha="a" * 40,
             preparation_provenance_sha256="b" * 64,
+            generation_git_commit_sha="c" * 40,
         )
 
 
