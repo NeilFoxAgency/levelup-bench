@@ -63,6 +63,36 @@ def test_symlinked_store_root_is_rejected(tmp_path: Path):
             pass
 
 
+def test_existing_store_opener_does_not_create_missing_root(tmp_path: Path):
+    root = tmp_path / "missing-models"
+    with pytest.raises(store.OutcomeModelStoreError, match="does not exist"):
+        with store.open_existing_outcome_model_store(root):
+            pass
+    assert not root.exists()
+
+
+def test_existing_store_opener_rejects_partial_namespace_without_mutating(tmp_path: Path):
+    root = tmp_path / "partial-models"
+    root.mkdir()
+    (root / store.RECORDS_DIR).mkdir()
+    before = tuple(sorted(path.name for path in root.iterdir()))
+    with pytest.raises(store.OutcomeModelStoreError, match="existing model-store"):
+        with store.open_existing_outcome_model_store(root):
+            pass
+    assert tuple(sorted(path.name for path in root.iterdir())) == before
+
+
+def test_existing_store_opener_preserves_existing_namespaces(tmp_path: Path):
+    root = tmp_path / "existing-models"
+    root.mkdir()
+    for name in (store.RECORDS_DIR, store.STATES_DIR, store.STAGING_DIR):
+        (root / name).mkdir()
+    before = tuple(sorted(path.name for path in root.iterdir()))
+    with store.open_existing_outcome_model_store(root) as pinned:
+        pinned.recheck()
+    assert tuple(sorted(path.name for path in root.iterdir())) == before
+
+
 def test_manifest_symlink_and_noncanonical_bytes_fail_closed(tmp_path: Path):
     root = tmp_path / "models"
     with store.open_outcome_model_store(root) as pinned:

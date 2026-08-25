@@ -257,10 +257,27 @@ def canonical_inputs(monkeypatch_module):
         artifacts, "validate_outcome_diagnostic_plan", lambda *args, **kwargs: None
     )
     monkeypatch_module.setattr(
-        artifacts, "load_outcome_group_diagnostic_protocol", lambda: snapshot
+        artifacts, "load_outcome_group_diagnostic_protocol", lambda *args, **kwargs: snapshot
     )
     monkeypatch_module.setattr(artifacts, "_derive_training_example_count", lambda *args: 11)
     return snapshot, plan, validated
+
+
+def test_snapshot_revalidation_uses_pinned_repository_and_relative_path(monkeypatch) -> None:
+    snapshot = _snapshot()
+    observed: dict[str, object] = {}
+
+    def _reload(path, *, repository):
+        observed["path"] = path
+        observed["repository"] = repository
+        return snapshot
+
+    monkeypatch.setattr(artifacts, "load_outcome_group_diagnostic_protocol", _reload)
+    assert artifacts._require_snapshot(snapshot) == snapshot
+    assert observed == {
+        "path": Path("protocol.json"),
+        "repository": Path("."),
+    }
 
 
 @pytest.fixture(scope="module")

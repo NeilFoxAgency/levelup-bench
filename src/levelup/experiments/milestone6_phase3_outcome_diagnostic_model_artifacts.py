@@ -151,7 +151,21 @@ def _require_snapshot(
             "diagnostic protocol permits non-development authority"
         )
     try:
-        fresh = load_outcome_group_diagnostic_protocol()
+        # Re-open the canonical file through the repository pinned in the
+        # supplied snapshot.  Passing an explicit repository-relative path is
+        # important here: the loader's module-level defaults point at the
+        # checkout containing this Python package, which is not necessarily
+        # the authority repository that produced the snapshot.
+        canonical_path = snapshot.path.relative_to(snapshot.repository)
+    except (TypeError, ValueError) as exc:
+        raise OutcomeDiagnosticModelArtifactError(
+            "diagnostic protocol path is not relative to its pinned repository"
+        ) from exc
+    try:
+        fresh = load_outcome_group_diagnostic_protocol(
+            canonical_path,
+            repository=snapshot.repository,
+        )
     except (OSError, TypeError, ValueError) as exc:
         raise OutcomeDiagnosticModelArtifactError(
             "canonical diagnostic protocol cannot be reloaded"

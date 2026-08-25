@@ -13,7 +13,7 @@ import json
 import os
 import stat
 import uuid
-from contextlib import contextmanager, nullcontext
+from contextlib import ExitStack, contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal, Mapping
@@ -472,6 +472,57 @@ def open_outcome_model_store(root: str | Path) -> Iterator[PinnedOutcomeModelSto
         finally:
             for fd in reversed(descriptors):
                 os.close(fd)
+
+
+@contextmanager
+def open_existing_outcome_model_store(root: str | Path) -> Iterator[PinnedOutcomeModelStore]:
+    """Open an already-created model store without creating or mutating it.
+
+    This is the authority-generation boundary.  Unlike
+    :func:`open_outcome_model_store`, it never calls a mkdir-capable output
+    helper: the root and all three outcome namespaces must already exist as
+    real directories.  Every descriptor is opened with ``O_NOFOLLOW`` and is
+    held for the complete operation, so a later replacement of the path cannot
+    redirect reads to a different tree.
+    """
+
+    root_path = Path(os.path.abspath(root))
+    try:
+        if root_path.is_symlink():
+            raise OutcomeModelStoreError("refusing symlink model-store root")
+        if not root_path.exists():
+            raise OutcomeModelStoreError("model-store root does not exist")
+    except OSError as exc:
+        raise OutcomeModelStoreError("cannot inspect model-store root") from exc
+
+    with ExitStack() as stack:
+        try:
+            root_fd = secure_fs.open_directory_chain(root_path)
+            stack.callback(os.close, root_fd)
+            child_fds: dict[str, int] = {}
+            for name in (RECORDS_DIR, STATES_DIR, STAGING_DIR):
+                child_fd = secure_fs.open_child_directory(root_fd, name)
+                child_fds[name] = child_fd
+                stack.callback(os.close, child_fd)
+            identities = (secure_fs.directory_identity(root_fd),) + tuple(
+                secure_fs.directory_identity(child_fds[name])
+                for name in (RECORDS_DIR, STATES_DIR, STAGING_DIR)
+            )
+            reader = PinnedOutcomeModelStoreReader(
+                root_fd,
+                child_fds[RECORDS_DIR],
+                child_fds[STATES_DIR],
+                child_fds[STAGING_DIR],
+                root_path,
+                identities,
+                _token=_STORE_TOKEN,
+            )
+            reader.recheck()
+            yield PinnedOutcomeModelStore(reader, _token=_STORE_TOKEN)
+        except (OSError, TypeError, ValueError, secure_fs.SecureFilesystemError) as exc:
+            raise OutcomeModelStoreError(
+                "cannot securely open existing model-store namespaces"
+            ) from exc
 
 
 def _record_name(owner_id: str) -> str:
@@ -1109,6 +1160,7 @@ __all__ = [
     "PinnedOutcomeModelStoreReader",
     "load_outcome_model_artifact_at",
     "load_outcome_model_manifest_at",
+    "open_existing_outcome_model_store",
     "open_outcome_model_store",
     "scan_outcome_model_inventory_at",
     "snapshot_outcome_model_store_identities_at",

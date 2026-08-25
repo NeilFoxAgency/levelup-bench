@@ -106,7 +106,7 @@ def _patch_complete(monkeypatch: pytest.MonkeyPatch, snapshots: list[object]) ->
     def open_store(_root):
         yield fake_store
 
-    monkeypatch.setattr(authority, "open_outcome_model_store", open_store)
+    monkeypatch.setattr(authority, "open_existing_outcome_model_store", open_store)
     monkeypatch.setattr(authority, "_reader", lambda value: value)
     monkeypatch.setattr(
         authority,
@@ -169,7 +169,7 @@ def test_authority_rejects_partial_owner_plan_before_opening_store(
         opened = True
         yield _FakeStore()
 
-    monkeypatch.setattr(authority, "open_outcome_model_store", open_store)
+    monkeypatch.setattr(authority, "open_existing_outcome_model_store", open_store)
     with pytest.raises(authority.OutcomeDiagnosticModelAuthorityError, match="240 owners"):
         authority.build_outcome_model_artifact_authority_from_store(
             "models", _plan(239), _snapshot(), {"3" * 64: _evidence()},

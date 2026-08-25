@@ -30,7 +30,7 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_store import
     PinnedOutcomeModelStore,
     PinnedOutcomeModelStoreReader,
     load_outcome_model_artifact_at,
-    open_outcome_model_store,
+    open_existing_outcome_model_store,
     scan_outcome_model_inventory_at,
 )
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
@@ -209,7 +209,7 @@ def build_outcome_model_artifact_authority_from_store(
         raise OutcomeDiagnosticModelAuthorityError("training evidence values are not typed")
 
     try:
-        with open_outcome_model_store(store_root) as store:
+        with open_existing_outcome_model_store(store_root) as store:
             reader = _reader(store)
             reader.recheck()
             initial_identities = _store_identity_snapshot(reader, expected_owner_ids)
