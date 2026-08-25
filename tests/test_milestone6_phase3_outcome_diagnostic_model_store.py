@@ -338,3 +338,87 @@ def test_inventory_rejects_structurally_complete_store_without_semantic_authorit
                 preparation_git_commit_sha="c" * 40,
                 preparation_provenance_sha256="d" * 64,
             )
+
+
+def _materialize_identity_snapshot_store(tmp_path: Path):
+    manifest, owners = _synthetic_manifest()
+    root = tmp_path / "identity-models"
+    with store.open_outcome_model_store(root) as pinned:
+        reader = pinned.reader
+        store._write_new(
+            reader.root_fd,
+            store.MANIFEST_NAME,
+            store._canonical(manifest),
+            reader.staging_fd,
+        )
+        for metadata_name in store.ROOT_METADATA_FILES:
+            store._write_new(reader.root_fd, metadata_name, b"{}\n", reader.staging_fd)
+        for owner in owners:
+            store._write_new(reader.records_fd, f"{owner}.json", b"same bytes\n", reader.staging_fd)
+            os.mkdir(owner, dir_fd=reader.states_fd)
+            state_fd = os.open(owner, os.O_RDONLY | os.O_DIRECTORY, dir_fd=reader.states_fd)
+            try:
+                os.mkdir(store.TENSORS_DIR, dir_fd=state_fd)
+                body = {
+                    "schema_version": store.SCHEMA_VERSION,
+                    "index_id": "0" * 64,
+                    "owner_id": owner,
+                    "record_id": "1" * 64,
+                    "model_state_sha256": "2" * 64,
+                    "tensors": [],
+                }
+                body["index_id"] = _sha(
+                    {key: value for key, value in body.items() if key != "index_id"}
+                )
+                store._write_new(
+                    state_fd,
+                    store.STATE_MANIFEST_NAME,
+                    store.canonical_json_bytes(body) + b"\n",
+                    reader.staging_fd,
+                )
+            finally:
+                os.close(state_fd)
+        first = store.snapshot_outcome_model_store_identities_at(reader, owners)
+    return root, owners, first
+
+
+def test_identity_snapshot_captures_complete_store_and_rejects_same_byte_record_replacement(
+    tmp_path: Path,
+):
+    root, owners, first = _materialize_identity_snapshot_store(tmp_path)
+    assert first.root_metadata_file_identities == tuple(
+        (name, first.root_metadata_file_identities[index][1])
+        for index, name in enumerate(store.ROOT_METADATA_FILES)
+    )
+    assert len(first.record_file_identities) == 240
+    assert len(first.state_identities) == 240
+    assert all(not item.tensor_file_identities for item in first.state_identities)
+    with store.open_outcome_model_store(root) as pinned:
+        record_path = root / store.RECORDS_DIR / f"{owners[0]}.json"
+        replacement = tmp_path / "same-record.json"
+        replacement.write_bytes(record_path.read_bytes())
+        os.replace(replacement, record_path)
+        second = store.snapshot_outcome_model_store_identities_at(pinned.reader, owners)
+        assert second != first
+
+
+def test_identity_snapshot_rejects_same_byte_owner_directory_replacement(tmp_path: Path):
+    root, owners, _first = _materialize_identity_snapshot_store(tmp_path)
+    owner = owners[0]
+    with store.open_outcome_model_store(root) as pinned:
+        reader = pinned.reader
+        replacement = tmp_path / "replaced-owner"
+        os.rename(owner, replacement, src_dir_fd=reader.states_fd)
+        os.mkdir(owner, dir_fd=reader.states_fd)
+        replacement_fd = os.open(replacement, os.O_RDONLY | os.O_DIRECTORY)
+        owner_fd = os.open(owner, os.O_RDONLY | os.O_DIRECTORY, dir_fd=reader.states_fd)
+        try:
+            os.mkdir(store.TENSORS_DIR, dir_fd=owner_fd)
+            state_bytes = (replacement / store.STATE_MANIFEST_NAME).read_bytes()
+            store._write_new(owner_fd, store.STATE_MANIFEST_NAME, state_bytes, reader.staging_fd)
+        finally:
+            os.close(replacement_fd)
+            os.close(owner_fd)
+        os.rename(replacement, tmp_path / "replaced-owner-backup")
+        second = store.snapshot_outcome_model_store_identities_at(reader, owners)
+        assert second != _first

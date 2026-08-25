@@ -20,7 +20,21 @@ from typing import Iterator, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, model_validator
 
-from levelup.experiments.milestone6_phase3_model_artifacts import open_phase3_model_output
+from levelup.experiments.milestone6_phase3_model_artifacts import (
+    ARTIFACTS_DIR as PHASE3_ARTIFACTS_DIR,
+)
+from levelup.experiments.milestone6_phase3_model_artifacts import (
+    COSTS_DIR as PHASE3_COSTS_DIR,
+)
+from levelup.experiments.milestone6_phase3_model_artifacts import (
+    KEYS_DIR as PHASE3_KEYS_DIR,
+)
+from levelup.experiments.milestone6_phase3_model_artifacts import (
+    STAGING_DIR as PHASE3_STAGING_DIR,
+)
+from levelup.experiments.milestone6_phase3_model_artifacts import (
+    open_phase3_model_output,
+)
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts import (
     AuthorizedOutcomeModelArtifact,
     OutcomeDiagnosticModelArtifactError,
@@ -50,6 +64,10 @@ STATES_DIR = "states"
 STAGING_DIR = "staging"
 STATE_MANIFEST_NAME = "state.json"
 TENSORS_DIR = "tensors"
+ROOT_METADATA_FILES = (
+    "preparation-progress.json",
+    "outcome-model-preparation-provenance.json",
+)
 HEX64 = r"^[0-9a-f]{64}$"
 _STORE_TOKEN = object()
 
@@ -267,6 +285,39 @@ class OutcomeModelStoreManifest(BaseModel):
         return self
 
 
+@dataclass(frozen=True, slots=True)
+class OutcomeModelStateIdentitySnapshot:
+    """Descriptor identities for one owner's complete state tree."""
+
+    owner_id: str
+    state_directory_identity: tuple[int, int]
+    manifest_identity: tuple[int, int, int, int, int, int]
+    tensors_directory_identity: tuple[int, int]
+    tensor_file_identities: tuple[tuple[str, tuple[int, int, int, int, int, int]], ...]
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeModelStoreIdentitySnapshot:
+    """Immutable identity snapshot of a complete, descriptor-pinned model store.
+
+    Every identity is collected through the descriptors held by a
+    :class:`PinnedOutcomeModelStoreReader`.  Comparing two snapshots therefore
+    detects same-byte replacement of any manifest, record, state directory,
+    state manifest, tensor directory, or tensor file.
+    """
+
+    root_identity: tuple[int, int]
+    records_identity: tuple[int, int]
+    states_identity: tuple[int, int]
+    staging_identity: tuple[int, int]
+    manifest_identity: tuple[int, int, int, int, int, int]
+    root_metadata_file_identities: tuple[
+        tuple[str, tuple[int, int, int, int, int, int]], ...
+    ]
+    record_file_identities: tuple[tuple[str, tuple[int, int, int, int, int, int]], ...]
+    state_identities: tuple[OutcomeModelStateIdentitySnapshot, ...]
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class PinnedOutcomeModelStoreReader:
     root_fd: int
@@ -445,6 +496,247 @@ def _load_manifest(reader: PinnedOutcomeModelStoreReader) -> OutcomeModelStoreMa
         return OutcomeModelStoreManifest.model_validate(value)
     except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
         raise OutcomeModelStoreError("model-store manifest is not canonical") from exc
+
+
+def _reader_for_identity_snapshot(
+    value: PinnedOutcomeModelStoreReader | PinnedOutcomeModelStore,
+) -> PinnedOutcomeModelStoreReader:
+    """Validate only held descriptors, deliberately never reopening ``root_path``."""
+
+    if type(value) is PinnedOutcomeModelStore:
+        if getattr(value, "_token", None) is not _STORE_TOKEN:
+            raise OutcomeModelStoreError("model-store authority is invalid")
+        reader = value.reader
+    elif type(value) is PinnedOutcomeModelStoreReader:
+        reader = value
+    else:
+        raise OutcomeModelStoreError("canonical pinned model-store reader is required")
+    if getattr(reader, "_token", None) is not _STORE_TOKEN:
+        raise OutcomeModelStoreError("model-store reader authority is invalid")
+    try:
+        held = tuple(
+            secure_fs.directory_identity(fd)
+            for fd in (reader.root_fd, reader.records_fd, reader.states_fd, reader.staging_fd)
+        )
+    except secure_fs.SecureFilesystemError as exc:
+        raise OutcomeModelStoreError("held model-store descriptors changed") from exc
+    if held != reader.identities:
+        raise OutcomeModelStoreError("held model-store descriptors changed")
+    return reader
+
+
+def _stable_identity_at(directory_fd: int, name: str) -> tuple[int, int, int, int, int, int]:
+    """Return one stable regular-file identity relative to a held descriptor."""
+
+    try:
+        with secure_fs.open_regular_file_at(directory_fd, name) as file_fd:
+            before = _identity(os.fstat(file_fd))
+            path_before = _identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False))
+            after = _identity(os.fstat(file_fd))
+            path_after = _identity(os.stat(name, dir_fd=directory_fd, follow_symlinks=False))
+            if before != path_before or before != after or after != path_after:
+                raise OutcomeModelStoreError("model-store file identity changed")
+            return before
+    except OutcomeModelStoreError:
+        raise
+    except (OSError, secure_fs.SecureFilesystemError) as exc:
+        raise OutcomeModelStoreError(f"model-store file is missing or unsafe: {name}") from exc
+
+
+def _directory_shape_at(
+    directory_fd: int,
+    expected: Mapping[str, tuple[bool, bool]],
+    *,
+    message: str,
+) -> None:
+    """Require an exact descriptor-relative directory shape.
+
+    The booleans describe ``(is_regular_file, is_directory)``.  Symlinks are
+    always rejected explicitly, even when their target has the expected shape.
+    """
+
+    try:
+        observed: dict[str, tuple[bool, bool, bool]] = {}
+        with os.scandir(directory_fd) as iterator:
+            for entry in iterator:
+                observed[entry.name] = (
+                    entry.is_symlink(),
+                    entry.is_file(follow_symlinks=False),
+                    entry.is_dir(follow_symlinks=False),
+                )
+    except OSError as exc:
+        raise OutcomeModelStoreError(message) from exc
+    expected_shape = {
+        name: (False, is_file, is_directory)
+        for name, (is_file, is_directory) in expected.items()
+    }
+    if observed != expected_shape:
+        raise OutcomeModelStoreError(message)
+
+
+def snapshot_outcome_model_store_identities_at(
+    reader_or_store: PinnedOutcomeModelStoreReader | PinnedOutcomeModelStore,
+    expected_owner_ids: tuple[str, ...] | list[str] | set[str],
+    *,
+    required_root_files: tuple[str, ...] = ROOT_METADATA_FILES,
+) -> OutcomeModelStoreIdentitySnapshot:
+    """Capture a complete descriptor-relative identity snapshot.
+
+    This is intentionally an identity/shape operation, not a semantic model
+    authorization operation.  It requires the exact 240-owner universe,
+    canonical no-symlink inventory, and an empty staging namespace.  It never
+    reopens ``reader.root_path``; every descendant is resolved from the held
+    root/records/states/staging descriptors.
+    """
+
+    reader = _reader_for_identity_snapshot(reader_or_store)
+    try:
+        expected = tuple(sorted(expected_owner_ids))
+    except (TypeError, ValueError) as exc:
+        raise OutcomeModelStoreError("model-store owner universe is invalid") from exc
+    if len(expected) != EXPECTED_MODEL_OWNERS or len(set(expected)) != EXPECTED_MODEL_OWNERS:
+        raise OutcomeModelStoreError("identity snapshot requires exact 240-owner authority")
+    try:
+        for owner_id in expected:
+            _record_name(owner_id)
+    except OutcomeModelStoreError as exc:
+        raise OutcomeModelStoreError("identity snapshot owner universe is not canonical") from exc
+
+    try:
+        required_root_files = tuple(required_root_files)
+    except (TypeError, ValueError) as exc:
+        raise OutcomeModelStoreError("required root metadata files are invalid") from exc
+    if any(
+        not isinstance(name, str)
+        or name not in ROOT_METADATA_FILES
+        or name in {MANIFEST_NAME, RECORDS_DIR, STATES_DIR, STAGING_DIR}
+        for name in required_root_files
+    ) or len(set(required_root_files)) != len(required_root_files):
+        raise OutcomeModelStoreError("required root metadata files are invalid")
+    try:
+        with os.scandir(reader.root_fd) as iterator:
+            root_entries = {
+                entry.name: (
+                    entry.is_symlink(),
+                    entry.is_file(follow_symlinks=False),
+                    entry.is_dir(follow_symlinks=False),
+                )
+                for entry in iterator
+            }
+    except OSError as exc:
+        raise OutcomeModelStoreError("model-store root inventory is unreadable") from exc
+    expected_root_entries = {
+        MANIFEST_NAME: (False, True, False),
+        RECORDS_DIR: (False, False, True),
+        STATES_DIR: (False, False, True),
+        STAGING_DIR: (False, False, True),
+        PHASE3_KEYS_DIR: (False, False, True),
+        PHASE3_COSTS_DIR: (False, False, True),
+        PHASE3_ARTIFACTS_DIR: (False, False, True),
+        PHASE3_STAGING_DIR: (False, False, True),
+    }
+    for name in ROOT_METADATA_FILES:
+        observed = root_entries.get(name)
+        if observed is not None:
+            expected_root_entries[name] = (False, True, False)
+    if root_entries != expected_root_entries or any(
+        name not in root_entries for name in required_root_files
+    ):
+        raise OutcomeModelStoreError("model-store root inventory differs")
+    _directory_shape_at(
+        reader.staging_fd,
+        {},
+        message="model-store staging namespace is not empty",
+    )
+    _directory_shape_at(
+        reader.records_fd,
+        {f"{owner_id}.json": (True, False) for owner_id in expected},
+        message="model-store record inventory differs",
+    )
+    _directory_shape_at(
+        reader.states_fd,
+        {owner_id: (False, True) for owner_id in expected},
+        message="model-store state inventory differs",
+    )
+
+    manifest_raw = _read_stable(reader.root_fd, MANIFEST_NAME)
+    try:
+        value = json.loads(manifest_raw)
+        if canonical_json_bytes(value) + b"\n" != manifest_raw:
+            raise ValueError("non-canonical manifest bytes")
+        manifest = OutcomeModelStoreManifest.model_validate(value)
+    except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+        raise OutcomeModelStoreError("model-store manifest is invalid") from exc
+    if tuple(entry.owner_id for entry in manifest.entries) != expected:
+        raise OutcomeModelStoreError("model-store manifest owner inventory differs")
+    manifest_identity = _stable_identity_at(reader.root_fd, MANIFEST_NAME)
+    root_metadata_file_identities = tuple(
+        (name, _stable_identity_at(reader.root_fd, name))
+        for name in ROOT_METADATA_FILES
+        if name in root_entries
+    )
+
+    record_file_identities = tuple(
+        (f"{owner_id}.json", _stable_identity_at(reader.records_fd, f"{owner_id}.json"))
+        for owner_id in expected
+    )
+    state_identities: list[OutcomeModelStateIdentitySnapshot] = []
+    for owner_id in expected:
+        state_fd = secure_fs.open_child_directory(reader.states_fd, owner_id)
+        try:
+            _directory_shape_at(
+                state_fd,
+                {STATE_MANIFEST_NAME: (True, False), TENSORS_DIR: (False, True)},
+                message="model state directory shape differs",
+            )
+            state_raw = _read_stable(state_fd, STATE_MANIFEST_NAME)
+            try:
+                value = json.loads(state_raw)
+                if canonical_json_bytes(value) + b"\n" != state_raw:
+                    raise ValueError("non-canonical state index bytes")
+                index = OutcomeModelStateIndex.model_validate(value)
+            except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+                raise OutcomeModelStoreError("model state index is invalid") from exc
+            if index.owner_id != owner_id:
+                raise OutcomeModelStoreError("model state index owner differs from directory")
+            tensors_fd = secure_fs.open_child_directory(state_fd, TENSORS_DIR)
+            try:
+                expected_tensors = tuple(item.filename for item in index.tensors)
+                _directory_shape_at(
+                    tensors_fd,
+                    {name: (True, False) for name in expected_tensors},
+                    message="model state tensor inventory differs",
+                )
+                tensor_file_identities = tuple(
+                    (name, _stable_identity_at(tensors_fd, name)) for name in expected_tensors
+                )
+                tensors_identity = secure_fs.directory_identity(tensors_fd)
+            finally:
+                os.close(tensors_fd)
+            state_identities.append(
+                OutcomeModelStateIdentitySnapshot(
+                    owner_id=owner_id,
+                    state_directory_identity=secure_fs.directory_identity(state_fd),
+                    manifest_identity=_stable_identity_at(state_fd, STATE_MANIFEST_NAME),
+                    tensors_directory_identity=tensors_identity,
+                    tensor_file_identities=tensor_file_identities,
+                )
+            )
+        except (OSError, secure_fs.SecureFilesystemError) as exc:
+            raise OutcomeModelStoreError("model state identity inventory is unsafe") from exc
+        finally:
+            os.close(state_fd)
+
+    return OutcomeModelStoreIdentitySnapshot(
+        root_identity=reader.identities[0],
+        records_identity=reader.identities[1],
+        states_identity=reader.identities[2],
+        staging_identity=reader.identities[3],
+        manifest_identity=manifest_identity,
+        root_metadata_file_identities=root_metadata_file_identities,
+        record_file_identities=record_file_identities,
+        state_identities=tuple(state_identities),
+    )
 
 
 def _state_index_and_payload(
@@ -804,7 +1096,10 @@ def scan_outcome_model_inventory_at(
 
 __all__ = [
     "MANIFEST_NAME",
+    "ROOT_METADATA_FILES",
+    "OutcomeModelStateIdentitySnapshot",
     "OutcomeModelStateIndex",
+    "OutcomeModelStoreIdentitySnapshot",
     "OutcomeModelStoreEntry",
     "OutcomeModelStoreError",
     "OutcomeModelStoreManifest",
@@ -814,5 +1109,6 @@ __all__ = [
     "load_outcome_model_manifest_at",
     "open_outcome_model_store",
     "scan_outcome_model_inventory_at",
+    "snapshot_outcome_model_store_identities_at",
     "write_outcome_model_artifact",
 ]
