@@ -682,8 +682,9 @@ def snapshot_outcome_model_store_identities_at(
     )
     state_identities: list[OutcomeModelStateIdentitySnapshot] = []
     for owner_id in expected:
-        state_fd = secure_fs.open_child_directory(reader.states_fd, owner_id)
+        state_fd: int | None = None
         try:
+            state_fd = secure_fs.open_child_directory(reader.states_fd, owner_id)
             _directory_shape_at(
                 state_fd,
                 {STATE_MANIFEST_NAME: (True, False), TENSORS_DIR: (False, True)},
@@ -725,7 +726,8 @@ def snapshot_outcome_model_store_identities_at(
         except (OSError, secure_fs.SecureFilesystemError) as exc:
             raise OutcomeModelStoreError("model state identity inventory is unsafe") from exc
         finally:
-            os.close(state_fd)
+            if state_fd is not None:
+                os.close(state_fd)
 
     return OutcomeModelStoreIdentitySnapshot(
         root_identity=reader.identities[0],

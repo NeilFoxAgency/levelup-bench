@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 import levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts as artifacts
+import levelup.experiments.milestone6_phase3_outcome_diagnostic_model_authority as model_authority
+import levelup.experiments.milestone6_phase3_outcome_diagnostic_model_store as model_store
 import levelup.experiments.milestone6_phase3_outcome_diagnostic_plan as plan_module
 from levelup.experiments.milestone6_phase3_evidence import (
     load_committed_phase3_evidence_lock_bytes,
@@ -325,6 +327,42 @@ def test_real_canonical_protocol_and_plan_pass_the_artifact_authority_gate() -> 
     assert canonical == raw_plan
     assert fresh.content == snapshot.content
     assert canonical.protocol_sha256 == snapshot.sha256
+
+
+def test_complete_pinned_store_round_trip_builds_the_same_compact_authority(
+    canonical_inputs, complete_artifacts, monkeypatch, tmp_path
+) -> None:
+    snapshot, _plan, validated = canonical_inputs
+    records, payloads, evidence, expected_authority = complete_artifacts
+    store_root = tmp_path / "complete-outcome-model-store"
+    with model_store.open_outcome_model_store(store_root) as pinned:
+        for record in records:
+            model_store.write_outcome_model_artifact(
+                store_root,
+                record,
+                payloads[record.key.owner_id],
+                pinned_output=pinned,
+            )
+        for name in model_store.ROOT_METADATA_FILES:
+            model_store._write_new(
+                pinned.reader.root_fd,
+                name,
+                b"{}\n",
+                pinned.reader.staging_fd,
+            )
+    monkeypatch.setattr(
+        model_authority,
+        "_validate_persisted_progress_and_provenance",
+        lambda *args, **kwargs: None,
+    )
+    observed = model_authority.build_outcome_model_artifact_authority_from_store(
+        store_root,
+        validated,
+        snapshot,
+        evidence,
+        **_prep_kwargs(),
+    )
+    assert observed == expected_authority
 
 
 @pytest.mark.parametrize("plan_id", ("", "g" * 64, "a" * 63, "A" * 64))
