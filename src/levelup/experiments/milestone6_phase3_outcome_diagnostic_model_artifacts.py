@@ -54,6 +54,7 @@ MODEL_SCHEMA_VERSION = "milestone6.phase3.outcome-diagnostic-model-artifact.v1"
 AUTHORITY_SCHEMA_VERSION = "milestone6.phase3.outcome-diagnostic-model-authority.v1"
 ARCHITECTURE_ID = "StateConditionedScorer"
 INPUT_WIDTH = 54
+EXPECTED_TRAINING_TASKS_PER_VIEW = 40
 STATE_SCHEMA: tuple[tuple[str, tuple[int, ...], str], ...] = (
     ("network.0.bias", (48,), "float32"),
     ("network.0.weight", (48, 54), "float32"),
@@ -398,8 +399,9 @@ class OutcomeDiagnosticModelArtifactKey(BaseModel):
         ):
             raise ValueError("diagnostic optimizer/device policy drifted")
         if (
-            len(self.ordered_training_task_ids) != 8
-            or len(set(self.ordered_training_task_ids)) != 8
+            len(self.ordered_training_task_ids) != EXPECTED_TRAINING_TASKS_PER_VIEW
+            or len(set(self.ordered_training_task_ids))
+            != EXPECTED_TRAINING_TASKS_PER_VIEW
         ):
             raise ValueError("diagnostic training task order is incomplete")
         schema = tuple((row.name, tuple(row.shape), row.dtype) for row in self.state_schema)
@@ -683,8 +685,8 @@ def _evidence(
             tasks = row.get("ordered_training_task_ids")
             if (
                 not isinstance(tasks, list)
-                or len(tasks) != 8
-                or len(set(tasks)) != 8
+                or len(tasks) != EXPECTED_TRAINING_TASKS_PER_VIEW
+                or len(set(tasks)) != EXPECTED_TRAINING_TASKS_PER_VIEW
                 or any(not isinstance(task, str) or not task for task in tasks)
             ):
                 raise OutcomeDiagnosticModelArtifactError(

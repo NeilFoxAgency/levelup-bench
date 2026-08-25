@@ -9,6 +9,9 @@ import pytest
 
 import levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts as artifacts
 import levelup.experiments.milestone6_phase3_outcome_diagnostic_plan as plan_module
+from levelup.experiments.milestone6_phase3_evidence import (
+    load_committed_phase3_evidence_lock_bytes,
+)
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts import (
     OutcomeDiagnosticModelArtifactAuthority,
     OutcomeDiagnosticModelArtifactError,
@@ -119,7 +122,7 @@ def _full_plan(snapshot: OutcomeDiagnosticProtocolSnapshot) -> OutcomePlan:
     units = []
     for family_index, family in enumerate(FAMILIES):
         for replicate in range(5):
-            training_tasks = tuple(f"train-{family}-{replicate}-{index}" for index in range(8))
+            training_tasks = tuple(f"train-{family}-{replicate}-{index}" for index in range(40))
             evidence.append(
                 canonical_json_bytes(
                     {
@@ -453,6 +456,61 @@ def test_evidence_schema_types_fail_closed(canonical_inputs, change) -> None:
         )
 
 
+def test_evidence_accepts_frozen_declared_forty_task_order(canonical_inputs) -> None:
+    """The committed development evidence declares forty ordered training tasks.
+
+    This is intentionally a direct regression for the evidence-boundary helper:
+    the frozen Phase 3 evidence row is authoritative for task order and must not
+    be rejected merely because an older synthetic fixture used eight tasks.
+    """
+
+    snapshot, plan, _validated = canonical_inputs
+    lock = json.loads(load_committed_phase3_evidence_lock_bytes())
+    declared = next(
+        row
+        for row in lock["evidence_artifacts"]
+        if row["family_id"] == "plain" and row["replicate"] == 0
+    )
+    evidence_row = {
+        "family_id": declared["family_id"],
+        "replicate": declared["replicate"],
+        "payload_sha256": declared["payload_sha256"],
+        "payload_bytes": declared["payload_bytes"],
+        "ordered_training_task_ids": declared["ordered_training_task_ids"],
+    }
+    expanded = replace(
+        plan,
+        evidence_lineage_rows=(
+            canonical_json_bytes(evidence_row),
+            *plan.evidence_lineage_rows[1:],
+        ),
+    )
+    del snapshot
+    _row_sha, payload_sha, payload_bytes, task_ids = artifacts._evidence(
+        expanded, "plain", 0
+    )
+    assert len(task_ids) == 40
+    assert task_ids == tuple(declared["ordered_training_task_ids"])
+    assert payload_sha == declared["payload_sha256"]
+    assert payload_bytes == declared["payload_bytes"]
+
+
+@pytest.mark.parametrize("task_ids", ([f"short-{index}" for index in range(8)], ["same"] * 40))
+def test_evidence_rejects_incomplete_task_universes(canonical_inputs, task_ids) -> None:
+    _snapshot_value, plan, _validated = canonical_inputs
+    first = json.loads(plan.evidence_lineage_rows[0])
+    first["ordered_training_task_ids"] = task_ids
+    malformed = replace(
+        plan,
+        evidence_lineage_rows=(
+            canonical_json_bytes(first),
+            *plan.evidence_lineage_rows[1:],
+        ),
+    )
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="evidence"):
+        artifacts._evidence(malformed, "plain", 0)
+
+
 def test_semantic_validation_rejects_substituted_state(
     canonical_inputs, complete_artifacts
 ) -> None:
@@ -505,6 +563,11 @@ def test_semantic_validation_rejects_rehashed_seed_mask_owner_and_evidence(
         {"model_seed": original.key.model_seed + 1},
         {"feature_mask_sha256": "f" * 64},
         {"evidence_payload_sha256": "e" * 64},
+        {
+            "ordered_training_task_ids": tuple(
+                reversed(original.key.ordered_training_task_ids)
+            )
+        },
         {"owner_id": plan.model_owners[1].owner_id},
         {"condition_id": CONDITIONS[1]},
     )
