@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Any, Literal, Mapping, Sequence
 
@@ -47,6 +48,8 @@ from levelup.experiments.runner.training_data_artifacts import (
 )
 
 HEX64 = r"^[0-9a-f]{64}$"
+PREPARATION_COMMIT = r"^[0-9a-f]{40,64}$"
+OUTCOME_ARTIFACT_STORE_PREFIX = "phase3-outcome-diagnostic-models-"
 MODEL_SCHEMA_VERSION = "milestone6.phase3.outcome-diagnostic-model-artifact.v1"
 AUTHORITY_SCHEMA_VERSION = "milestone6.phase3.outcome-diagnostic-model-authority.v1"
 ARCHITECTURE_ID = "StateConditionedScorer"
@@ -63,6 +66,26 @@ STATE_SCHEMA: tuple[tuple[str, tuple[int, ...], str], ...] = (
 
 class OutcomeDiagnosticModelArtifactError(ValueError):
     """Raised when a diagnostic model identity is malformed or substituted."""
+
+
+def _require_preparation_identity(
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
+) -> tuple[str, str]:
+    """Validate caller-supplied preparation provenance before deriving identities."""
+
+    if (
+        not isinstance(preparation_git_commit_sha, str)
+        or not re.fullmatch(PREPARATION_COMMIT, preparation_git_commit_sha)
+        or set(preparation_git_commit_sha) == {"0"}
+        or not isinstance(preparation_provenance_sha256, str)
+        or not re.fullmatch(HEX64, preparation_provenance_sha256)
+        or set(preparation_provenance_sha256) == {"0"}
+    ):
+        raise OutcomeDiagnosticModelArtifactError(
+            "nonzero preparation commit and provenance identities are required"
+        )
+    return preparation_git_commit_sha, preparation_provenance_sha256
 
 
 def _digest(value: Any) -> str:
@@ -83,6 +106,14 @@ def _jsonable(value: Any) -> Any:
 
 def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def outcome_artifact_store_id(plan_id: str) -> str:
+    if not isinstance(plan_id, str) or not re.fullmatch(HEX64, plan_id):
+        raise OutcomeDiagnosticModelArtifactError(
+            "diagnostic artifact store derivation requires a canonical plan ID"
+        )
+    return f"{OUTCOME_ARTIFACT_STORE_PREFIX}{plan_id[:12]}"
 
 
 def _require_snapshot(
@@ -335,6 +366,8 @@ class OutcomeDiagnosticModelArtifactKey(BaseModel):
     state_schema: tuple[OutcomeTensorSchema, ...]
     model_state_sha256: str = Field(pattern=HEX64)
     training_accounting: OutcomeTrainingAccounting
+    preparation_git_commit_sha: str = Field(pattern=PREPARATION_COMMIT)
+    preparation_provenance_sha256: str = Field(pattern=HEX64)
 
     @property
     def expected_key_id(self) -> str:
@@ -342,6 +375,10 @@ class OutcomeDiagnosticModelArtifactKey(BaseModel):
 
     @model_validator(mode="after")
     def key_is_exact(self) -> "OutcomeDiagnosticModelArtifactKey":
+        if set(self.preparation_git_commit_sha) == {"0"}:
+            raise ValueError("preparation commit provenance is required")
+        if set(self.preparation_provenance_sha256) == {"0"}:
+            raise ValueError("preparation provenance identity is required")
         if self.input_width != INPUT_WIDTH or self.trainable_parameters != EXPECTED_PARAMETER_COUNT:
             raise ValueError("diagnostic architecture capacity drifted")
         if (
@@ -469,6 +506,9 @@ class OutcomeDiagnosticModelArtifactAuthority(BaseModel):
     protocol_sha256: str = Field(pattern=HEX64)
     protocol_self_sha256: str = Field(pattern=HEX64)
     protocol_file_sha256: str = Field(pattern=HEX64)
+    preparation_git_commit_sha: str = Field(pattern=PREPARATION_COMMIT)
+    preparation_provenance_sha256: str = Field(pattern=HEX64)
+    artifact_store_id: str = Field(min_length=1)
     condition_ids: tuple[Literal[CONDITIONS[0]], Literal[CONDITIONS[1]]]
     views: tuple[OutcomeDiagnosticViewRow, ...]
     evidence: tuple[OutcomeDiagnosticEvidenceRow, ...]
@@ -480,6 +520,17 @@ class OutcomeDiagnosticModelArtifactAuthority(BaseModel):
 
     @model_validator(mode="after")
     def authority_is_exact(self) -> "OutcomeDiagnosticModelArtifactAuthority":
+        if set(self.preparation_git_commit_sha) == {"0"}:
+            raise ValueError("preparation commit provenance is required")
+        if set(self.preparation_provenance_sha256) == {"0"}:
+            raise ValueError("preparation provenance identity is required")
+        if (
+            self.artifact_store_id in {".", ".."}
+            or "/" in self.artifact_store_id
+            or "\\" in self.artifact_store_id
+            or not self.artifact_store_id.startswith(OUTCOME_ARTIFACT_STORE_PREFIX)
+        ):
+            raise ValueError("diagnostic artifact store identity is unsafe")
         if not self.development_only or self.final or self.final_family_access:
             raise ValueError("diagnostic model authority permits final-family access")
         if self.condition_ids != CONDITIONS:
@@ -706,9 +757,14 @@ def _build_outcome_model_artifact_key_canonical(
     training_evidence: PinnedOutcomeTrainingEvidence,
     device: Literal["cpu"],
     training_accounting: OutcomeTrainingAccounting,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
 ) -> OutcomeDiagnosticModelArtifactKey:
     """Build after the public caller has validated immutable authorities."""
 
+    preparation_git_commit_sha, preparation_provenance_sha256 = _require_preparation_identity(
+        preparation_git_commit_sha, preparation_provenance_sha256
+    )
     if device != "cpu":
         raise OutcomeDiagnosticModelArtifactError("diagnostic model preparation requires CPU")
     state_schema, model_state_sha256 = inspect_outcome_model_state(state_payload)
@@ -817,6 +873,8 @@ def _build_outcome_model_artifact_key_canonical(
         state_schema=[row.model_dump(mode="json") for row in state_schema],
         model_state_sha256=model_state_sha256,
         training_accounting=training_accounting.model_dump(mode="json"),
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
     )
     # The plan ID is already a canonical SHA identity; never derive a replacement.
     key_data["key_id"] = _digest({key: value for key, value in key_data.items() if key != "key_id"})
@@ -835,6 +893,8 @@ def build_outcome_model_artifact_key(
     training_evidence: PinnedOutcomeTrainingEvidence,
     device: Literal["cpu"],
     training_accounting: OutcomeTrainingAccounting,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
 ) -> OutcomeDiagnosticModelArtifactKey:
     """Construct one key after hashing canonical pinned state bytes."""
 
@@ -847,6 +907,8 @@ def build_outcome_model_artifact_key(
         training_evidence=training_evidence,
         device=device,
         training_accounting=training_accounting,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
     )
 
 
@@ -870,9 +932,18 @@ def build_outcome_model_artifact_record(
 def build_outcome_rp_model_artifact_key(
     plan: ValidatedOutcomePlan,
     snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
     **kwargs: Any,
 ) -> OutcomeRPModelArtifactKey:
-    key = build_outcome_model_artifact_key(plan, snapshot, **kwargs)
+    key = build_outcome_model_artifact_key(
+        plan,
+        snapshot,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
+        **kwargs,
+    )
     try:
         return OutcomeRPModelArtifactKey.model_validate(key.model_dump(mode="json"))
     except (TypeError, ValueError) as exc:
@@ -882,9 +953,18 @@ def build_outcome_rp_model_artifact_key(
 def build_outcome_pec_model_artifact_key(
     plan: ValidatedOutcomePlan,
     snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
     **kwargs: Any,
 ) -> OutcomePECModelArtifactKey:
-    key = build_outcome_model_artifact_key(plan, snapshot, **kwargs)
+    key = build_outcome_model_artifact_key(
+        plan,
+        snapshot,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
+        **kwargs,
+    )
     try:
         return OutcomePECModelArtifactKey.model_validate(key.model_dump(mode="json"))
     except (TypeError, ValueError) as exc:
@@ -911,10 +991,21 @@ def validate_outcome_model_artifact_against_plan(
     training_evidence: PinnedOutcomeTrainingEvidence,
     plan: ValidatedOutcomePlan,
     snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
 ) -> AuthorizedOutcomeModelArtifact:
     canonical_plan, fresh = _require_canonical_inputs(plan, snapshot)
+    preparation_git_commit_sha, preparation_provenance_sha256 = _require_preparation_identity(
+        preparation_git_commit_sha, preparation_provenance_sha256
+    )
     if record.key.plan_id != canonical_plan.plan_id:
         raise OutcomeDiagnosticModelArtifactError("model record plan lineage differs")
+    if (
+        record.key.preparation_git_commit_sha != preparation_git_commit_sha
+        or record.key.preparation_provenance_sha256 != preparation_provenance_sha256
+    ):
+        raise OutcomeDiagnosticModelArtifactError("model record preparation provenance differs")
     expected = _build_outcome_model_artifact_key_canonical(
         canonical_plan,
         fresh,
@@ -923,6 +1014,8 @@ def validate_outcome_model_artifact_against_plan(
         training_evidence=training_evidence,
         device=record.key.device,
         training_accounting=record.key.training_accounting,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
     )
     if record.key != expected:
         raise OutcomeDiagnosticModelArtifactError("model record differs from canonical plan")
@@ -935,8 +1028,14 @@ def build_outcome_model_artifact_authority(
     training_evidence_by_view: Mapping[str, PinnedOutcomeTrainingEvidence],
     plan: ValidatedOutcomePlan,
     snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
 ) -> OutcomeDiagnosticModelArtifactAuthority:
     canonical_plan, snapshot = _require_canonical_inputs(plan, snapshot)
+    preparation_git_commit_sha, preparation_provenance_sha256 = _require_preparation_identity(
+        preparation_git_commit_sha, preparation_provenance_sha256
+    )
     if len(records) != EXPECTED_MODEL_OWNERS:
         raise OutcomeDiagnosticModelArtifactError("model authority requires exactly 240 owners")
     owner_ids = {record.key.owner_id for record in records}
@@ -959,8 +1058,15 @@ def build_outcome_model_artifact_authority(
             training_evidence=training_evidence_by_view[record.key.view_id],
             device=record.key.device,
             training_accounting=record.key.training_accounting,
+            preparation_git_commit_sha=preparation_git_commit_sha,
+            preparation_provenance_sha256=preparation_provenance_sha256,
         )
-        if record.key != expected_key or record.record_id != record.expected_record_id:
+        if (
+            record.key != expected_key
+            or record.record_id != record.expected_record_id
+            or record.key.preparation_git_commit_sha != preparation_git_commit_sha
+            or record.key.preparation_provenance_sha256 != preparation_provenance_sha256
+        ):
             raise OutcomeDiagnosticModelArtifactError(
                 "model record differs from canonical plan and state"
             )
@@ -1028,6 +1134,9 @@ def build_outcome_model_artifact_authority(
         protocol_sha256=canonical_plan.protocol_sha256,
         protocol_self_sha256=str(snapshot.payload["diagnostic_protocol_sha256"]),
         protocol_file_sha256=snapshot.sha256,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
+        artifact_store_id=outcome_artifact_store_id(canonical_plan.plan_id),
         condition_ids=CONDITIONS,
         views=tuple(sorted(views, key=lambda item: item.view_id)),
         evidence=tuple(
@@ -1051,6 +1160,9 @@ def validate_outcome_model_artifact_authority(
     training_evidence_by_view: Mapping[str, PinnedOutcomeTrainingEvidence],
     plan: ValidatedOutcomePlan,
     snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    preparation_git_commit_sha: str,
+    preparation_provenance_sha256: str,
 ) -> None:
     """Revalidate an opaque summary against every typed artifact and the plan.
 
@@ -1064,8 +1176,25 @@ def validate_outcome_model_artifact_authority(
         OutcomeDiagnosticModelArtifactAuthority.model_validate(authority.model_dump(mode="json"))
     except (TypeError, ValueError) as exc:
         raise OutcomeDiagnosticModelArtifactError("model authority is not canonical") from exc
+    preparation_git_commit_sha, preparation_provenance_sha256 = _require_preparation_identity(
+        preparation_git_commit_sha, preparation_provenance_sha256
+    )
+    if (
+        authority.preparation_git_commit_sha != preparation_git_commit_sha
+        or authority.preparation_provenance_sha256 != preparation_provenance_sha256
+    ):
+        raise OutcomeDiagnosticModelArtifactError("model authority preparation provenance differs")
+    canonical_plan, _fresh = _require_canonical_inputs(plan, snapshot)
+    if authority.artifact_store_id != outcome_artifact_store_id(canonical_plan.plan_id):
+        raise OutcomeDiagnosticModelArtifactError("model authority artifact store identity differs")
     expected = build_outcome_model_artifact_authority(
-        records, state_payloads, training_evidence_by_view, plan, snapshot
+        records,
+        state_payloads,
+        training_evidence_by_view,
+        plan,
+        snapshot,
+        preparation_git_commit_sha=preparation_git_commit_sha,
+        preparation_provenance_sha256=preparation_provenance_sha256,
     )
     if authority != expected:
         raise OutcomeDiagnosticModelArtifactError(
@@ -1076,6 +1205,7 @@ def validate_outcome_model_artifact_authority(
 __all__ = [
     "ARCHITECTURE_ID",
     "AUTHORITY_SCHEMA_VERSION",
+    "OUTCOME_ARTIFACT_STORE_PREFIX",
     "MODEL_SCHEMA_VERSION",
     "OutcomeDiagnosticModelArtifactError",
     "OutcomeTensorSchema",
@@ -1107,4 +1237,5 @@ __all__ = [
     "load_outcome_model_artifact_record_bytes",
     "load_outcome_model_artifact_authority_bytes",
     "inspect_outcome_model_state",
+    "outcome_artifact_store_id",
 ]

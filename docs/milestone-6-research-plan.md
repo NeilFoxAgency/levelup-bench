@@ -859,3 +859,12 @@ Store preparation and execution remain forbidden until a later readiness gate bi
 post-freeze git commit, immutable protocol and authority bytes, and descriptor identities; rejects
 symlinked repository and output roots; and revalidates every byte and identity immediately before
 execution.
+
+The preparation-only implementation gate now has a separate model namespace and no execution
+surface. It requires the exact 240-owner plan, all 30 descriptor-read evidence payloads, a clean
+CPU/one-thread commit provenance, provenance-bound model records, and semantic resume validation.
+The driver rechecks the runtime, protocol, repository commit, and stable provenance after the batch
+as well as before it. This permits model preparation only after the implementation commit passes
+local and exact-head CI. It does not authorize candidate generation or outcome execution: those
+remain blocked until all 240 models are complete, a compact model authority is generated and
+committed, and the execution readiness gate binds that authority and its exact store identity.

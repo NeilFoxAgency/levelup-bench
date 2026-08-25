@@ -24,6 +24,7 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts im
     canonical_outcome_model_artifact_authority_bytes,
     canonical_outcome_model_artifact_record_bytes,
     load_outcome_model_artifact_authority_bytes,
+    outcome_artifact_store_id,
     validate_outcome_model_artifact_against_plan,
     validate_outcome_model_artifact_authority,
 )
@@ -51,6 +52,15 @@ TRAINING = (
     ("lr0p01-e180", 0.01, 180),
 )
 TEMPERATURES = ("t0p6", "t0p9", "t1p2")
+PREPARATION_COMMIT = "a" * 40
+PREPARATION_PROVENANCE = "b" * 64
+
+
+def _prep_kwargs() -> dict[str, str]:
+    return {
+        "preparation_git_commit_sha": PREPARATION_COMMIT,
+        "preparation_provenance_sha256": PREPARATION_PROVENANCE,
+    }
 
 
 @pytest.fixture(scope="module")
@@ -265,10 +275,16 @@ def complete_artifacts(canonical_inputs):
                 training_examples=11,
                 serialization_calls=1,
             ),
+            **_prep_kwargs(),
         )
         records.append(build_outcome_model_artifact_record(key))
     authority = build_outcome_model_artifact_authority(
-        records, payloads, training_evidence, validated, snapshot
+        records,
+        payloads,
+        training_evidence,
+        validated,
+        snapshot,
+        **_prep_kwargs(),
     )
     return tuple(records), payloads, training_evidence, authority
 
@@ -308,6 +324,12 @@ def test_real_canonical_protocol_and_plan_pass_the_artifact_authority_gate() -> 
     assert canonical.protocol_sha256 == snapshot.sha256
 
 
+@pytest.mark.parametrize("plan_id", ("", "g" * 64, "a" * 63, "A" * 64))
+def test_artifact_store_derivation_requires_canonical_plan_id(plan_id: str) -> None:
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="plan ID"):
+        outcome_artifact_store_id(plan_id)
+
+
 def test_requires_public_validated_plan_and_fresh_snapshot(canonical_inputs) -> None:
     snapshot, raw_plan, validated = canonical_inputs
     owner = raw_plan.model_owners[0]
@@ -320,6 +342,7 @@ def test_requires_public_validated_plan_and_fresh_snapshot(canonical_inputs) -> 
             training_evidence=_training_evidence(),
             device="cpu",
             training_accounting=_accounting(owner.training_epochs),
+            **_prep_kwargs(),
         )
     forged = replace(snapshot, sha256="f" * 64)
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="raw hash|fresh"):
@@ -331,6 +354,7 @@ def test_requires_public_validated_plan_and_fresh_snapshot(canonical_inputs) -> 
             training_evidence=_training_evidence(),
             device="cpu",
             training_accounting=_accounting(owner.training_epochs),
+            **_prep_kwargs(),
         )
 
 
@@ -346,6 +370,7 @@ def test_state_bytes_schema_and_optimizer_steps_are_recomputed(canonical_inputs)
             training_evidence=_training_evidence(),
             device="cpu",
             training_accounting=_accounting(owner.training_epochs + 1),
+            **_prep_kwargs(),
         )
 
 
@@ -362,6 +387,7 @@ def test_non_cpu_device_is_rejected(canonical_inputs, device) -> None:
             training_evidence=_training_evidence(),
             device=device,
             training_accounting=_accounting(owner.training_epochs),
+            **_prep_kwargs(),
         )
 
 
@@ -382,6 +408,7 @@ def test_tiny_caller_asserted_example_count_is_rejected(canonical_inputs) -> Non
                 training_examples=1,
                 serialization_calls=1,
             ),
+            **_prep_kwargs(),
         )
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="schema"):
         build_outcome_model_artifact_key(
@@ -392,6 +419,7 @@ def test_tiny_caller_asserted_example_count_is_rejected(canonical_inputs) -> Non
             training_evidence=_training_evidence(),
             device="cpu",
             training_accounting=_accounting(owner.training_epochs),
+            **_prep_kwargs(),
         )
 
 
@@ -421,6 +449,7 @@ def test_evidence_schema_types_fail_closed(canonical_inputs, change) -> None:
             training_evidence=_training_evidence(),
             device="cpu",
             training_accounting=_accounting(owner.training_epochs),
+            **_prep_kwargs(),
         )
 
 
@@ -431,8 +460,39 @@ def test_semantic_validation_rejects_substituted_state(
     records, _payloads, evidence, _authority = complete_artifacts
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="differs"):
         validate_outcome_model_artifact_against_plan(
-            records[0], _state(1), evidence[records[0].key.view_id], validated, snapshot
+            records[0],
+            _state(1),
+            evidence[records[0].key.view_id],
+            validated,
+            snapshot,
+            **_prep_kwargs(),
         )
+
+
+def test_preparation_provenance_is_caller_bound_and_nonzero(
+    canonical_inputs, complete_artifacts
+) -> None:
+    snapshot, _plan, validated = canonical_inputs
+    records, payloads, evidence, _authority = complete_artifacts
+    original = records[0]
+    forged = _rehashed_record(
+        original,
+        preparation_git_commit_sha="c" * 40,
+        preparation_provenance_sha256="d" * 64,
+    )
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="provenance"):
+        validate_outcome_model_artifact_against_plan(
+            forged,
+            payloads[original.key.owner_id],
+            evidence[original.key.view_id],
+            validated,
+            snapshot,
+            **_prep_kwargs(),
+        )
+    with pytest.raises(ValueError, match="provenance"):
+        _rehashed_record(original, preparation_git_commit_sha="0" * 40)
+    with pytest.raises(ValueError, match="provenance"):
+        _rehashed_record(original, preparation_provenance_sha256="0" * 64)
 
 
 def test_semantic_validation_rejects_rehashed_seed_mask_owner_and_evidence(
@@ -458,6 +518,7 @@ def test_semantic_validation_rejects_rehashed_seed_mask_owner_and_evidence(
                 evidence[original.key.view_id],
                 validated,
                 snapshot,
+                **_prep_kwargs(),
             )
 
 
@@ -481,7 +542,7 @@ def test_authority_reconstruction_rejects_rehashed_lineage_and_reordering(
     snapshot, _plan, validated = canonical_inputs
     records, payloads, evidence, authority = complete_artifacts
     validate_outcome_model_artifact_authority(
-        authority, records, payloads, evidence, validated, snapshot
+        authority, records, payloads, evidence, validated, snapshot, **_prep_kwargs()
     )
     body = authority.model_dump(mode="json")
     body["plan_parent_commit_sha"] = "c" * 40
@@ -491,7 +552,7 @@ def test_authority_reconstruction_rejects_rehashed_lineage_and_reordering(
     mutated = OutcomeDiagnosticModelArtifactAuthority.model_validate(body)
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="differs"):
         validate_outcome_model_artifact_authority(
-            mutated, records, payloads, evidence, validated, snapshot
+            mutated, records, payloads, evidence, validated, snapshot, **_prep_kwargs()
         )
     reordered = authority.model_dump(mode="json")
     reordered["artifacts"] = list(reversed(reordered["artifacts"]))
@@ -500,6 +561,33 @@ def test_authority_reconstruction_rejects_rehashed_lineage_and_reordering(
     )
     with pytest.raises(ValueError, match="ordered"):
         OutcomeDiagnosticModelArtifactAuthority.model_validate(reordered)
+
+
+def test_authority_binds_provenance_store_and_every_record(
+    canonical_inputs, complete_artifacts
+) -> None:
+    snapshot, _plan, validated = canonical_inputs
+    records, payloads, evidence, authority = complete_artifacts
+    assert authority.preparation_git_commit_sha == PREPARATION_COMMIT
+    assert authority.preparation_provenance_sha256 == PREPARATION_PROVENANCE
+    assert authority.artifact_store_id.startswith("phase3-outcome-diagnostic-models-")
+    mixed = _rehashed_record(records[0], preparation_git_commit_sha="c" * 40)
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="record differs|provenance"):
+        build_outcome_model_artifact_authority(
+            (mixed, *records[1:]),
+            payloads,
+            evidence,
+            validated,
+            snapshot,
+            **_prep_kwargs(),
+        )
+    body = authority.model_dump(mode="json")
+    body["artifact_store_id"] = "foreign-model-store"
+    body["authority_sha256"] = _digest(
+        {key: value for key, value in body.items() if key != "authority_sha256"}
+    )
+    with pytest.raises(ValueError, match="store"):
+        OutcomeDiagnosticModelArtifactAuthority.model_validate(body)
 
 
 def test_canonical_serializers_revalidate_constructed_objects(complete_artifacts) -> None:
@@ -523,9 +611,14 @@ def test_partial_duplicate_extra_and_foreign_records_fail(
     records, payloads, evidence, _authority = complete_artifacts
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="240"):
         build_outcome_model_artifact_authority(
-            records[:-1], payloads, evidence, validated, snapshot
+            records[:-1], payloads, evidence, validated, snapshot, **_prep_kwargs()
         )
     with pytest.raises(OutcomeDiagnosticModelArtifactError, match="partial|foreign"):
         build_outcome_model_artifact_authority(
-            (*records[:-1], records[0]), payloads, evidence, validated, snapshot
+            (*records[:-1], records[0]),
+            payloads,
+            evidence,
+            validated,
+            snapshot,
+            **_prep_kwargs(),
         )
