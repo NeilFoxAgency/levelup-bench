@@ -89,6 +89,31 @@ def _jsonable(value: Any) -> Any:
     return value
 
 
+def _canonical_payload_bytes(value: Any) -> bytes:
+    """Canonicalize a protocol payload without trusting its container types.
+
+    Readiness snapshots recursively freeze payload mappings and lists into
+    ``MappingProxyType`` and tuples.  Those wrappers are semantically the same
+    JSON object/array as the freshly loaded payload, but direct equality is not
+    reliable across the two representations.  Convert only JSON-compatible
+    mapping/sequence containers here, preserving key types so malformed or
+    injected payloads still fail closed.
+    """
+
+    def thaw(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            if any(not isinstance(key, str) for key in item):
+                raise TypeError("protocol payload mappings require string keys")
+            return {key: thaw(child) for key, child in item.items()}
+        if isinstance(item, (tuple, list)):
+            return [thaw(child) for child in item]
+        if isinstance(item, (set, frozenset)):
+            raise TypeError("protocol payload sets are not JSON-compatible")
+        return item
+
+    return canonical_json_bytes(thaw(value))
+
+
 def _authority_body(
     snapshot: OutcomeDiagnosticProtocolSnapshot, name: str, *, canonical: bool = True
 ) -> dict[str, Any]:
@@ -371,12 +396,18 @@ def _require_canonical_snapshot(
         raise OutcomeDiagnosticPlanError(
             "canonical outcome protocol cannot be revalidated"
         ) from exc
+    try:
+        payload_matches = _canonical_payload_bytes(snapshot.payload) == _canonical_payload_bytes(
+            fresh.payload
+        )
+    except (TypeError, ValueError):
+        payload_matches = False
     if (
         snapshot.repository != fresh.repository
         or snapshot.path != fresh.path
         or snapshot.content != fresh.content
         or snapshot.sha256 != fresh.sha256
-        or snapshot.payload != fresh.payload
+        or not payload_matches
         or snapshot.authority_bytes != fresh.authority_bytes
     ):
         raise OutcomeDiagnosticPlanError(

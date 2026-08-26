@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from dataclasses import replace
+from types import MappingProxyType
 
 import pytest
 
@@ -12,6 +13,7 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
     FAMILIES,
     PARENT_COMMIT_SHA,
     OutcomeDiagnosticPlanError,
+    _require_canonical_snapshot,
     bind_validated_outcome_diagnostic_plan,
     build_outcome_group_diagnostic_plan,
     canonical_outcome_plan_bytes,
@@ -22,6 +24,14 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_protocol import (
     load_outcome_group_diagnostic_protocol,
 )
+
+
+def _freeze_payload(value):
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_payload(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_payload(item) for item in value)
+    return value
 
 
 def test_outcome_plan_exact_matrix_and_scope() -> None:
@@ -155,3 +165,18 @@ def test_forged_snapshot_and_external_same_basename_fail_closed(tmp_path) -> Non
     external_snapshot = replace(snapshot, path=external)
     with pytest.raises(OutcomeDiagnosticPlanError, match="snapshot"):
         bind_validated_outcome_diagnostic_plan(plan, snapshot=external_snapshot)
+
+
+def test_frozen_snapshot_payload_is_logically_equivalent() -> None:
+    snapshot = load_outcome_group_diagnostic_protocol()
+    frozen = replace(snapshot, payload=_freeze_payload(snapshot.payload))
+    assert _require_canonical_snapshot(frozen) == snapshot
+
+
+def test_frozen_snapshot_payload_drift_fails_closed() -> None:
+    snapshot = load_outcome_group_diagnostic_protocol()
+    changed = deepcopy(snapshot.payload)
+    changed["conditions"][0]["trainable_parameters"] = 1
+    forged = replace(snapshot, payload=_freeze_payload(changed))
+    with pytest.raises(OutcomeDiagnosticPlanError, match="snapshot"):
+        _require_canonical_snapshot(forged)
