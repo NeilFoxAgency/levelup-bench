@@ -17,7 +17,11 @@ from typing import Any, Sequence
 import torch
 
 from levelup.core.trajectory import ActionRecord, Trajectory, TrajectoryStep
-from levelup.experiments.milestone6_baselines import ObservableEnvironment
+from levelup.experiments.milestone6_baselines import (
+    ObservableEnvironment,
+    ProbeAccounting,
+    ProbeEvidence,
+)
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts import (
     AuthorizedOutcomeModelArtifact,
     OutcomeDiagnosticModelArtifactRecord,
@@ -34,14 +38,17 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_protocol import (
     CONDITIONS,
     OutcomeDiagnosticProtocolSnapshot,
 )
-from levelup.experiments.runner.config import canonical_json_bytes
+from levelup.experiments.runner.config import TaskIdentity, canonical_json_bytes
 from levelup.learning.state_conditioned import (
     AffordanceTable,
     DecisionExample,
+    ObservableState,
     ObservableTrace,
+    ObservedTransition,
     StateConditionedScorer,
     apply_progress_elapsed_completion_mask,
     apply_resource_pressure_mask,
+    build_affordance_table,
     candidate_tensor,
     outcome_group_optimum_example_views,
     parse_observation,
@@ -197,6 +204,234 @@ class AuthorizedOutcomeProbeContext:
         object.__setattr__(self, "environment_generation_identity_sha256", environment_identity)
         object.__setattr__(self, "probe_context_sha256", context_sha)
         object.__setattr__(self, "_token", _PROBE_TOKEN)
+
+
+def _environment_generation_identity(
+    environment: ObservableEnvironment,
+    task_identity: TaskIdentity,
+) -> str:
+    """Derive the canonical environment identity from the typed task and instance.
+
+    The identity is intentionally minted at this boundary.  Callers cannot supply a
+    digest for a substituted environment: the task specification and the generator
+    attributes are read from the instance and bound to the exact ``TaskIdentity``.
+    """
+
+    task_spec = getattr(environment, "task_spec", None)
+    if task_spec is None or not hasattr(task_spec, "model_dump"):
+        raise ValueError("canonical outcome environment must expose a typed task spec")
+    try:
+        task_spec_payload = task_spec.model_dump(mode="json")
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical outcome environment task spec is not serializable") from exc
+    generation = {}
+    for name in ("family", "task_index", "generator_seed"):
+        value = getattr(environment, name, None)
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            raise ValueError("canonical outcome environment generation identity is incomplete")
+        generation[name] = value
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "schema_version": "milestone6.phase3.outcome-group-probe-environment.v1",
+                "task_identity": task_identity.model_dump(mode="json"),
+                "environment_type": (
+                    f"{type(environment).__module__}.{type(environment).__qualname__}"
+                ),
+                "task_spec": task_spec_payload,
+                "generation": generation,
+            }
+        )
+    ).hexdigest()
+
+
+def _validate_canonical_task_environment(
+    task_identity: TaskIdentity,
+    unit: OutcomePlannedUnit,
+    environment: ObservableEnvironment,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """Validate the exact development task/environment pair used for the probe."""
+
+    if type(task_identity) is not TaskIdentity:
+        raise ValueError("outcome probe authorization requires a canonical TaskIdentity")
+    if (
+        task_identity.task_id != unit.task_id
+        or task_identity.family_id != unit.heldout_family
+        or task_identity.task_index != unit.task_index
+        or task_identity.environment_reset_seed != unit.environment_seed
+        or task_identity.environment_reset_seed != 0
+    ):
+        raise ValueError("outcome probe task identity differs from the canonical unit")
+    if unit.final_family_access or unit.heldout_family not in {"plain", "battery", "cooldown", "heat", "momentum", "combo"}:
+        raise ValueError("outcome probe authorization cannot access final families")
+
+    # The task list is itself a committed development authority.  Resolve it lazily
+    # to keep this oracle-free generation module free of import-time environment work.
+    try:
+        from levelup.experiments.milestone6_phase3_execution import _canonical_validation_tasks
+
+        canonical_tasks = _canonical_validation_tasks()
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical outcome development task authority is unavailable") from exc
+    if not any(item == task_identity for item in canonical_tasks):
+        raise ValueError("outcome probe task is not in the canonical development validation set")
+
+    task_spec = getattr(environment, "task_spec", None)
+    if task_spec is None or getattr(task_spec, "task_id", None) != task_identity.task_id:
+        raise ValueError("outcome environment task does not match the canonical task")
+    for name, expected in (
+        ("family", task_identity.family_id),
+        ("task_index", task_identity.task_index),
+        ("generator_seed", task_identity.generator_seed),
+    ):
+        if getattr(environment, name, None) != expected:
+            raise ValueError("outcome environment generation identity differs from the task")
+
+    # Reconstructing the canonical environment gives a typed, exact comparison that
+    # catches a caller-provided environment from another task or family.  It does not
+    # execute the task or inspect an evaluator/oracle.
+    try:
+        from levelup.experiments.milestone6_phase2 import _environment
+
+        canonical_environment = _environment(task_identity)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical outcome environment authority is unavailable") from exc
+    if type(environment) is not type(canonical_environment):
+        raise ValueError("outcome environment type differs from the canonical task")
+    canonical_spec = getattr(canonical_environment, "task_spec", None)
+    if canonical_spec is None or task_spec.model_dump(mode="json") != canonical_spec.model_dump(mode="json"):
+        raise ValueError("outcome environment task specification differs from the canonical task")
+
+    try:
+        from levelup.experiments.milestone6_phase2 import _forbidden_aliases
+
+        forbidden = _forbidden_aliases(environment)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ValueError("canonical outcome forbidden-alias authority is unavailable") from exc
+    if not isinstance(forbidden, frozenset) or not forbidden:
+        raise ValueError("canonical outcome environment must define one forbidden alias")
+    configuration = getattr(task_spec.environment, "configuration", None)
+    aliases = configuration.get("action_aliases") if isinstance(configuration, dict) else None
+    if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+        raise ValueError("canonical outcome environment action aliases are unavailable")
+    allowed_aliases = frozenset(aliases) - forbidden
+    if not allowed_aliases:
+        raise ValueError("canonical outcome environment has no allowed action aliases")
+    return forbidden, allowed_aliases
+
+
+def _validate_probe_evidence(
+    probe: ProbeEvidence,
+    *,
+    task_identity: TaskIdentity,
+    forbidden_aliases: frozenset[str],
+    allowed_aliases: frozenset[str],
+) -> None:
+    """Validate all typed, paid-probe facts that are observable at this boundary."""
+
+    if type(probe) is not ProbeEvidence:
+        raise ValueError("outcome probe authorization requires typed ProbeEvidence")
+    if probe.task_id != task_identity.task_id:
+        raise ValueError("outcome probe evidence task identity differs from the canonical task")
+    accounting = probe.accounting
+    if type(accounting) is not ProbeAccounting:
+        raise ValueError("outcome probe evidence accounting is not typed")
+    if accounting.actions != FROZEN_PROBE_ACTIONS:
+        raise ValueError("outcome probe must consume exactly 64 paid actions")
+    if accounting.attempts < 1 or accounting.resets != accounting.attempts:
+        raise ValueError("outcome probe accounting does not contain canonical attempts/resets")
+    if accounting.actions > accounting.attempts * 16:
+        raise ValueError("outcome probe attempts exceed the frozen 16-action attempt budget")
+    if len(probe.transitions) != FROZEN_PROBE_ACTIONS:
+        raise ValueError("outcome probe must contain one typed transition per paid action")
+    if not isinstance(probe.affordances, AffordanceTable):
+        raise ValueError("outcome probe affordances are not typed")
+    if tuple(accounting.discovered_aliases) != tuple(sorted(probe.affordances.features)):
+        raise ValueError("outcome probe discovered aliases differ from affordance evidence")
+    if any(alias in forbidden_aliases for alias in probe.affordances.features):
+        raise ValueError("outcome probe affordances contain a forbidden alias")
+    if set(probe.affordances.features) != set(allowed_aliases):
+        raise ValueError("outcome probe aliases differ from the canonical action set")
+
+    transitions: list[ObservedTransition] = []
+    for transition in probe.transitions:
+        if type(transition) is not ObservedTransition:
+            raise ValueError("outcome probe transitions are not typed")
+        if type(transition.before) is not ObservableState or type(transition.after) is not ObservableState:
+            raise ValueError("outcome probe transition states are not typed")
+        if transition.action_alias in forbidden_aliases:
+            raise ValueError("outcome probe used a forbidden alias")
+        if set(transition.before.available_aliases) & set(forbidden_aliases):
+            raise ValueError("outcome probe exposed a forbidden alias")
+        if transition.action_alias not in transition.before.available_aliases:
+            raise ValueError("outcome probe transition used an unavailable alias")
+        transitions.append(transition)
+    try:
+        rebuilt = build_affordance_table(
+            transitions,
+            target_samples_per_alias=8,
+        )
+    except (TypeError, ValueError, RuntimeError) as exc:
+        raise ValueError("outcome probe affordance evidence cannot be rebuilt") from exc
+    if rebuilt != probe.affordances:
+        raise ValueError("outcome probe affordances do not match its typed transitions")
+    if any(count < 8 for count in probe.affordances.sample_counts.values()):
+        raise ValueError("outcome probe must target at least 8 samples per alias")
+
+
+def authorize_outcome_probe_context(
+    environment: ObservableEnvironment,
+    task_identity: TaskIdentity,
+    probe: ProbeEvidence,
+    planned_unit: OutcomePlannedUnit,
+    plan: ValidatedOutcomePlan,
+    protocol_snapshot: OutcomeDiagnosticProtocolSnapshot,
+) -> AuthorizedOutcomeProbeContext:
+    """Authorize the one canonical paid probe for real outcome execution.
+
+    This is the only public constructor for an outcome probe capability.  Every
+    identity and budget is derived from the committed plan, typed task, and the
+    returned :class:`~levelup.experiments.milestone6_baselines.ProbeEvidence`;
+    callers cannot substitute an environment, aliases, seed, budget, or digest.
+    The function performs no search, replay, evaluator, oracle, or result access.
+    """
+
+    if type(plan) is not ValidatedOutcomePlan or type(planned_unit) is not OutcomePlannedUnit:
+        raise ValueError("outcome probe authorization requires a canonical unit and plan")
+    if type(protocol_snapshot) is not OutcomeDiagnosticProtocolSnapshot:
+        raise ValueError("outcome probe authorization requires the canonical protocol snapshot")
+    _validate_canonical_plan(plan, protocol_snapshot)
+    try:
+        plan.require_unit(planned_unit)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ValueError("outcome probe unit differs from the validated outcome plan") from exc
+    if plan.plan.final_family_access or planned_unit.final_family_access:
+        raise ValueError("outcome probe authorization cannot access final families")
+    if planned_unit.environment_seed != 0:
+        raise ValueError("outcome probe requires the canonical environment reset seed")
+    if planned_unit.probe_actions_per_task != FROZEN_PROBE_ACTIONS:
+        raise ValueError("outcome probe budget differs from the frozen 64-action probe")
+
+    forbidden_aliases, allowed_aliases = _validate_canonical_task_environment(
+        task_identity,
+        planned_unit,
+        environment,
+    )
+    _validate_probe_evidence(
+        probe,
+        task_identity=task_identity,
+        forbidden_aliases=forbidden_aliases,
+        allowed_aliases=allowed_aliases,
+    )
+    environment_identity = _environment_generation_identity(environment, task_identity)
+    return AuthorizedOutcomeProbeContext(
+        planned_unit,
+        environment,
+        probe.affordances,
+        forbidden_aliases,
+        environment_identity,
+        _token=_PROBE_TOKEN,
+    )
 
 
 def _mask_for_condition(condition_id: str):
@@ -440,16 +675,24 @@ def _validate_unit(
     return model.model, unit.condition_id, expected_temperature
 
 
-_VALIDATED_PLAN_KEYS: set[tuple[int, int]] = set()
+_VALIDATED_PLAN_KEYS: dict[
+    tuple[int, int], tuple[ValidatedOutcomePlan, OutcomeDiagnosticProtocolSnapshot]
+] = {}
 
 
 def _validate_canonical_plan(
     plan: ValidatedOutcomePlan, snapshot: OutcomeDiagnosticProtocolSnapshot
 ) -> None:
     key = (id(plan), id(snapshot))
-    if key not in _VALIDATED_PLAN_KEYS:
-        validate_outcome_diagnostic_plan(plan.plan, snapshot=snapshot)
-        _VALIDATED_PLAN_KEYS.add(key)
+    cached = _VALIDATED_PLAN_KEYS.get(key)
+    if cached is not None:
+        if cached[0] is plan and cached[1] is snapshot:
+            return
+        raise ValueError("outcome plan validation cache identity collided")
+    validate_outcome_diagnostic_plan(plan.plan, snapshot=snapshot)
+    # Retaining the exact objects prevents Python object-id reuse from turning
+    # this performance cache into a validation bypass.
+    _VALIDATED_PLAN_KEYS[key] = (plan, snapshot)
 
 
 def authorize_outcome_generation_model(
@@ -778,6 +1021,7 @@ __all__ = [
     "generate_candidates_with_outcome_diagnostic_policy",
     "generate_outcome_group_candidates_with_observable_policy",
     "authorize_outcome_generation_model",
+    "authorize_outcome_probe_context",
     "masked_visible_action_weights",
     "model_state_sha256",
     "outcome_group_optimum_examples",

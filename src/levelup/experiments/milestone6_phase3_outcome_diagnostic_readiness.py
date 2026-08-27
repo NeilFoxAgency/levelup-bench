@@ -21,6 +21,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
+from typing import Literal
 
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_protocol import (
     PHASE3_OUTCOME_DIAGNOSTIC_PROTOCOL_PATH,
@@ -71,6 +72,7 @@ _COMMIT_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _LEASE_TOKEN = object()
 _SNAPSHOT_TOKEN = object()
 DIAGNOSTIC_OUTPUT_ROOT_RELATIVE = "runs/milestone6/phase3-outcome-group-diagnostic"
+OutcomeDiagnosticOutputState = Literal["empty", "prepared", "activated"]
 
 
 def _require_commit(value: str | None) -> str:
@@ -158,7 +160,7 @@ def _require_empty_diagnostic_output_root_fd(fd: int) -> None:
         entries = secure_fs.strict_regular_entries(fd)
     except secure_fs.SecureFilesystemError as exc:
         raise OutcomeDiagnosticReadinessError(
-            "diagnostic output root contains a non-regular or symlink child"
+            "diagnostic output root must be an empty inert namespace"
         ) from exc
     if entries:
         raise OutcomeDiagnosticReadinessError(
@@ -172,6 +174,79 @@ def _require_empty_diagnostic_output_root(path: Path) -> None:
         _require_empty_diagnostic_output_root_fd(fd)
     finally:
         os.close(fd)
+
+
+def _inspect_diagnostic_output_state_at(
+    output_fd: int,
+    output_path: Path,
+    output_state: OutcomeDiagnosticOutputState,
+    expected_plan: object | None,
+) -> object | None:
+    if output_state == "empty":
+        _require_empty_diagnostic_output_root_fd(output_fd)
+        return None
+    if output_state not in ("prepared", "activated"):
+        raise OutcomeDiagnosticReadinessError("diagnostic output state is invalid")
+    try:
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_result_store import (
+            OutcomeDiagnosticExpectedPlan,
+            inspect_outcome_diagnostic_resume_tree_at,
+        )
+
+        if type(expected_plan) is not OutcomeDiagnosticExpectedPlan:
+            raise OutcomeDiagnosticReadinessError(
+                "diagnostic resume expected plan is missing"
+            )
+        return inspect_outcome_diagnostic_resume_tree_at(
+            output_fd,
+            output_path,
+            expected_plan,
+            output_state=output_state,
+        )
+    except OutcomeDiagnosticReadinessError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise OutcomeDiagnosticReadinessError(
+            f"diagnostic {output_state} output tree failed resume validation"
+        ) from exc
+
+
+def _capture_diagnostic_output_state(
+    output_path: Path,
+    output_state: OutcomeDiagnosticOutputState,
+    expected_plan: object | None,
+) -> object | None:
+    output_fd, _ancestors = _open_absolute_directory(output_path)
+    try:
+        return _inspect_diagnostic_output_state_at(
+            output_fd, output_path, output_state, expected_plan
+        )
+    finally:
+        os.close(output_fd)
+
+
+def _build_diagnostic_resume_expected_plan(
+    protocol: OutcomeDiagnosticProtocolSnapshot,
+) -> object:
+    try:
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
+            bind_validated_outcome_diagnostic_plan,
+            build_outcome_group_diagnostic_plan,
+        )
+        from levelup.experiments.milestone6_phase3_outcome_diagnostic_result_store import (
+            build_outcome_diagnostic_expected_plan,
+        )
+
+        plan = bind_validated_outcome_diagnostic_plan(
+            build_outcome_group_diagnostic_plan(protocol), snapshot=protocol
+        )
+        return build_outcome_diagnostic_expected_plan(plan, protocol)
+    except OutcomeDiagnosticReadinessError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise OutcomeDiagnosticReadinessError(
+            "diagnostic resume expected plan failed canonical construction"
+        ) from exc
 
 
 def _authority_paths(protocol: OutcomeDiagnosticProtocolSnapshot) -> tuple[str, ...]:
@@ -258,6 +333,9 @@ class OutcomeDiagnosticReadinessSnapshot:
     git_commit_sha: str
     git_dirty: bool
     source_result_lock_commit_sha: str
+    output_state: OutcomeDiagnosticOutputState
+    resume_baseline: object | None
+    resume_expected_plan: object | None
 
     def __init__(
         self,
@@ -273,6 +351,9 @@ class OutcomeDiagnosticReadinessSnapshot:
         git_commit_sha: str,
         git_dirty: bool,
         source_result_lock_commit_sha: str,
+        output_state: OutcomeDiagnosticOutputState,
+        resume_baseline: object | None,
+        resume_expected_plan: object | None,
         *,
         _token: object | None = None,
     ) -> None:
@@ -292,6 +373,9 @@ class OutcomeDiagnosticReadinessSnapshot:
         object.__setattr__(self, "git_commit_sha", git_commit_sha)
         object.__setattr__(self, "git_dirty", git_dirty)
         object.__setattr__(self, "source_result_lock_commit_sha", source_result_lock_commit_sha)
+        object.__setattr__(self, "output_state", output_state)
+        object.__setattr__(self, "resume_baseline", resume_baseline)
+        object.__setattr__(self, "resume_expected_plan", resume_expected_plan)
 
     @property
     def files_by_path(self) -> Mapping[str, AuthorityFileSnapshot]:
@@ -415,7 +499,16 @@ class OutcomeDiagnosticReadinessSnapshot:
                 raise OutcomeDiagnosticReadinessError("held repository ancestors changed")
             if output_ancestors != self.output_root_ancestor_identities:
                 raise OutcomeDiagnosticReadinessError("held output root ancestors changed")
-            _require_empty_diagnostic_output_root_fd(output_fd)
+            observed_output = _inspect_diagnostic_output_state_at(
+                output_fd,
+                self.output_root,
+                self.output_state,
+                self.resume_expected_plan,
+            )
+            if observed_output != self.resume_baseline:
+                raise OutcomeDiagnosticReadinessError(
+                    "diagnostic output tree changed since readiness capture"
+                )
             file_descriptors = {
                 item.relative_path: _hold_file_from_root(repo_fd, item, stack)
                 for item in self.files
@@ -569,6 +662,23 @@ class OutcomeDiagnosticActivationReadinessLease:
                 raise OutcomeDiagnosticReadinessError(
                     "diagnostic readiness descriptor closed unexpectedly"
                 ) from exc
+        # A held descriptor alone is insufficient: the canonical output path
+        # could be renamed or substituted while execution continued writing to
+        # an unlinked tree.  Reopen the complete lexical chain without
+        # following symlinks and require it to resolve to the pinned root.
+        with ExitStack() as path_stack:
+            current_output_fd, current_output_ancestors = _open_absolute_directory(
+                self.snapshot.output_root, path_stack
+            )
+            if (
+                _identity(os.fstat(current_output_fd))
+                != self._expected_output_root_identity
+                or current_output_ancestors
+                != self.snapshot.output_root_ancestor_identities
+            ):
+                raise OutcomeDiagnosticReadinessError(
+                    "diagnostic output root path changed while active"
+                )
         return self
 
     def close(self) -> None:
@@ -583,6 +693,7 @@ def capture_outcome_group_diagnostic_readiness(
     *,
     output_root: str | os.PathLike[str],
     expected_git_commit: str,
+    output_state: OutcomeDiagnosticOutputState = "empty",
 ) -> OutcomeDiagnosticReadinessSnapshot:
     """Capture the frozen development diagnostic and validate execution readiness."""
 
@@ -600,7 +711,6 @@ def capture_outcome_group_diagnostic_readiness(
     _reject_lexical_symlinks(output, "output root")
     if not output.is_dir():
         raise OutcomeDiagnosticReadinessError("output root must already exist as a directory")
-    _require_empty_diagnostic_output_root(output)
     try:
         protocol = load_outcome_group_diagnostic_protocol(
             PHASE3_OUTCOME_DIAGNOSTIC_PROTOCOL_PATH,
@@ -638,6 +748,16 @@ def capture_outcome_group_diagnostic_readiness(
     if selection_path not in {item.relative_path for item in phase3.files}:
         direct += (_read_source(repo, selection_path),)
     files = _merge_files(iter(phase3.files), iter(direct), diagnostic=diagnostic)
+    if output_state not in ("empty", "prepared", "activated"):
+        raise OutcomeDiagnosticReadinessError("diagnostic output state is invalid")
+    resume_expected_plan = (
+        None
+        if output_state == "empty"
+        else _build_diagnostic_resume_expected_plan(protocol)
+    )
+    resume_baseline = _capture_diagnostic_output_state(
+        output, output_state, resume_expected_plan
+    )
     repo_id, repo_ancestors = _directory_snapshot(repo, "repository")
     output_id, output_ancestors = _directory_snapshot(output, "output root")
     from levelup.experiments.milestone6_phase3_readiness import _git_state
@@ -660,6 +780,9 @@ def capture_outcome_group_diagnostic_readiness(
         source_result_lock_commit_sha=str(
             protocol.payload["freeze_record"]["source_result_lock_commit_sha"]
         ),
+        output_state=output_state,
+        resume_baseline=resume_baseline,
+        resume_expected_plan=resume_expected_plan,
         _token=_SNAPSHOT_TOKEN,
     )
     snapshot.preflight(expected_git_commit=expected)
@@ -758,6 +881,7 @@ class OutcomeDiagnosticModelReadinessSnapshot:
     model_store_root: Path
     owner_ids: tuple[str, ...]
     lease: OutcomeDiagnosticModelReadinessLease
+    execution_authority_cache: object
     _sealed: bool
 
     def __init__(
@@ -768,6 +892,7 @@ class OutcomeDiagnosticModelReadinessSnapshot:
         model_store_root: Path,
         owner_ids: tuple[str, ...],
         lease: OutcomeDiagnosticModelReadinessLease,
+        execution_authority_cache: object,
         *,
         _token: object | None = None,
     ) -> None:
@@ -781,6 +906,7 @@ class OutcomeDiagnosticModelReadinessSnapshot:
         object.__setattr__(self, "model_store_root", model_store_root)
         object.__setattr__(self, "owner_ids", owner_ids)
         object.__setattr__(self, "lease", lease)
+        object.__setattr__(self, "execution_authority_cache", execution_authority_cache)
         object.__setattr__(self, "_sealed", True)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -803,6 +929,12 @@ class OutcomeDiagnosticModelReadinessSnapshot:
     @property
     def model_store(self) -> object:
         return self.lease.store
+
+    @property
+    def execution_models(self) -> object:
+        """Descriptor-pinned execution cache built during readiness capture."""
+
+        return self.execution_authority_cache
 
     @property
     def authority_bytes(self) -> bytes:
@@ -972,7 +1104,7 @@ def _validate_store_payloads_against_authority(
     store: object,
     authority: object,
     protocol: OutcomeDiagnosticProtocolSnapshot,
-) -> None:
+) -> tuple[object, dict[str, tuple[object, object, object]]]:
     """Bind every descriptor-read model payload to the compact authority and plan."""
 
     try:
@@ -987,33 +1119,35 @@ def _validate_store_payloads_against_authority(
             build_outcome_group_diagnostic_plan,
         )
 
-        plan = bind_validated_outcome_diagnostic_plan(
+        validated_plan = bind_validated_outcome_diagnostic_plan(
             build_outcome_group_diagnostic_plan(protocol),
             snapshot=protocol,
         )
         validate_outcome_model_preparation_metadata_at(
             store.reader,  # type: ignore[attr-defined]
-            plan,
+            validated_plan,
             preparation_git_commit_sha=authority.preparation_git_commit_sha,  # type: ignore[attr-defined]
             preparation_provenance_sha256=authority.preparation_provenance_sha256,  # type: ignore[attr-defined]
             expected_owner_ids=tuple(  # type: ignore[attr-defined]
                 sorted(row.owner_id for row in authority.artifacts)
             ),
         )
-        plan = plan.plan
+        plan = validated_plan.plan
         owners = {owner.owner_id: owner for owner in plan.model_owners}
         views = {view.view_id: view for view in plan.views}
         evidence = {
             (row.heldout_family, row.replicate): row
             for row in authority.evidence  # type: ignore[attr-defined]
         }
+        payloads: dict[str, tuple[object, object, object]] = {}
         for row in authority.artifacts:  # type: ignore[attr-defined]
             owner = owners[row.owner_id]
             view = views[owner.view_id]
             evidence_row = evidence[(view.heldout_family, view.replicate)]
-            record, _index, _state = load_outcome_model_artifact_payload_at(
+            record, index, state = load_outcome_model_artifact_payload_at(
                 store, row.owner_id
             )
+            payloads[row.owner_id] = (record, index, state)
             key = record.key
             consumers = tuple(
                 unit for unit in plan.units if unit.model_owner_id == owner.owner_id
@@ -1115,6 +1249,7 @@ def _validate_store_payloads_against_authority(
                 != authority.preparation_provenance_sha256  # type: ignore[attr-defined]
             ):
                 raise ValueError("stored model payload differs from compact authority")
+        return validated_plan, payloads
     except Exception as exc:
         if isinstance(exc, OutcomeDiagnosticReadinessError):
             raise
@@ -1130,6 +1265,7 @@ def capture_outcome_group_diagnostic_model_readiness(
     expected_git_commit: str,
     model_store_root: str | os.PathLike[str] | None = None,
     authority_path: str | os.PathLike[str] | None = None,
+    output_state: OutcomeDiagnosticOutputState = "empty",
 ) -> OutcomeDiagnosticModelReadinessSnapshot:
     """Capture development-only model authority and a pinned complete store."""
 
@@ -1138,6 +1274,7 @@ def capture_outcome_group_diagnostic_model_readiness(
         repository=repo,
         output_root=output_root,
         expected_git_commit=expected_git_commit,
+        output_state=output_state,
     )
     authority = _outcome_model_authority_path(repo, authority_path)
     _reject_lexical_symlinks(authority, "outcome model authority")
@@ -1180,7 +1317,7 @@ def capture_outcome_group_diagnostic_model_readiness(
                 raise OutcomeDiagnosticReadinessError(
                     "prepared model-store manifest differs from compact authority"
                 )
-            _validate_store_payloads_against_authority(
+            validated_store = _validate_store_payloads_against_authority(
                 store,
                 typed_authority,
                 base.protocol,
@@ -1189,6 +1326,35 @@ def capture_outcome_group_diagnostic_model_readiness(
             lease = OutcomeDiagnosticModelReadinessLease(
                 store, stack, owner_ids, identities, _token=_LEASE_TOKEN
             )
+            execution_cache: object | None = None
+            # The compatibility branch is only reachable in isolated tests
+            # which replace the semantic authority validator with a stub.  A
+            # real capture always yields the typed authority and therefore
+            # must publish the immutable execution cache.
+            from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts import (
+                OutcomeDiagnosticModelArtifactAuthority,
+            )
+
+            if type(typed_authority) is OutcomeDiagnosticModelArtifactAuthority:
+                from levelup.experiments.milestone6_phase3_outcome_diagnostic_execution_models import (
+                    build_outcome_diagnostic_execution_authority_cache,
+                )
+                if (
+                    not isinstance(validated_store, tuple)
+                    or len(validated_store) != 2
+                    or not isinstance(validated_store[1], dict)
+                ):
+                    raise OutcomeDiagnosticReadinessError(
+                        "prepared model validation did not retain canonical payloads"
+                    )
+                validated_plan, payloads = validated_store
+                execution_cache = build_outcome_diagnostic_execution_authority_cache(
+                    typed_authority,
+                    validated_plan,
+                    lease,
+                    protocol_snapshot=base.protocol,
+                    payloads=payloads,
+                )
             snapshot = OutcomeDiagnosticModelReadinessSnapshot(
                 base,
                 typed_authority,
@@ -1196,6 +1362,7 @@ def capture_outcome_group_diagnostic_model_readiness(
                 store_root,
                 owner_ids,
                 lease,
+                execution_cache,
                 _token=_SNAPSHOT_TOKEN,
             )
             snapshot.recheck(expected_git_commit=expected_git_commit)
@@ -1217,6 +1384,7 @@ __all__ = [
     "OutcomeDiagnosticActivationReadinessLease",
     "OutcomeDiagnosticModelReadinessLease",
     "OutcomeDiagnosticModelReadinessSnapshot",
+    "OutcomeDiagnosticOutputState",
     "OutcomeDiagnosticReadinessError",
     "OutcomeDiagnosticReadinessSnapshot",
     "capture_outcome_group_diagnostic_readiness",

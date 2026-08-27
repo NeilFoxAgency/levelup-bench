@@ -100,7 +100,7 @@ def _jsonable(value: Any) -> Any:
         return [_jsonable(item) for item in value]
     if isinstance(value, list):
         return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
     return value
 
@@ -130,11 +130,11 @@ def _require_snapshot(
     if (
         not isinstance(supplied, str)
         or _digest(
-            {
+            _jsonable({
                 key: value
                 for key, value in snapshot.payload.items()
                 if key != "diagnostic_protocol_sha256"
-            }
+            })
         )
         != supplied
     ):
@@ -142,7 +142,7 @@ def _require_snapshot(
     execution_boundary = snapshot.payload.get("execution_boundary")
     if (
         snapshot.payload.get("scope") != "known-development-only"
-        or not isinstance(execution_boundary, dict)
+        or not isinstance(execution_boundary, Mapping)
         or execution_boundary.get("final_family_access") is not False
         or execution_boundary.get("final_method_selection") is not False
         or execution_boundary.get("advancement_to_paired_objectives") is not False
@@ -170,7 +170,15 @@ def _require_snapshot(
         raise OutcomeDiagnosticModelArtifactError(
             "canonical diagnostic protocol cannot be reloaded"
         ) from exc
-    if snapshot != fresh:
+    if (
+        snapshot.repository != fresh.repository
+        or snapshot.path != fresh.path
+        or snapshot.content != fresh.content
+        or snapshot.sha256 != fresh.sha256
+        or canonical_json_bytes(_jsonable(snapshot.payload))
+        != canonical_json_bytes(_jsonable(fresh.payload))
+        or snapshot.authority_bytes != fresh.authority_bytes
+    ):
         raise OutcomeDiagnosticModelArtifactError(
             "diagnostic protocol snapshot differs from fresh canonical authority"
         )
@@ -237,6 +245,7 @@ class PinnedOutcomeTrainingEvidence:
 
 
 _MODEL_AUTHORIZATION_TOKEN = object()
+_COMPACT_AUTHORIZATION_INPUT_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
@@ -1041,6 +1050,210 @@ def validate_outcome_model_artifact_against_plan(
     return AuthorizedOutcomeModelArtifact(record, _token=_MODEL_AUTHORIZATION_TOKEN)
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class OutcomeCompactArtifactAuthorizationInputs:
+    """Opaque cached canonical-plan inputs for compact artifact authorization."""
+
+    plan: ValidatedOutcomePlan
+    canonical_plan: OutcomePlan
+    snapshot: OutcomeDiagnosticProtocolSnapshot
+    _token: object
+
+    def __init__(
+        self,
+        plan: ValidatedOutcomePlan,
+        canonical_plan: OutcomePlan,
+        snapshot: OutcomeDiagnosticProtocolSnapshot,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _COMPACT_AUTHORIZATION_INPUT_TOKEN:
+            raise OutcomeDiagnosticModelArtifactError(
+                "compact authorization inputs require canonical validation"
+            )
+        object.__setattr__(self, "plan", plan)
+        object.__setattr__(self, "canonical_plan", canonical_plan)
+        object.__setattr__(self, "snapshot", snapshot)
+        object.__setattr__(self, "_token", _COMPACT_AUTHORIZATION_INPUT_TOKEN)
+
+
+def prepare_outcome_compact_artifact_authorization_inputs(
+    plan: ValidatedOutcomePlan,
+    snapshot: OutcomeDiagnosticProtocolSnapshot,
+) -> OutcomeCompactArtifactAuthorizationInputs:
+    canonical_plan, fresh = _require_canonical_inputs(plan, snapshot)
+    return OutcomeCompactArtifactAuthorizationInputs(
+        plan,
+        canonical_plan,
+        fresh,
+        _token=_COMPACT_AUTHORIZATION_INPUT_TOKEN,
+    )
+
+
+def authorize_outcome_model_artifact_from_compact_authority(
+    record: OutcomeDiagnosticModelArtifactRecord,
+    state_payload: PinnedOutcomeModelState,
+    authority: OutcomeDiagnosticModelArtifactAuthority,
+    authority_row: OutcomeDiagnosticArtifactRow,
+    plan: ValidatedOutcomePlan,
+    snapshot: OutcomeDiagnosticProtocolSnapshot,
+    *,
+    _validated_inputs: OutcomeCompactArtifactAuthorizationInputs | None = None,
+) -> AuthorizedOutcomeModelArtifact:
+    """Mint an artifact capability from the complete compact authority.
+
+    This is the execution-facing counterpart to
+    :func:`validate_outcome_model_artifact_against_plan`.  Readiness has
+    already consumed the thirty evidence payloads; execution must not reopen
+    them merely to authorize one of the 5,760 units.  The compact authority
+    row therefore carries every evidence, consumer, owner, and preparation
+    identity needed for this check.  Only after all those identities and the
+    descriptor-read state bytes agree is the opaque authorization token minted.
+    """
+
+    if type(record) is not OutcomeDiagnosticModelArtifactRecord:
+        raise OutcomeDiagnosticModelArtifactError("typed outcome model record is required")
+    if type(state_payload) is not PinnedOutcomeModelState:
+        raise OutcomeDiagnosticModelArtifactError("typed pinned outcome model state is required")
+    if type(authority) is not OutcomeDiagnosticModelArtifactAuthority:
+        raise OutcomeDiagnosticModelArtifactError("typed compact outcome authority is required")
+    if type(authority_row) is not OutcomeDiagnosticArtifactRow:
+        raise OutcomeDiagnosticModelArtifactError("typed compact outcome authority row is required")
+    if _validated_inputs is None:
+        canonical_plan, fresh = _require_canonical_inputs(plan, snapshot)
+    else:
+        if (
+            type(_validated_inputs) is not OutcomeCompactArtifactAuthorizationInputs
+            or _validated_inputs._token is not _COMPACT_AUTHORIZATION_INPUT_TOKEN
+            or _validated_inputs.plan is not plan
+            or _validated_inputs.snapshot is not snapshot
+        ):
+            raise OutcomeDiagnosticModelArtifactError("prevalidated outcome inputs are malformed")
+        canonical_plan = _validated_inputs.canonical_plan
+        fresh = _validated_inputs.snapshot
+        if plan.plan is not canonical_plan:
+            raise OutcomeDiagnosticModelArtifactError("prevalidated outcome inputs differ")
+    if (
+        authority.authority_sha256 != authority.expected_authority_sha256
+        or not authority.development_only
+        or authority.final
+        or authority.final_family_access
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact outcome authority is not development-only")
+    if (
+        authority.plan_id != canonical_plan.plan_id
+        or authority.plan_parent_commit_sha != canonical_plan.parent_commit_sha
+        or authority.protocol_sha256 != canonical_plan.protocol_sha256
+        or authority.protocol_file_sha256 != fresh.sha256
+        or authority.protocol_self_sha256 != fresh.payload.get("diagnostic_protocol_sha256")
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact outcome authority plan/protocol lineage differs")
+    matching_rows = tuple(row for row in authority.artifacts if row.owner_id == authority_row.owner_id)
+    if len(matching_rows) != 1 or matching_rows[0] != authority_row:
+        raise OutcomeDiagnosticModelArtifactError("compact outcome authority row is foreign or altered")
+
+    owners = {owner.owner_id: owner for owner in canonical_plan.model_owners}
+    owner = owners.get(authority_row.owner_id)
+    views = {view.view_id: view for view in canonical_plan.views}
+    view = views.get(authority_row.view_id)
+    if owner is None or view is None or (
+        authority_row.view_id != owner.view_id
+        or authority_row.condition_id != owner.condition_id
+        or authority_row.heldout_family != owner.heldout_family
+        or authority_row.fold_id != owner.fold_id
+        or authority_row.replicate != owner.replicate
+        or authority_row.training_tuple_id != owner.training_tuple_id
+        or authority_row.model_seed != owner.model_seed
+        or authority_row.data_order_seed != view.data_order_seed
+        or authority_row.feature_mask_sha256 != owner.feature_mask_sha256
+        or authority_row.transformation_sha256 != owner.transformation_sha256
+        or authority_row.representation_sha256 != view.representation_sha256
+        or authority_row.model_identity_sha256 != owner.model_identity_sha256
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact authority owner/view lineage differs")
+
+    key = record.key
+    if (
+        record.record_id != record.expected_record_id
+        or key.owner_id != authority_row.owner_id
+        or key.key_id != authority_row.key_id
+        or key.view_id != authority_row.view_id
+        or key.condition_id != authority_row.condition_id
+        or key.heldout_family != authority_row.heldout_family
+        or key.fold_id != authority_row.fold_id
+        or key.replicate != authority_row.replicate
+        or key.training_tuple_id != authority_row.training_tuple_id
+        or key.model_seed != authority_row.model_seed
+        or key.data_order_seed != authority_row.data_order_seed
+        or key.feature_mask_sha256 != authority_row.feature_mask_sha256
+        or key.transformation_sha256 != authority_row.transformation_sha256
+        or key.representation_sha256 != authority_row.representation_sha256
+        or key.model_identity_sha256 != authority_row.model_identity_sha256
+        or key.plan_id != authority.plan_id
+        or key.plan_parent_commit_sha != authority.plan_parent_commit_sha
+        or key.protocol_sha256 != authority.protocol_sha256
+        or key.protocol_self_sha256 != authority.protocol_self_sha256
+        or key.protocol_file_sha256 != authority.protocol_file_sha256
+        or key.preparation_git_commit_sha != authority.preparation_git_commit_sha
+        or key.preparation_provenance_sha256 != authority.preparation_provenance_sha256
+        or tuple(key.ordered_training_task_ids) != tuple(view.training_task_ids)
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact authority record/key lineage differs")
+
+    consumers = tuple(unit for unit in canonical_plan.units if unit.model_owner_id == owner.owner_id)
+    if len(consumers) != 24:
+        raise OutcomeDiagnosticModelArtifactError("compact authority consumer universe differs")
+    expected_consumer_ids = _digest([unit.unit_id for unit in consumers])
+    expected_seed_lineage = _digest(
+        [
+            {
+                "unit_id": unit.unit_id,
+                "tuple_id": unit.tuple_id,
+                "task_id": unit.task_id,
+                "task_index": unit.task_index,
+                "model_seed": unit.model_seed,
+                "environment_seed": unit.environment_seed,
+                "probe_seed": unit.probe_seed,
+                "search_seed": unit.search_seed,
+                "data_order_seed": unit.data_order_seed,
+            }
+            for unit in consumers
+        ]
+    )
+    if (
+        key.consumer_unit_ids_sha256 != expected_consumer_ids
+        or key.consumer_seed_lineage_sha256 != expected_seed_lineage
+        or authority_row.consumer_unit_ids_sha256 != expected_consumer_ids
+        or authority_row.consumer_seed_lineage_sha256 != expected_seed_lineage
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact authority consumer lineage differs")
+    evidence = next(
+        (
+            row
+            for row in authority.evidence
+            if row.heldout_family == authority_row.heldout_family
+            and row.replicate == authority_row.replicate
+        ),
+        None,
+    )
+    if evidence is None:
+        raise OutcomeDiagnosticModelArtifactError("compact authority evidence row is missing")
+    if (
+        evidence.evidence_row_sha256 != key.evidence_row_sha256
+        or evidence.evidence_payload_sha256 != key.evidence_payload_sha256
+        or evidence.evidence_payload_bytes != key.evidence_payload_bytes
+        or tuple(evidence.ordered_training_task_ids) != tuple(key.ordered_training_task_ids)
+    ):
+        raise OutcomeDiagnosticModelArtifactError("compact authority evidence lineage differs")
+    try:
+        schemas, state_sha = inspect_outcome_model_state(state_payload)
+    except (TypeError, ValueError, OutcomeDiagnosticModelArtifactError) as exc:
+        raise OutcomeDiagnosticModelArtifactError("outcome model state is not canonical") from exc
+    if state_sha != key.model_state_sha256 or tuple(schemas) != tuple(key.state_schema):
+        raise OutcomeDiagnosticModelArtifactError("compact authority state identity differs")
+    return AuthorizedOutcomeModelArtifact(record, _token=_MODEL_AUTHORIZATION_TOKEN)
+
+
 def build_outcome_model_artifact_authority(
     records: Sequence[OutcomeDiagnosticModelArtifactRecord],
     state_payloads: Mapping[str, PinnedOutcomeModelState],
@@ -1253,6 +1466,7 @@ __all__ = [
     "OutcomeRPModelArtifactRecord",
     "OutcomePECModelArtifactRecord",
     "OutcomeDiagnosticModelArtifactAuthority",
+    "OutcomeCompactArtifactAuthorizationInputs",
     "build_outcome_model_artifact_key",
     "build_outcome_model_artifact_record",
     "build_outcome_rp_model_artifact_key",
@@ -1260,6 +1474,8 @@ __all__ = [
     "build_outcome_rp_model_artifact_record",
     "build_outcome_pec_model_artifact_record",
     "validate_outcome_model_artifact_against_plan",
+    "authorize_outcome_model_artifact_from_compact_authority",
+    "prepare_outcome_compact_artifact_authorization_inputs",
     "build_outcome_model_artifact_authority",
     "validate_outcome_model_artifact_authority",
     "canonical_outcome_model_artifact_key_bytes",

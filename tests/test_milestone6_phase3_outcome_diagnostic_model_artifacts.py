@@ -24,6 +24,7 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_model_artifacts im
     OutcomeTrainingAccounting,
     PinnedOutcomeModelState,
     PinnedOutcomeTrainingEvidence,
+    authorize_outcome_model_artifact_from_compact_authority,
     build_outcome_model_artifact_authority,
     build_outcome_model_artifact_key,
     build_outcome_model_artifact_record,
@@ -40,12 +41,10 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
     OutcomePlannedUnit,
     OutcomeView,
     bind_validated_outcome_diagnostic_plan,
-    build_outcome_group_diagnostic_plan,
 )
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_protocol import (
     CONDITIONS,
     OutcomeDiagnosticProtocolSnapshot,
-    load_outcome_group_diagnostic_protocol,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
 from levelup.experiments.runner.training_data_artifacts import TrainingDataPayload
@@ -326,6 +325,80 @@ def _accounting(epochs: int) -> OutcomeTrainingAccounting:
     )
 
 
+def test_compact_authority_boundary_mints_only_after_full_lineage_validation(
+    canonical_inputs, complete_artifacts
+) -> None:
+    snapshot, _raw_plan, validated = canonical_inputs
+    records, payloads, _evidence, authority = complete_artifacts
+    record = records[0]
+    row = next(item for item in authority.artifacts if item.owner_id == record.key.owner_id)
+    authorized = authorize_outcome_model_artifact_from_compact_authority(
+        record,
+        payloads[record.key.owner_id],
+        authority,
+        row,
+        validated,
+        snapshot,
+    )
+    assert authorized.record == record
+    with pytest.raises(OutcomeDiagnosticModelArtifactError, match="prevalidated"):
+        authorize_outcome_model_artifact_from_compact_authority(
+            record,
+            payloads[record.key.owner_id],
+            authority,
+            row,
+            validated,
+            snapshot,
+            _validated_inputs=(validated.plan, snapshot),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("tamper", ("row", "state", "authority", "record", "plan", "protocol"))
+def test_compact_authority_boundary_rejects_tampered_lineage(
+    canonical_inputs, complete_artifacts, tamper
+) -> None:
+    snapshot, raw_plan, validated = canonical_inputs
+    records, payloads, _evidence, authority = complete_artifacts
+    record = records[0]
+    owner_id = record.key.owner_id
+    row = next(item for item in authority.artifacts if item.owner_id == owner_id)
+    state = payloads[owner_id]
+    supplied_plan = validated
+    supplied_snapshot = snapshot
+    supplied_authority = authority
+    supplied_record = record
+    if tamper == "row":
+        supplied_row = row.model_copy(update={"key_id": "a" * 64})
+    else:
+        supplied_row = row
+    if tamper == "state":
+        tensor = state.tensors[0]
+        changed = bytes([tensor.data[0] ^ 0x01]) + tensor.data[1:]
+        supplied_state = PinnedOutcomeModelState(
+            (OutcomeStateTensorPayload(tensor.name, tensor.shape, changed),)
+            + state.tensors[1:]
+        )
+    else:
+        supplied_state = state
+    if tamper == "authority":
+        supplied_authority = authority.model_copy(update={"authority_sha256": "a" * 64})
+    if tamper == "record":
+        supplied_record = _rehashed_record(record, model_identity_sha256="a" * 64)
+    if tamper == "plan":
+        supplied_plan = object()  # type: ignore[assignment]
+    if tamper == "protocol":
+        supplied_snapshot = replace(snapshot, content=b"tampered")
+    with pytest.raises((OutcomeDiagnosticModelArtifactError, ValueError)):
+        authorize_outcome_model_artifact_from_compact_authority(
+            supplied_record,
+            supplied_state,
+            supplied_authority,
+            supplied_row,
+            supplied_plan,
+            supplied_snapshot,
+        )
+
+
 def _rehashed_record(record, **changes):
     key_body = record.key.model_dump(mode="json")
     key_body.update(changes)
@@ -340,16 +413,6 @@ def _rehashed_record(record, **changes):
         {key: value for key, value in record_body.items() if key != "record_id"}
     )
     return OutcomeDiagnosticModelArtifactRecord.model_validate(record_body)
-
-
-def test_real_canonical_protocol_and_plan_pass_the_artifact_authority_gate() -> None:
-    snapshot = load_outcome_group_diagnostic_protocol()
-    raw_plan = build_outcome_group_diagnostic_plan(snapshot)
-    validated = bind_validated_outcome_diagnostic_plan(raw_plan, snapshot=snapshot)
-    canonical, fresh = artifacts._require_canonical_inputs(validated, snapshot)
-    assert canonical == raw_plan
-    assert fresh.content == snapshot.content
-    assert canonical.protocol_sha256 == snapshot.sha256
 
 
 def test_complete_pinned_store_round_trip_builds_the_same_compact_authority(

@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -30,9 +31,18 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_result_store impor
     EXPECTED_NAMESPACE_UNIT_COUNT,
     EXPECTED_TOTAL_UNIT_COUNT,
     OutcomeDiagnosticResultStoreError,
+    activate_outcome_diagnostic_result_stores,
     build_outcome_diagnostic_expected_plan,
     load_outcome_diagnostic_result_stores,
     prepare_outcome_diagnostic_result_stores,
+)
+from levelup.experiments.runner.records import (
+    AttemptRecord,
+    ResourceAccounting,
+    UnitKey,
+    UnitOutcome,
+    UnitRecord,
+    UnitSeeds,
 )
 
 REPOSITORY = Path(readiness.ROOT)
@@ -330,3 +340,326 @@ def test_open_pinned_survives_inner_lease_close_without_fd_leak(authorities) -> 
                 os.fstat(descriptors[f"records:{CONDITIONS[0]}"])
         after = len(tuple(Path("/dev/fd").iterdir()))
         assert after <= before
+
+
+def test_runtime_activation_writes_canonical_records_and_unbounded_attempts(authorities) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    now = datetime.now(timezone.utc)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        stores = prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+        expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+        with activate_outcome_diagnostic_result_stores(
+            stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+        ) as batch:
+            family = batch.stores[0]
+            planned = family.planned_unit(stores[0].spec.units[0].unit_id)
+            record = UnitRecord(
+                run_id=family.run_id,
+                config_sha256=family.config_sha256,
+                unit_id=planned.unit_id,
+                key=UnitKey(
+                    phase="validation",
+                    condition_id=f"{planned.condition_id}--{planned.tuple_id}",
+                    family_id=planned.heldout_family,
+                    task_id=planned.task_id,
+                    task_index=planned.task_index,
+                    replicate=planned.replicate,
+                ),
+                seeds=UnitSeeds(
+                    model_seed=planned.model_seed,
+                    environment_seed=planned.environment_seed,
+                    probe_seed=planned.probe_seed,
+                    search_seed=planned.search_seed,
+                    data_order_seed=planned.data_order_seed,
+                ),
+                exposure_manifest_sha256=planned.exposure_manifest_sha256,
+                started_at_utc=now,
+                finished_at_utc=now,
+                elapsed_wall_seconds=0.0,
+                outcome=UnitOutcome(
+                    evaluator_ran=False,
+                    valid=False,
+                    completed=False,
+                    success=False,
+                    performance_metric_id="performance_value",
+                    performance_direction="minimize",
+                ),
+                accounting=ResourceAccounting(),
+            )
+            assert family.write_completed(record) is True
+            assert family.write_completed(record) is False
+            assert family.load_completed(planned.unit_id) == record
+            assert record.key.condition_id == f"{planned.condition_id}--{planned.tuple_id}"
+            attempt = AttemptRecord(
+                run_id=family.run_id,
+                config_sha256=family.config_sha256,
+                unit_id=planned.unit_id,
+                attempt=10_000,
+                key=record.key,
+                seeds=record.seeds,
+                status="failed",
+                stage="test",
+                exception_type="RuntimeError",
+                sanitized_message="test",
+                retryable=True,
+                started_at_utc=now,
+                finished_at_utc=now,
+                elapsed_wall_seconds=0.0,
+            )
+            assert family.write_attempt(attempt) is True
+            assert family.next_attempt_number(planned.unit_id) == 10_001
+            assert family.last_attempt_retryable(planned.unit_id) is True
+            assert planned.unit_id in family.completed_unit_ids()
+        # The durable activation marker is write-once and can be reopened
+        # idempotently for resume while the readiness lease remains live.
+        with activate_outcome_diagnostic_result_stores(
+            stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+        ) as resumed:
+            assert planned.unit_id in resumed.completed_unit_ids(FAMILIES[0])
+            assert resumed.store_for_family(FAMILIES[0]).next_attempt_number(planned.unit_id) == 10_001
+
+
+def test_runtime_rejects_same_byte_marker_path_replacement(authorities) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        stores = prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+        with pytest.raises(
+            OutcomeDiagnosticResultStoreError, match=r"marker (?:identity )?changed"
+        ):
+            with activate_outcome_diagnostic_result_stores(
+                stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+            ) as batch:
+                marker = snapshot.output_root / result_store.RUNTIME_ACTIVATION_MARKER_NAME
+                content = marker.read_bytes()
+                marker.unlink()
+                marker.write_bytes(content)
+                batch.completed_unit_ids()
+
+
+def test_runtime_rejects_descendant_directory_path_substitution(authorities) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        stores = prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+        with pytest.raises(OutcomeDiagnosticResultStoreError, match="path identity changed"):
+            with activate_outcome_diagnostic_result_stores(
+                stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+            ) as batch:
+                records = next(
+                    snapshot.output_root.glob(
+                        f"{FAMILIES[0]}/*/namespaces/{CONDITIONS[0]}/records"
+                    )
+                )
+                records.rename(records.with_name("records-original"))
+                records.mkdir()
+                batch.completed_unit_ids()
+
+
+def test_resume_inspector_accepts_prepared_and_activated_trees_without_parsing_results(
+    authorities, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    now = datetime.now(timezone.utc)
+    expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        stores = prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+        prepared = result_store.inspect_outcome_diagnostic_resume_tree_at(
+            lease.output_root_fd,
+            snapshot.output_root,
+            expected,
+            output_state="prepared",
+        )
+        assert prepared.stores == stores
+        assert prepared.records == ()
+        assert prepared.marker_sha256 is None
+        with pytest.raises(OutcomeDiagnosticResultStoreError, match="layout"):
+            result_store.inspect_outcome_diagnostic_resume_tree_at(
+                lease.output_root_fd,
+                snapshot.output_root,
+                expected,
+                output_state="activated",
+            )
+
+        with activate_outcome_diagnostic_result_stores(
+            stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+        ) as batch:
+            family = batch.stores[0]
+            planned = family.planned_unit(stores[0].spec.units[0].unit_id)
+            record = UnitRecord(
+                run_id=family.run_id,
+                config_sha256=family.config_sha256,
+                unit_id=planned.unit_id,
+                key=UnitKey(
+                    phase="validation",
+                    condition_id=f"{planned.condition_id}--{planned.tuple_id}",
+                    family_id=planned.heldout_family,
+                    task_id=planned.task_id,
+                    task_index=planned.task_index,
+                    replicate=planned.replicate,
+                ),
+                seeds=UnitSeeds(
+                    model_seed=planned.model_seed,
+                    environment_seed=planned.environment_seed,
+                    probe_seed=planned.probe_seed,
+                    search_seed=planned.search_seed,
+                    data_order_seed=planned.data_order_seed,
+                ),
+                exposure_manifest_sha256=planned.exposure_manifest_sha256,
+                started_at_utc=now,
+                finished_at_utc=now,
+                elapsed_wall_seconds=0.0,
+                outcome=UnitOutcome(
+                    evaluator_ran=False,
+                    valid=False,
+                    completed=False,
+                    success=False,
+                    performance_metric_id="performance_value",
+                    performance_direction="minimize",
+                ),
+                accounting=ResourceAccounting(),
+            )
+            family.write_completed(record)
+
+        monkeypatch.setattr(
+            result_store,
+            "_runtime_parse_record",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                AssertionError("readiness parsed comparative result content")
+            ),
+        )
+        activated = result_store.inspect_outcome_diagnostic_resume_tree_at(
+            lease.output_root_fd,
+            snapshot.output_root,
+            expected,
+            output_state="activated",
+        )
+        assert len(activated.records) == 1
+        assert activated.records[0].name == f"{planned.unit_id}.json"
+        assert activated.marker_sha256 is not None
+        with pytest.raises(OutcomeDiagnosticResultStoreError, match="layout"):
+            result_store.inspect_outcome_diagnostic_resume_tree_at(
+                lease.output_root_fd,
+                snapshot.output_root,
+                expected,
+                output_state="prepared",
+            )
+        record_path = next(
+            snapshot.output_root.glob(
+                f"{planned.heldout_family}/*/namespaces/{planned.condition_id}/records/"
+                f"{planned.unit_id}.json"
+            )
+        )
+        original_snapshot = result_store._resume_file_snapshot
+        replaced = False
+
+        def replace_record_after_first_snapshot(directory_fd: int, name: str):
+            nonlocal replaced
+            observed = original_snapshot(directory_fd, name)
+            if name == f"{planned.unit_id}.json" and not replaced:
+                replaced = True
+                content = record_path.read_bytes()
+                record_path.unlink()
+                record_path.write_bytes(content)
+            return observed
+
+        monkeypatch.setattr(
+            result_store, "_resume_file_snapshot", replace_record_after_first_snapshot
+        )
+        with pytest.raises(OutcomeDiagnosticResultStoreError, match="record changed"):
+            result_store.inspect_outcome_diagnostic_resume_tree_at(
+                lease.output_root_fd,
+                snapshot.output_root,
+                expected,
+                output_state="activated",
+            )
+
+
+def test_resume_inspector_rejects_same_byte_marker_replacement(
+    authorities, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        stores = prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+        with activate_outcome_diagnostic_result_stores(
+            stores, expected, lease, expected_git_commit=snapshot.git_commit_sha
+        ):
+            pass
+        marker = snapshot.output_root / result_store.RUNTIME_ACTIVATION_MARKER_NAME
+        original_snapshot = result_store._resume_file_snapshot
+        replaced = False
+
+        def replace_after_first_snapshot(directory_fd: int, name: str):
+            nonlocal replaced
+            observed = original_snapshot(directory_fd, name)
+            if name == result_store.RUNTIME_ACTIVATION_MARKER_NAME and not replaced:
+                replaced = True
+                content = marker.read_bytes()
+                marker.unlink()
+                marker.write_bytes(content)
+            return observed
+
+        monkeypatch.setattr(result_store, "_resume_file_snapshot", replace_after_first_snapshot)
+        with pytest.raises(OutcomeDiagnosticResultStoreError, match="marker changed"):
+            result_store.inspect_outcome_diagnostic_resume_tree_at(
+                lease.output_root_fd,
+                snapshot.output_root,
+                expected,
+                output_state="activated",
+            )
+
+
+def test_readiness_explicitly_recaptures_prepared_and_activated_resume_states(
+    authorities,
+) -> None:
+    snapshot, plan = authorities
+    _empty_root(snapshot.output_root)
+    expected = build_outcome_diagnostic_expected_plan(plan, snapshot.protocol)
+    with snapshot.hold_for_activation(expected_git_commit=snapshot.git_commit_sha) as lease:
+        prepare_outcome_diagnostic_result_stores(lease, snapshot.protocol, plan)
+
+    with pytest.raises(readiness.OutcomeDiagnosticReadinessError, match="empty"):
+        readiness.capture_outcome_group_diagnostic_readiness(
+            repository=REPOSITORY,
+            output_root=snapshot.output_root,
+            expected_git_commit=snapshot.git_commit_sha,
+        )
+    prepared = readiness.capture_outcome_group_diagnostic_readiness(
+        repository=REPOSITORY,
+        output_root=snapshot.output_root,
+        expected_git_commit=snapshot.git_commit_sha,
+        output_state="prepared",
+    )
+    assert prepared.output_state == "prepared"
+    assert prepared.resume_baseline.output_state == "prepared"
+    with prepared.hold_for_activation(expected_git_commit=prepared.git_commit_sha) as lease:
+        with activate_outcome_diagnostic_result_stores(
+            prepared.resume_baseline.stores,
+            expected,
+            lease,
+            expected_git_commit=prepared.git_commit_sha,
+        ):
+            pass
+
+    activated = readiness.capture_outcome_group_diagnostic_readiness(
+        repository=REPOSITORY,
+        output_root=snapshot.output_root,
+        expected_git_commit=snapshot.git_commit_sha,
+        output_state="activated",
+    )
+    assert activated.output_state == "activated"
+    assert activated.resume_baseline.output_state == "activated"
+    with activated.hold_for_activation(expected_git_commit=activated.git_commit_sha) as lease:
+        with activate_outcome_diagnostic_result_stores(
+            activated.resume_baseline.stores,
+            expected,
+            lease,
+            expected_git_commit=activated.git_commit_sha,
+        ) as resumed:
+            assert resumed.completed_unit_ids() == ()

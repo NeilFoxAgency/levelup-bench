@@ -7,8 +7,12 @@ import pytest
 import torch
 
 from levelup.core.trajectory import ActionRecord
+from levelup.experiments.milestone6_baselines import ProbeEvidence, discover_affordances
+from levelup.experiments.milestone6_phase2 import _environment, _forbidden_aliases
+from levelup.experiments.milestone6_phase3_execution import _canonical_validation_tasks
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_generation import (
     FROZEN_CANDIDATE_EPISODES,
+    FROZEN_PROBE_ACTIONS,
     FROZEN_TOTAL_ADAPTATION_ACTION_CAP,
     PEC_CONDITION,
     RP_CONDITION,
@@ -18,6 +22,7 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_generation import 
     _authorize_outcome_probe_context_for_test,
     _candidate_generation_sha256,
     authorize_outcome_generation_model,
+    authorize_outcome_probe_context,
     generate_outcome_group_candidates_with_observable_policy,
     masked_visible_action_weights,
     outcome_group_training_examples,
@@ -262,6 +267,125 @@ def test_generation_rejects_final_units_and_identity_overrides(
         generate_outcome_group_candidates_with_observable_policy(
             **kwargs,
             environment=_Environment(),
+        )
+
+
+def test_production_probe_authorization_binds_canonical_task_and_paid_evidence(
+    validated_plan: ValidatedOutcomePlan,
+    protocol_snapshot,
+) -> None:
+    unit = _unit(validated_plan)
+    task = next(item for item in _canonical_validation_tasks() if item.task_id == unit.task_id)
+    environment = _environment(task)
+    forbidden_aliases = _forbidden_aliases(environment)
+    evidence = discover_affordances(
+        environment,
+        task_id=task.task_id,
+        forbidden_aliases=forbidden_aliases,
+        seed=unit.probe_seed,
+        action_cap=FROZEN_PROBE_ACTIONS,
+        target_samples_per_alias=8,
+        actions_per_attempt=16,
+    )
+    context = authorize_outcome_probe_context(
+        environment,
+        task,
+        evidence,
+        unit,
+        validated_plan,
+        protocol_snapshot,
+    )
+    assert context.unit_id == unit.unit_id
+    assert context.task_id == task.task_id
+    assert context.task_index == task.task_index
+    assert context.family_id == task.family_id
+    assert context.environment_seed == task.environment_reset_seed == 0
+    assert context.probe_seed == unit.probe_seed
+    assert context.probe_actions == FROZEN_PROBE_ACTIONS
+    assert context.forbidden_aliases == forbidden_aliases
+    assert context.affordance_sha256 == _affordance_identity_for_test(evidence)
+
+
+def _affordance_identity_for_test(evidence: ProbeEvidence) -> str:
+    """Keep the production identity assertion independent of private context state."""
+
+    import hashlib
+
+    from levelup.experiments.runner.config import canonical_json_bytes
+
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "features": {
+                    alias: list(evidence.affordances.features[alias])
+                    for alias in sorted(evidence.affordances.features)
+                },
+                "sample_counts": {
+                    alias: evidence.affordances.sample_counts[alias]
+                    for alias in sorted(evidence.affordances.sample_counts)
+                },
+            }
+        )
+    ).hexdigest()
+
+
+def test_production_probe_authorization_rejects_foreign_identity_budget_and_forgery(
+    validated_plan: ValidatedOutcomePlan,
+    protocol_snapshot,
+) -> None:
+    unit = _unit(validated_plan)
+    task = next(item for item in _canonical_validation_tasks() if item.task_id == unit.task_id)
+    environment = _environment(task)
+    forbidden_aliases = _forbidden_aliases(environment)
+    evidence = discover_affordances(
+        environment,
+        task_id=task.task_id,
+        forbidden_aliases=forbidden_aliases,
+        seed=unit.probe_seed,
+        action_cap=FROZEN_PROBE_ACTIONS,
+        target_samples_per_alias=8,
+        actions_per_attempt=16,
+    )
+    args = (environment, task, evidence, unit, validated_plan, protocol_snapshot)
+    foreign_task = next(item for item in _canonical_validation_tasks() if item.family_id != task.family_id)
+    with pytest.raises(ValueError, match="task identity|environment"):
+        authorize_outcome_probe_context(environment, foreign_task, evidence, unit, validated_plan, protocol_snapshot)
+    foreign_environment = _environment(foreign_task)
+    with pytest.raises(ValueError, match="task|environment"):
+        authorize_outcome_probe_context(foreign_environment, task, evidence, unit, validated_plan, protocol_snapshot)
+    with pytest.raises(ValueError, match="plan|unit|seed"):
+        authorize_outcome_probe_context(
+            *args[:3],
+            replace(unit, probe_seed=unit.probe_seed + 1),
+            validated_plan,
+            protocol_snapshot,
+        )
+    with pytest.raises(ValueError, match="64"):
+        authorize_outcome_probe_context(
+            environment,
+            task,
+            replace(evidence, accounting=replace(evidence.accounting, actions=63)),
+            unit,
+            validated_plan,
+            protocol_snapshot,
+        )
+    with pytest.raises(ValueError, match="typed"):
+        authorize_outcome_probe_context(
+            environment,
+            task,
+            SimpleNamespace(**evidence.__dict__) if hasattr(evidence, "__dict__") else SimpleNamespace(),
+            unit,
+            validated_plan,
+            protocol_snapshot,
+        )
+    with pytest.raises(ValueError, match="unit|plan"):
+        authorize_outcome_probe_context(
+            environment,
+            task,
+            evidence,
+            replace(unit, final_family_access=True),
+            validated_plan,
+            protocol_snapshot,
         )
 
 
