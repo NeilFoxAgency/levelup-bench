@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
@@ -682,3 +683,162 @@ def test_resume_baseline_rejects_replacement_and_addition_before_record_parsing(
     finally:
         os.close(records_fd)
         os.close(empty_fd)
+
+
+def _activated_analysis_fixture(tmp_path: Path):
+    """Build the smallest typed readiness fixture for the activated boundary."""
+
+    class FakeStore:
+        def __init__(self, family_id: str, spec: object) -> None:
+            self.family_id = family_id
+            self.spec = spec
+
+    class FakeExpected:
+        def __init__(self) -> None:
+            self.stores = tuple(
+                SimpleNamespace(family_id=family) for family in analysis.ANCHOR_FAMILIES
+            )
+
+    expected = FakeExpected()
+    stores = tuple(
+        FakeStore(family, spec)
+        for family, spec in zip(
+            analysis.ANCHOR_FAMILIES, expected.stores, strict=True
+        )
+    )
+    baseline = result_store.OutcomeDiagnosticResumeBaseline(
+        output_root=tmp_path,
+        output_root_identity=(11, 22),
+        output_state="activated",
+        directory_identities=(),
+        records=(),
+        stores=stores,
+    )
+
+    class FakeSnapshot:
+        output_root = tmp_path
+        output_root_identity = (11, 22)
+        output_state = "activated"
+        protocol = SimpleNamespace(payload={})
+
+        def __init__(self, resume_baseline: object = baseline, resume_expected_plan: object = expected) -> None:
+            self.resume_baseline = resume_baseline
+            self.resume_expected_plan = resume_expected_plan
+
+        def preflight(self, *, expected_git_commit: str) -> None:
+            assert expected_git_commit == "a" * 40
+
+        @contextmanager
+        def hold_for_activation(self, *, expected_git_commit: str):
+            assert expected_git_commit == "a" * 40
+
+            class Lease:
+                def require_active(self):
+                    return self
+
+            yield Lease()
+
+    return FakeExpected, FakeStore, expected, baseline, FakeSnapshot
+
+
+def test_activated_analysis_uses_descriptor_captured_stores_not_inert_loader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    FakeExpected, FakeStore, expected, baseline, FakeSnapshot = _activated_analysis_fixture(
+        tmp_path
+    )
+    captured: dict[str, object] = {}
+
+    class Batch:
+        def _require_live(self, **_kwargs):
+            return None
+
+    @contextmanager
+    def activate(stores, _expected, _lease, **_kwargs):
+        captured["stores"] = stores
+        yield Batch()
+
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticReadinessSnapshot", FakeSnapshot)
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticExpectedPlan", FakeExpected)
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticResultStore", FakeStore)
+    monkeypatch.setattr(
+        analysis,
+        "build_outcome_group_diagnostic_plan_from_pinned_snapshot",
+        lambda _protocol: object(),
+    )
+    monkeypatch.setattr(
+        analysis,
+        "bind_pinned_outcome_diagnostic_plan",
+        lambda plan, *, snapshot: plan,
+    )
+    monkeypatch.setattr(
+        analysis,
+        "build_outcome_diagnostic_expected_plan",
+        lambda _plan, _protocol: expected,
+    )
+    monkeypatch.setattr(analysis, "_build_report", lambda _snapshot, _batch: {})
+    monkeypatch.setattr(analysis, "activate_outcome_diagnostic_result_stores", activate)
+    monkeypatch.setattr(
+        result_store,
+        "load_outcome_diagnostic_result_stores",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("activated analysis called the inert loader")
+        ),
+    )
+
+    report = analysis.build_outcome_group_diagnostic_analysis(
+        FakeSnapshot(), expected_git_commit="a" * 40
+    )
+    assert report == {}
+    assert captured["stores"] == tuple(baseline.stores)
+
+
+@pytest.mark.parametrize("baseline_kind", ("malformed", "mismatched-plan"))
+def test_activated_analysis_rejects_malformed_or_mismatched_resume_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baseline_kind: str
+) -> None:
+    FakeExpected, FakeStore, expected, baseline, FakeSnapshot = _activated_analysis_fixture(
+        tmp_path
+    )
+    if baseline_kind == "malformed":
+        resume_baseline: object = SimpleNamespace(
+            output_state="activated",
+            output_root=tmp_path,
+            output_root_identity=(11, 22),
+            stores=baseline.stores,
+        )
+        resume_expected = expected
+    else:
+        resume_baseline = baseline
+        resume_expected = FakeExpected()
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticReadinessSnapshot", FakeSnapshot)
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticExpectedPlan", FakeExpected)
+    monkeypatch.setattr(analysis, "OutcomeDiagnosticResultStore", FakeStore)
+    monkeypatch.setattr(
+        analysis,
+        "build_outcome_group_diagnostic_plan_from_pinned_snapshot",
+        lambda _protocol: object(),
+    )
+    monkeypatch.setattr(
+        analysis,
+        "bind_pinned_outcome_diagnostic_plan",
+        lambda plan, *, snapshot: plan,
+    )
+    monkeypatch.setattr(
+        analysis,
+        "build_outcome_diagnostic_expected_plan",
+        lambda _plan, _protocol: expected,
+    )
+    monkeypatch.setattr(analysis, "activate_outcome_diagnostic_result_stores", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("malformed baseline reached activation")))
+    monkeypatch.setattr(
+        result_store,
+        "load_outcome_diagnostic_result_stores",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("activated analysis called the inert loader")
+        ),
+    )
+    with pytest.raises(OutcomeDiagnosticAnalysisError, match="resume"):
+        analysis.build_outcome_group_diagnostic_analysis(
+            FakeSnapshot(resume_baseline, resume_expected),
+            expected_git_commit="a" * 40,
+        )

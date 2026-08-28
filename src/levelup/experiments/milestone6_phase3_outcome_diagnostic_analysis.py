@@ -57,9 +57,11 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_reducer import (
     validate_outcome_diagnostic_locked_metric,
 )
 from levelup.experiments.milestone6_phase3_outcome_diagnostic_result_store import (
+    OutcomeDiagnosticExpectedPlan,
+    OutcomeDiagnosticResultStore,
+    OutcomeDiagnosticResumeBaseline,
     activate_outcome_diagnostic_result_stores,
     build_outcome_diagnostic_expected_plan,
-    load_outcome_diagnostic_result_stores,
 )
 from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.config import canonical_json_bytes
@@ -399,6 +401,49 @@ def _locked_references(snapshot: Any) -> tuple[
     return s, b2, t, selection, anchor
 
 
+def _require_activated_resume_baseline(
+    snapshot: Any, expected: OutcomeDiagnosticExpectedPlan
+) -> OutcomeDiagnosticResumeBaseline:
+    """Return only the descriptor-captured stores for an activated tree.
+
+    Activated output already contains the durable runtime marker and completed
+    records.  The inert result-store loader intentionally rejects that marker,
+    so analysis must not reconstruct stores from paths.  Readiness has already
+    inspected the tree through held descriptors and captured typed store
+    objects in the resume baseline; this gate binds those objects to the exact
+    current expected matrix before activation revalidates marker and record
+    bytes under its own held descriptors.
+    """
+
+    base = _base_snapshot(snapshot)
+    baseline = base.resume_baseline
+    expected_baseline = base.resume_expected_plan
+    if type(baseline) is not OutcomeDiagnosticResumeBaseline:
+        _fail("activated output lacks a typed resume baseline")
+    if type(expected_baseline) is not OutcomeDiagnosticExpectedPlan:
+        _fail("activated output lacks a typed resume expected plan")
+    if expected_baseline != expected:
+        _fail("resume expected plan differs from the current frozen matrix")
+    if (
+        baseline.output_state != "activated"
+        or baseline.output_state != base.output_state
+        or baseline.output_root != base.output_root
+        or baseline.output_root_identity != base.output_root_identity
+    ):
+        _fail("activated resume baseline state or root differs from readiness")
+    stores = tuple(baseline.stores)
+    expected_stores = tuple(expected.stores)
+    if (
+        len(stores) != len(ANCHOR_FAMILIES)
+        or len(expected_stores) != len(ANCHOR_FAMILIES)
+        or tuple(store.family_id for store in stores) != ANCHOR_FAMILIES
+        or any(type(store) is not OutcomeDiagnosticResultStore for store in stores)
+        or tuple(store.spec for store in stores) != expected_stores
+    ):
+        _fail("activated resume stores differ from the frozen expected matrix")
+    return baseline
+
+
 def _candidate_summary(candidate: Any) -> dict[str, Any]:
     return {
         "condition_id": candidate.condition_id,
@@ -568,8 +613,14 @@ def build_outcome_group_diagnostic_analysis(
     )
     expected = build_outcome_diagnostic_expected_plan(plan, protocol)
     with base.hold_for_activation(expected_git_commit=expected_git_commit) as lease:
-        stores = load_outcome_diagnostic_result_stores(lease, protocol, plan)
-        with activate_outcome_diagnostic_result_stores(stores, expected, lease, expected_git_commit=expected_git_commit, validate_existing_records=False) as batch:
+        baseline = _require_activated_resume_baseline(snapshot, expected)
+        with activate_outcome_diagnostic_result_stores(
+            tuple(baseline.stores),
+            expected,
+            lease,
+            expected_git_commit=expected_git_commit,
+            validate_existing_records=False,
+        ) as batch:
             report = _build_report(snapshot, batch)
             lease.require_active()
             batch._require_live(validate_records=True)
