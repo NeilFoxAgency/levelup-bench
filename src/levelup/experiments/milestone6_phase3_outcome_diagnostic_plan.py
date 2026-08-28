@@ -135,7 +135,11 @@ def _require_digest(value: Any, label: str) -> str:
 
 def _mask_specs(snapshot: OutcomeDiagnosticProtocolSnapshot) -> dict[str, dict[str, Any]]:
     rows = snapshot.payload.get("conditions")
-    if not isinstance(rows, list):
+    # Readiness pins the protocol payload recursively, replacing mutable JSON
+    # lists with tuples and dicts with mapping proxies.  Accept both the
+    # freshly-loaded JSON shape and that immutable pinned shape, while keeping
+    # the exact condition/order checks below as the authority boundary.
+    if not isinstance(rows, (list, tuple)):
         raise OutcomeDiagnosticPlanError("diagnostic condition matrix is missing")
     result: dict[str, dict[str, Any]] = {}
     for row in rows:

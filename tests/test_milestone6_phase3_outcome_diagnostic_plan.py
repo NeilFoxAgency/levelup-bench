@@ -192,6 +192,16 @@ def test_frozen_snapshot_payload_is_logically_equivalent() -> None:
     assert _require_canonical_snapshot(frozen) == snapshot
 
 
+def test_pinned_snapshot_shape_builds_the_canonical_plan() -> None:
+    """Readiness-frozen tuples/mapping proxies must remain executable authority."""
+    snapshot = load_outcome_group_diagnostic_protocol()
+    frozen = replace(snapshot, payload=_freeze_payload(snapshot.payload))
+    expected = build_outcome_group_diagnostic_plan_from_pinned_snapshot(snapshot)
+    actual = build_outcome_group_diagnostic_plan_from_pinned_snapshot(frozen)
+    assert actual == expected
+    assert len(actual.units) == 5_760
+
+
 def test_frozen_snapshot_payload_drift_fails_closed() -> None:
     snapshot = load_outcome_group_diagnostic_protocol()
     changed = deepcopy(snapshot.payload)
