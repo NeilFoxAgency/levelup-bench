@@ -1,0 +1,145 @@
+{
+  "schema_version": "milestone6.phase3.outcome-group-diagnostic-result-lock.v1",
+  "status": "locked-development-result",
+  "scope": "known-development-only",
+  "development_only": true,
+  "final_family_access": false,
+  "final_method_selection": false,
+  "pairing_claim": false,
+  "source": {
+    "report_path": "runs/milestone6/phase3-outcome-group-diagnostic-analysis-c971334.json",
+    "source_file_sha256": "df096491a328023774c340f5bcd381630aba2675f2df82b2d8d7a9f633782bb7",
+    "analysis_sha256": "c3eb878f4e1f099443c249e98c983127199a191c16ef75738a34f2f5fbc33a91",
+    "report_commit_sha": "c971334dd7a540814afc7cb0f2ea0ab8fa3088a3",
+    "ci_run_id": 33179541524,
+    "frozen_config_path": "configs/milestone6/phase3_outcome_group_diagnostic.json",
+    "frozen_config_sha256": "dda43928b46bbf6981d50fb9d03abc5c344cfe10612d5e16cc02bd76da7646c3"
+  },
+  "coverage": {
+    "unit_count": 5760,
+    "condition_counts": {
+      "S-PEC-state-progress-elapsed-completion-listwise-optimum": 2880,
+      "S-RP-state-resource-pressure-outcome-listwise-optimum": 2880
+    },
+    "family_counts": {
+      "plain": 960,
+      "battery": 960,
+      "cooldown": 960,
+      "heat": 960,
+      "momentum": 960,
+      "combo": 960
+    },
+    "units_per_family_per_condition": 480,
+    "units_per_family_per_tuple": 40,
+    "tuples_per_condition": 12
+  },
+  "locked_anchors": {
+    "S": {
+      "condition_id": "S-state-availability-listwise-optimum",
+      "tuple_id": "lr0p01-e120-t1p2",
+      "minimum_family_success_rate": {"numerator": 17, "denominator": 40},
+      "family_order": ["plain", "battery", "cooldown", "heat", "momentum", "combo"],
+      "family_success_counts": [37, 34, 35, 17, 21, 23],
+      "units_per_family": 40
+    },
+    "B2": {
+      "condition_id": "B2-global-listwise-optimum",
+      "tuple_id": "lr0p003-e120-t1p2",
+      "minimum_family_success_rate": {"numerator": 2, "denominator": 5}
+    },
+    "T": {
+      "condition_id": "T-markov-state-transition-listwise-optimum",
+      "tuple_id": "lr0p003-e120-t1p2",
+      "minimum_family_success_rate": {"numerator": 3, "denominator": 40}
+    }
+  },
+  "conditions": [
+    {
+      "condition_id": "S-PEC-state-progress-elapsed-completion-listwise-optimum",
+      "classification": "robust_harm",
+      "selected": {
+        "tuple_id": "lr0p003-e120-t1p2",
+        "retained_tuple_ids": ["lr0p003-e120-t0p9", "lr0p003-e120-t1p2"],
+        "minimum_family_success_rate": {"numerator": 1, "denominator": 5},
+        "family_success_counts": [39, 37, 38, 8, 28, 27],
+        "units_per_family": 40,
+        "worst_family_median_restricted_interactions": {"numerator": 2049, "denominator": 1},
+        "macro_average_family_median_restricted_interactions": {"numerator": 2927, "denominator": 6}
+      },
+      "matched_S": {
+        "tuple_id": "lr0p01-e120-t1p2",
+        "minimum_family_success_rate": {"numerator": 1, "denominator": 20},
+        "family_success_counts": [39, 29, 26, 2, 19, 15],
+        "units_per_family": 40,
+        "worst_family_median_restricted_interactions": {"numerator": 2049, "denominator": 1},
+        "macro_average_family_median_restricted_interactions": {"numerator": 13639, "denominator": 12}
+      },
+      "delta_vs_locked_S": {
+        "selected": {"numerator": -9, "denominator": 40},
+        "matched_S": {"numerator": -3, "denominator": 8}
+      }
+    },
+    {
+      "condition_id": "S-RP-state-resource-pressure-outcome-listwise-optimum",
+      "classification": "robust_harm",
+      "selected": {
+        "tuple_id": "lr0p003-e120-t0p9",
+        "retained_tuple_ids": ["lr0p003-e120-t0p9", "lr0p003-e120-t1p2"],
+        "minimum_family_success_rate": {"numerator": 11, "denominator": 40},
+        "family_success_counts": [40, 38, 39, 11, 24, 26],
+        "units_per_family": 40,
+        "worst_family_median_restricted_interactions": {"numerator": 2049, "denominator": 1},
+        "macro_average_family_median_restricted_interactions": {"numerator": 7345, "denominator": 12}
+      },
+      "matched_S": {
+        "tuple_id": "lr0p01-e120-t1p2",
+        "minimum_family_success_rate": {"numerator": 1, "denominator": 20},
+        "family_success_counts": [40, 28, 38, 2, 6, 26],
+        "units_per_family": 40,
+        "worst_family_median_restricted_interactions": {"numerator": 2049, "denominator": 1},
+        "macro_average_family_median_restricted_interactions": {"numerator": 10955, "denominator": 12}
+      },
+      "delta_vs_locked_S": {
+        "selected": {"numerator": -3, "denominator": 20},
+        "matched_S": {"numerator": -3, "denominator": 8}
+      }
+    }
+  ],
+  "total_deduplicated_cost": {
+    "unit_count": 5760,
+    "model_owner_count": 240,
+    "model_owner_consumer_count": 5760,
+    "forward_passes": 9270000,
+    "optimizer_steps": 36000,
+    "recurrent_steps": 0,
+    "training_examples": 61800
+  },
+  "claims": {
+    "both_groups_robust_harm": true,
+    "possible_interaction": false,
+    "overall_inconclusive": false,
+    "interpretation": "Under this exact development-only pooled-transition protocol, both added outcome-channel groups are robustly harmful relative to locked S. This is a protocol-local diagnostic, not a causal feature-importance result; it does not establish transition, history, sequence, pairing, or final-family conclusions."
+  },
+  "forbidden_claims": {
+    "transition": false,
+    "history": false,
+    "sequence": false,
+    "pairing": false,
+    "final_method_selection": false,
+    "final_family_unlock": false,
+    "advancement_to_paired_objectives": false
+  },
+  "next_authorized_work": {
+    "status": "design-freeze-only",
+    "scope": "development-only",
+    "representation": "state-conditioned/local-affordance summaries over one newly captured 64-action raw-probe evidence set shared exactly across every next-rung condition",
+    "anchors": ["S-state-availability-listwise-optimum", "B2-global-listwise-optimum"],
+    "same_data_control": "alias-pooled outcome summaries over those exact captured transitions, preserving every row and action count while removing learner-visible local pre-state/effect alignment",
+    "execute": false,
+    "inspect_comparative_results": false,
+    "pairing_claim": false,
+    "final_family_access": false,
+    "rationale": "Freeze a new immutable development-only raw-probe evidence build and the next state/local-affordance representation before any execution; rerun the strong B2 and S anchors on those same captured rows, and isolate whether local pre-state/effect alignment adds information without changing data, capacity, budgets, or final-family scope."
+  },
+  "result_lock_sha256": "439d2f19f0f7d717efcb498353e402ebaa446fe06131516a7af6367b7711cddf"
+}

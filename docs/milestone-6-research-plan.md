@@ -868,3 +868,40 @@ as well as before it. This permits model preparation only after the implementati
 local and exact-head CI. It does not authorize candidate generation or outcome execution: those
 remain blocked until all 240 models are complete, a compact model authority is generated and
 committed, and the execution readiness gate binds that authority and its exact store identity.
+
+### Phase 3 outcome-group diagnostic result (development-only)
+
+The outcome-group diagnostic completed its frozen 5,760-unit development matrix (2,880 units per
+condition; 960 per family) on CI run `33179541524` at commit
+`c971334dd7a540814afc7cb0f2ea0ab8fa3088a3`. The validated canonical analysis report is retained as
+an ignored artifact with file SHA-256
+`df096491a328023774c340f5bcd381630aba2675f2df82b2d8d7a9f633782bb7` and analysis self-hash
+`c3eb878f4e1f099443c249e98c983127199a191c16ef75738a34f2f5fbc33a91`. The compact, committed lock
+is [`phase3_outcome_group_diagnostic_result.json`](../configs/milestone6/phase3_outcome_group_diagnostic_result.json),
+which preserves the exact source lineage, coverage, rational metrics, and scope restrictions.
+
+Locked S reached minimum-family success `17/40`, with family success counts
+`[37, 34, 35, 17, 21, 23]` in the declared family order. B2 and T remain the strong anchors. The
+S-RP condition selected `lr0p003-e120-t0p9` (retained tuples `lr0p003-e120-t0p9` and
+`lr0p003-e120-t1p2`) and scored `11/40`; its matched-S tuple scored `1/20`, for exact deltas
+`-3/20` and `-3/8`. S-PEC selected `lr0p003-e120-t1p2` (retained tuples
+`lr0p003-e120-t0p9` and `lr0p003-e120-t1p2`) and scored `1/5`; its matched-S tuple scored `1/20`,
+for exact deltas `-9/40` and `-3/8`. Both groups are therefore classified as robust harm under
+the unchanged diagnostic rule; no interaction hypothesis is supported.
+
+This is a protocol-local development diagnostic: adding these measured outcome channels to S under
+the pooled transition summary was harmful in this matrix. It is not a causal feature-importance
+result and does not establish transition, history, sequence, pairing, advancement, final-method,
+or final-family claims. The complete deduplicated cost was 9,270,000 forward passes, 36,000
+optimizer steps, zero recurrent steps, and 61,800 training examples across 240 model owners and
+5,760 consumers.
+
+The next authorized rung is a separate design freeze for state-conditioned/local-affordance
+summaries. The existing evidence artifacts retain pooled affordance tables but not the individual
+64 probe-transition rows, so this rung must first capture and lock a new development-only raw-probe
+evidence set. S, B2, the local condition, and its alias-pooled same-data control must then be derived
+from those exact same captured rows. The pooled control preserves every transition and action count
+while removing learner-visible local pre-state/effect alignment. This design work is
+development-only and does not authorize execution, comparative-result inspection, pairing claims,
+or final-family access. The robust-harm result must remain unchanged; thresholds, budgets, and
+scope are not to be retuned to reverse it.
