@@ -1,0 +1,391 @@
+{
+  "schema_version": "milestone6.phase3.local-affordance-protocol.v2",
+  "status": "frozen-design-only",
+  "scope": "known-development-only",
+  "execution": false,
+  "freeze_record": {
+    "frozen_at_local_date": "2026-08-28",
+    "timing": "before any local-affordance comparative development result",
+    "comparative_results_inspected_before_freeze": false,
+    "reason": "test whether current-state-local transition effects add information beyond the pooled S representation after the outcome-group diagnostic found pooled outcome channels harmful"
+  },
+  "authority": {
+    "development_protocol": {
+      "path": "configs/milestone6/development_protocol.json",
+      "sha256": "7e6911c120db091e2b250f7a91520dd5f81a481cb4a19662eeae858c7da1c059"
+    },
+    "development_tasks": {
+      "path": "configs/milestone6/development_tasks.json",
+      "sha256": "20f6606bd2150d808b18f011976bbf7c8298627e1cc01eeb67f653eacba9731f"
+    },
+    "phase2_selection_lock": {
+      "path": "configs/milestone6/phase2_screening_selection.json",
+      "sha256": "499910276af4359ce3c295933c4ae81293d8a23434f712e310921d05b626f06c"
+    },
+    "phase3_representation_ladder": {
+      "path": "configs/milestone6/phase3_representation_ladder.json",
+      "sha256": "287b43ff8a3d7231162b6dfd9580af04073ad6d7b6eb030ac41fbf2121dd7afa"
+    },
+    "phase3_plan_lock": {
+      "path": "configs/milestone6/phase3_plan_lock.json",
+      "sha256": "58ed9935fc0dceb2d6d55fb55422f725e9a085aa41b9fb699afc6af90a28c81b"
+    },
+    "phase3_outcome_group_diagnostic_result": {
+      "path": "configs/milestone6/phase3_outcome_group_diagnostic_result.json",
+      "sha256": "2143d383e13c391775df2d0fdd7f1f94495d3e44d78ff8f10db17fe7c73dd4a4"
+    }
+  },
+  "raw_probe_evidence_authority": {
+    "schema_version": "milestone6.phase3.raw-probe-evidence-authority.v2",
+    "status": "frozen-before-local-affordance-results",
+    "purpose": "new immutable raw-probe evidence because prior Phase 3 artifacts retain pooled affordance tables but not raw probe rows",
+    "task_raw_artifacts": {
+      "count": 240,
+      "factorization": "6 development families x 5 replicates x 8 tasks",
+      "identity": "exactly one sorted manifest entry per (family_id, replicate, task_id), with no missing, duplicate, or extra identity",
+      "rows_per_artifact": 64,
+      "rows": "each row is exactly one learner-observable ObservedTransition plus its canonical probe_index",
+      "reducer_population": "one task raw artifact only; rows from different task, replicate, family, phase, or artifact identities are never pooled",
+      "probe_index_uniqueness": "the zero-based probe_index values 0..63 occur exactly once within each reducer population"
+    },
+    "training_evidence_manifests": {
+      "count": 30,
+      "factorization": "6 leave-one-family-out folds x 5 replicates",
+      "identity": "exactly one sorted manifest per (fold_id, replicate), with no missing, duplicate, or extra identity",
+      "task_references_per_manifest": 40,
+      "task_factorization": "5 nonheld development families x 8 tasks",
+      "raw_rows_referenced_per_manifest": 2560,
+      "reference_source": "reuse the exact immutable v1 sanitized optimum traces bound by each canonical Phase 3 evidence digest; do not rerun or alter reference trajectories",
+      "pooled_table_parity": "for every task, rebuilding the pooled affordance table from the new raw rows must be byte-identical to the canonical v1 pooled table or the artifact is invalid"
+    },
+    "heldout_probe_bindings": {
+      "count": 240,
+      "factorization": "6 folds x 5 replicates x 8 heldout tasks",
+      "identity": "exactly one sorted binding per (fold_id, replicate, task_id), where fold_id equals the heldout family and each binding selects the matching task raw artifact",
+      "task_references_per_binding": 1
+    },
+    "probe_policy": {
+      "probe_actions_per_task": 64,
+      "target_samples_per_alias": 8,
+      "probe_actions_per_attempt": 16,
+      "canonical_probe_index": "zero-based action order within the fixed 64-action probe stream",
+      "all_conditions_same_rows": true,
+      "logical_identity_digest": "bind each condition view to the exact raw-row bytes and digest for fold, replicate, task, phase, and probe_index"
+    },
+    "learner_visibility": {
+      "storage_row_payload": "ObservedTransition plus canonical probe_index only",
+      "probe_index_use": "artifact verification and deterministic reducer tie-breaking only; never serialize probe_index into a learner feature tensor or training example",
+      "metadata_ids": "learner-invisible",
+      "forbidden_fields": [
+        "fold_id",
+        "replicate",
+        "task_id",
+        "family_id",
+        "trajectory_id",
+        "pair_id",
+        "alignment_id",
+        "shared_record_key",
+        "raw_artifact_path",
+        "raw_artifact_digest"
+      ],
+      "metadata_use": "metadata may bind storage and audit identity but must not be serialized into learner inputs or examples"
+    },
+    "immutability": {
+      "regeneration": "forbidden after authority freeze",
+      "byte_and_digest_identity": "all four conditions consume byte-identical raw rows for each logical identity",
+      "consumer_charge": "each condition consumer is charged the full 64 probe actions even when a raw artifact is shared",
+      "fold_view_isolation": "model preparation receives capabilities only for the 40 task artifacts named by its (fold_id, replicate) training manifest; it cannot enumerate or read the heldout family's task artifacts or any heldout binding",
+      "heldout_view_isolation": "candidate generation receives exactly one authorized heldout task binding for its planned unit; it cannot enumerate or read any other task raw artifact",
+      "readiness_check": "fail closed on any missing, extra, duplicate, cross-fold, cross-replicate, or unauthorized task-artifact capability"
+    },
+    "cost_ownership": {
+      "physical_raw_probe_actions": 15360,
+      "physical_formula": "240 unique task raw artifacts x 64 actions",
+      "whole_matrix_consumer_equivalent_probe_actions": 737280,
+      "consumer_formula": "11520 comparative units x 64 paid probe actions",
+      "reporting_rule": "report physical preparation actions and consumer-equivalent restricted interactions separately; never sum them as though both were distinct environment interactions and never describe shared probes as free",
+      "prior_v1_reuse_exception": "the earlier Phase 3 zero-charge evidence-reuse statement does not apply to this new raw-row capture; the 15360 physical actions are a new reported preparation cost"
+    }
+  },
+  "development_matrix": {
+    "family_order": [
+      "plain",
+      "battery",
+      "cooldown",
+      "heat",
+      "momentum",
+      "combo"
+    ],
+    "fold_kind": "leave-one-family-out",
+    "replicates": [0, 1, 2, 3, 4],
+    "heldout_tasks_per_family": 8,
+    "conditions": 4,
+    "candidate_tuples_per_condition": 12,
+    "units_per_condition": 2880,
+    "units": 11520,
+    "model_owners_per_condition": 120,
+    "model_owners": 480,
+    "unit_formula": "4 conditions x 12 tuples x 6 heldout families x 5 replicates x 8 tasks"
+  },
+  "conditions": [
+    {
+      "condition_id": "B2-global-listwise-optimum",
+      "role": "strong_optimum_imitation_anchor",
+      "representation": "global optimum-imitation representation on the new raw evidence",
+      "input_width": 49,
+      "trainable_parameters": 3601,
+      "capacity_policy": "retain full grid, examples, labels, optimizer, updates, probes, candidate episodes, search and adaptation budgets; never restrict B2"
+    },
+    {
+      "condition_id": "S-state-availability-listwise-optimum",
+      "role": "state-availability-pooled-control",
+      "representation": "five current-state scalars plus the exact S-masked pooled 49-vector: outcome indices 4..10 are zero in every summary block",
+      "input_width": 54,
+      "trainable_parameters": 3841,
+      "pooled_summary_width": 49,
+      "bitwise_parity_requirement": "S candidate tensors must equal the canonical S mask built from the same captured rows"
+    },
+    {
+      "condition_id": "P-state-availability-alias-pooled-outcome-listwise-optimum",
+      "role": "same-data-pooled-alignment-control",
+      "representation": "exact S representation, with outcome indices 4..10 filled from all same-alias rows rather than a current-state-local subset",
+      "input_width": 54,
+      "trainable_parameters": 3841,
+      "control": "preserve every raw row and action count while removing learner-visible local pre-state/effect alignment",
+      "bitwise_parity_requirement": "P candidate tensors must equal the canonical full T transform built from the same captured rows"
+    },
+    {
+      "condition_id": "L-state-availability-local-outcome-listwise-optimum",
+      "role": "state-conditioned-local-affordance",
+      "representation": "exact S-masked candidate row with only the zeroed outcome indices 4..10 filled by a deterministic current-state-local same-alias summary",
+      "input_width": 54,
+      "trainable_parameters": 3841
+    }
+  ],
+  "capacity_matching": {
+    "symmetric_parameter_tolerance_fraction": 0.1,
+    "formula": "abs(left-right) / max(left,right)",
+    "counts": {
+      "B2": 3601,
+      "S": 3841,
+      "P": 3841,
+      "L": 3841
+    },
+    "maximum_pairwise_fraction": 0.06248372819578235,
+    "same_architecture_conditions": ["S", "P", "L"],
+    "fixed_reducer_parameter_count": 0,
+    "rule": "all pairwise trainable-parameter differences must be within the symmetric tolerance; fixed preprocessing adds no learned parameters and B2 retains its full capacity and budget"
+  },
+  "local_affordance_transform": {
+    "base": "start from the exact S-masked pooled 49-vector for the candidate alias, whose outcome indices 4..10 are zero in every summary block",
+    "application": "recompute from the shared immutable raw rows at every training and candidate-search decision using that decision's current learner-observable state",
+    "distance_coordinates": [
+      "progress",
+      "remaining",
+      "resource",
+      "pressure"
+    ],
+    "distance_definition": "squared Euclidean distance over the four canonical bounded pre-state coordinates",
+    "row_order": "within exactly one task raw artifact, sort same-alias probe rows by distance ascending, breaking ties by the unique canonical probe_index ascending",
+    "k": 4,
+    "k_selectable": false,
+    "k_eff": "min(4, n) where n is the same-alias row count",
+    "statistics": {
+      "mean": true,
+      "std": "biased population standard deviation (unbiased=false)",
+      "min": true,
+      "max": true
+    },
+    "replace_only_indices": [4, 5, 6, 7, 8, 9, 10],
+    "outcome_index_order": [
+      "progress_delta",
+      "elapsed_delta",
+      "resource_delta",
+      "pressure_delta",
+      "after_resource",
+      "after_pressure",
+      "completed"
+    ],
+    "summary_block_width": 12,
+    "summary_block_count": 4,
+    "preserve_byte_identity_indices": [0, 1, 2, 3, 11],
+    "coverage_index": 48,
+    "coverage_byte_identity": true,
+    "unknown_alias": "zero/neutral outcome and no local lookup; use the frozen eligible uniform fallback",
+    "preprocessing": "no radius, learned preprocessing, adaptive k, or additional selectable transform",
+    "pooled_control": "P fills indices 4..10 from all same-alias rows, preserving every row and count and removing local alignment"
+  },
+  "shared_training_and_search": {
+    "examples": "same optimum reference-decision identities, selected labels, candidate-alias order, example order, and batch order for B2, S, P, and L; only the declared candidate feature representation differs",
+    "objective": "optimum-only listwise next-action imitation",
+    "optimizer": "adam",
+    "weight_decay": 0.0001,
+    "device": "cpu",
+    "torch_threads": 1,
+    "processes": 1,
+    "probe_actions_per_task": 64,
+    "probe_coverage_target_samples_per_alias": 8,
+    "probe_actions_per_attempt": 16,
+    "candidate_episodes_per_task": 150,
+    "adaptation_actions_per_task": 2048,
+    "maximum_actions_per_candidate_episode": 64,
+    "exact_optimum_affects_search_control_flow": false,
+    "oracle_timing": "after complete fixed candidate batch and independent replay",
+    "condition_pairing": "identical model, probe, search, data-order, family, task, fold, replicate and candidate-tuple seed identities"
+  },
+  "model_owner_identity": {
+    "fields": [
+      "condition_id",
+      "fold_id",
+      "replicate",
+      "training_tuple_id",
+      "evidence_manifest_sha256",
+      "representation_sha256",
+      "model_seed",
+      "data_order_seed",
+      "learning_rate",
+      "training_epochs",
+      "optimizer",
+      "weight_decay",
+      "architecture_sha256"
+    ],
+    "search_temperature_in_identity": false,
+    "temperature_reuse": "one model owner serves the three search-temperature consumers for the same condition, fold, replicate, and training tuple without retraining",
+    "training_tuples_per_condition": 4,
+    "owner_formula": "4 conditions x 6 folds x 5 replicates x 4 (learning_rate, training_epochs) tuples = 480",
+    "consumers_per_owner": 24,
+    "consumer_formula": "3 search temperatures x 8 heldout tasks",
+    "selected_tuple_cost_scope": "sum exactly 30 unique model-owner reports for the selected condition and training tuple: 6 folds x 5 replicates; never multiply by heldout tasks or search temperatures"
+  },
+  "seed_policy": {
+    "model_base": 6100000,
+    "probe_base": 6200000,
+    "search_base": 6300000,
+    "data_order_base": 6400000,
+    "formula": "base + family_order_index * 10000 + replicate * 100000 + task_index where a task component applies",
+    "condition_pairing": "B2, S, P and L use identical non-label seeds for each matched logical unit",
+    "seed_sets_frozen": true
+  },
+  "candidate_tuples": [
+    "lr0p003-e120-t0p6",
+    "lr0p003-e120-t0p9",
+    "lr0p003-e120-t1p2",
+    "lr0p003-e180-t0p6",
+    "lr0p003-e180-t0p9",
+    "lr0p003-e180-t1p2",
+    "lr0p01-e120-t0p6",
+    "lr0p01-e120-t0p9",
+    "lr0p01-e120-t1p2",
+    "lr0p01-e180-t0p6",
+    "lr0p01-e180-t0p9",
+    "lr0p01-e180-t1p2"
+  ],
+  "selection_rule": {
+    "primary_metric": "minimum_family_exact_optimum_success_rate",
+    "primary_direction": "maximize",
+    "success_tolerance_absolute": 0.05,
+    "failure_sentinel": 2049,
+    "steps": [
+      "independently select one tuple for each of B2, S, P and L over the complete 12-tuple grid",
+      "retain tuples within inclusive 0.05 absolute of that condition's best minimum-family success",
+      "minimize worst-family median restricted interactions",
+      "minimize macro-average family median restricted interactions",
+      "minimize summed unique model-owner optimizer steps, then forward passes, then recurrent steps",
+      "choose ascending numeric (learning_rate, training_epochs, search_temperature)"
+    ],
+    "restricted_interactions": "paid heldout probes plus candidate-generation actions through first post-hoc exact candidate; failures use 2049",
+    "excluded_channels": [
+      "evidence preparation",
+      "model training",
+      "candidate replay",
+      "oracle calls",
+      "resets",
+      "forward passes",
+      "recurrent steps",
+      "wall time"
+    ],
+    "tie_breaking": "inherited exactly from the frozen Phase 3 selector; no changes after results",
+    "eligible_hyperparameters": [
+      "learning_rate",
+      "training_epochs",
+      "search_temperature"
+    ],
+    "ineligible_hyperparameters": [
+      "architecture",
+      "hidden_widths",
+      "weight_decay",
+      "optimizer",
+      "probe_budget",
+      "search_budget",
+      "interaction_budget",
+      "seeds",
+      "feature_mask",
+      "k",
+      "distance_coordinates",
+      "preprocessing",
+      "training_objective"
+    ]
+  },
+  "diagnostics": {
+    "status": "pre-outcome and non-selection only",
+    "query_populations": {
+      "training": "every available candidate alias at every optimum reference-decision pre-state in the 30 training evidence manifests",
+      "heldout": "every available candidate alias at every learner-observable pre-state in the 240 fixed heldout 64-action probe bindings",
+      "forbidden": "candidate-search trajectories, exact-optimum classifications, evaluator results, and comparative condition outcomes"
+    },
+    "required": [
+      "alias_counts",
+      "k_eff",
+      "kth_distance",
+      "n_less_than_4",
+      "unknown_alias_count",
+      "local_used",
+      "local_vs_pooled_outcome_block_byte_difference"
+    ],
+    "reporting": "compute after raw-evidence freeze but before model preparation or candidate search; report separately for training and heldout query populations and by family; diagnostics cannot select tuples or alter the protocol"
+  },
+  "alignment_claim_gate": {
+    "eligible_row": "known alias with n > 4 and at least two distinct outcome vectors",
+    "effective_change": "local-vs-pooled outcome-block bytes differ for the eligible row",
+    "aggregate_minimum_fraction": 0.8,
+    "per_family_minimum_fraction": 0.5,
+    "apply_separately": ["training", "heldout"],
+    "failure": "if the gate fails, forbid any local-alignment claim without changing the run"
+  },
+  "claim_and_advancement_rule": {
+    "conditional_transition_claim": "L minimum-family success minus S must be strictly greater than 0.05",
+    "local_alignment_claim": "L minimum-family success minus P must be strictly greater than 0.05 and the alignment_claim_gate must pass",
+    "full_rung_claim": "requires both the conditional-transition and local-alignment criteria",
+    "within_tolerance": "a difference at or below 0.05 supports no robust claim",
+    "history_advancement": "requires both full-rung criteria, no development-family drop greater than 0.05 versus independently selected B2, and L minimum-family success no more than 0.05 below B2",
+    "forbidden_claims": [
+      "pairing",
+      "final method selection",
+      "final-family access",
+      "sequence",
+      "history",
+      "causal feature importance",
+      "universal usefulness or harm"
+    ],
+    "historical_phase3_results": "contextual only; never pool historical results with this rerun"
+  },
+  "execution_boundary": {
+    "final_family_access": false,
+    "comparative_result_inspection": false,
+    "execution_authorized": false,
+    "authorization_requires": [
+      "raw evidence schema and immutable authority implementation",
+      "typed sanitizer enforcement proving probe_index and identity metadata cannot enter learner tensors or examples",
+      "capability-scoped fold isolation proving model preparation cannot read heldout task artifacts or bindings",
+      "condition representation implementation",
+      "model authority",
+      "readiness with immutable bytes and descriptor identities",
+      "focused CI",
+      "full CI",
+      "exact-head CI",
+      "clean authorized commit"
+    ],
+    "no_final_paths_or_consumers": true,
+    "no_pairing_or_history": true
+  }
+}

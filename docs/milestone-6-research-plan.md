@@ -905,3 +905,76 @@ while removing learner-visible local pre-state/effect alignment. This design wor
 development-only and does not authorize execution, comparative-result inspection, pairing claims,
 or final-family access. The robust-harm result must remain unchanged; thresholds, budgets, and
 scope are not to be retuned to reverse it.
+
+### Phase 3 local-affordance protocol (frozen design only)
+
+The next rung is frozen in
+[`phase3_local_affordance_protocol.json`](../configs/milestone6/phase3_local_affordance_protocol.json)
+before any comparative outcome is inspected. Its authority binds the development protocol and
+task manifest, the Phase 2 selection lock, the Phase 3 representation and plan locks, and the
+committed outcome-group diagnostic result by exact SHA-256. It is known-development-only: no final
+family path, consumer, or result is in scope, and execution remains disabled until the separately
+required schema, implementation, model-authority, readiness, and CI gates pass.
+
+The old Phase 3 evidence lacks individual probe rows, so this rung creates a new immutable v2 raw-
+probe evidence authority. It contains exactly 240 unique task/replicate raw artifacts (six
+families by five replicates by eight tasks), 30 leave-one-family-out training manifests, and 240
+held-out task bindings. Each training manifest references 40 non-held tasks; every reducer
+population is one 64-row task artifact, where `probe_index` is unique. Each stored row is only the learner-observable `ObservedTransition` and canonical
+`probe_index`; the index is used only for artifact verification and deterministic reducer
+tie-breaking and never enters a learner tensor. Storage and audit identifiers are
+learner-invisible. Every task receives exactly 64 paid probe
+actions, targets eight samples per alias, and uses 16 actions per attempt. All four conditions use
+byte-identical rows and digests for each logical identity, while each consumer pays its own 64-
+action probe charge. The 240 shared captures cost 15,360 physical preparation actions; the complete
+matrix carries 737,280 consumer-equivalent probe actions in the restricted-interaction metric.
+Those quantities are reported separately and are never added as if both were distinct interactions.
+Although the store contains all task artifacts, model preparation is capability-limited to the 40
+tasks in its fold/replicate training manifest and cannot enumerate or read that fold's held-out
+family. Candidate generation receives only its one planned held-out binding. Readiness fails closed
+on any broader, missing, duplicate, or cross-fold capability.
+
+The complete development matrix is 4 conditions x 12 numeric tuples x 6 families x 5 replicates
+x 8 held-out tasks = 11,520 units and 480 model owners. B2 is the full 3,601-parameter global
+optimum-imitation anchor; S is the 3,841-parameter state/availability pooled representation; P is
+the 3,841-parameter alias-pooled outcome control; and L is the 3,841-parameter local-affordance
+condition. They share optimum examples, labels, order, optimizer, seeds, and all training,
+inference, search, and adaptation budgets. B2 retains the complete grid and is never restricted.
+All pairwise parameter differences must satisfy the frozen symmetric
+`abs(left-right)/max(left,right) <= 0.10` rule; S, P, and L use the identical MLP, and the local
+reducer has no learned parameters.
+Model-owner identity excludes search temperature: each owner is trained once for one of four
+learning-rate/epoch tuples and serves three temperature consumers without retraining. This gives
+480 owners, and selected-tuple cost sums exactly 30 owners per condition.
+
+S is the exact frozen mask with outcome indices 4..10 zeroed in every pooled summary block. L
+starts from that exact S-masked 49-vector. For a candidate alias, same-alias rows from one task
+artifact are sorted by
+squared Euclidean distance on the four bounded pre-state coordinates `(progress, remaining,
+resource, pressure)`, with canonical `probe_index` as the tie-break. A fixed `k=4` gives
+`k_eff=min(4,n)`; biased (`unbiased=false`) standard deviation, mean, minimum, and maximum are
+computed over those rows. Only outcome indices 4..10 in each 12-channel summary block change.
+Indices 0..3 and 11, plus coverage index 48, remain byte-identical. Unknown aliases use the
+zero/neutral fallback. There is no radius or learned preprocessing. P computes the same outcome
+slots from all same-alias rows, preserving every row and count while removing local alignment.
+
+The selector is inherited unchanged: maximize minimum-family exact-optimum success, retain the
+inclusive 0.05 band, then apply the frozen restricted-interaction and cost tie-breaks. Only
+learning rate, epochs, and search temperature are eligible for selection; `k`, distance
+coordinates, preprocessing, architecture, seeds, objective, and budgets are not. Pre-outcome
+diagnostics (alias counts, `k_eff`, kth distance, small-support and unknown counts, local-use, and
+local-vs-pooled outcome-block byte differences) are non-selection only. Before model preparation
+or candidate search, training diagnostics query every candidate alias at optimum reference
+decision states, while held-out diagnostics query every candidate alias at the pre-states already
+captured by the fixed 64-action held-out probes; candidate-search trajectories, evaluator results,
+and comparative outcomes are forbidden from this preflight.
+
+The local-alignment gate requires an effective local-vs-pooled outcome-block change for at least
+0.80 of eligible rows in aggregate and at least 0.50 in every family, separately for training and
+held-out evidence. An eligible row has a known alias with `n > 4` and at least two distinct
+outcome vectors. L>S by more than 0.05 permits only a conditional-transition-beyond-S claim; L>P
+by more than 0.05 plus the coverage gate permits only a local-alignment claim. Both are required
+for a full-rung claim, and differences within 0.05 support no robust claim. Advancement to a
+history experiment additionally requires both gates, no family drop over 0.05 versus selected B2,
+and L no more than 0.05 below B2. Pairing, sequence, history, final-method, and final-family
+claims remain forbidden, and historical Phase 3 outcomes remain contextual rather than pooled.
