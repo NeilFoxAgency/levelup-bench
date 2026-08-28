@@ -15,10 +15,7 @@ from types import MappingProxyType
 from typing import Any, Mapping
 
 from levelup.experiments.milestone6_phase3_anchor_selection_metrics import (
-    validate_phase3_anchor_selection_metrics_bytes,
-)
-from levelup.experiments.milestone6_phase3_evidence import (
-    load_committed_phase3_evidence_lock_bytes,
+    validate_pinned_phase3_anchor_selection_metrics_bytes,
 )
 from levelup.experiments.milestone6_phase3_model_authority import (
     load_phase3_model_artifact_authority_bytes,
@@ -34,7 +31,6 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_protocol import (
 from levelup.experiments.milestone6_phase3_plan import (
     REPLICATES,
     Phase3Plan,
-    load_committed_phase3_plan_lock_bytes,
     validate_phase3_plan_lock_bytes,
 )
 from levelup.experiments.runner.config import canonical_json_bytes
@@ -345,19 +341,12 @@ def _load_authorities(
 ) -> tuple[Phase3Plan, dict[str, Any], Any, Any]:
     authority = dict(snapshot.authority_bytes)
     try:
-        plan_bytes = load_committed_phase3_plan_lock_bytes()
-        if plan_bytes != authority["phase3_plan"]:
-            raise OutcomeDiagnosticPlanError(
-                "committed Phase 3 plan bytes differ from diagnostic authority"
-            )
+        plan_bytes = authority["phase3_plan"]
         phase3_plan = validate_phase3_plan_lock_bytes(plan_bytes)
-        evidence_bytes = load_committed_phase3_evidence_lock_bytes()
-        if evidence_bytes != authority["phase3_evidence"]:
-            raise OutcomeDiagnosticPlanError(
-                "committed Phase 3 evidence bytes differ from diagnostic authority"
-            )
         model = load_phase3_model_artifact_authority_bytes(authority["phase3_model_authority"])
-        anchor = validate_phase3_anchor_selection_metrics_bytes(authority["phase3_anchor_metrics"])
+        anchor = validate_pinned_phase3_anchor_selection_metrics_bytes(
+            authority["phase3_anchor_metrics"]
+        )
         evidence = _authority_body(snapshot, "phase3_evidence")
         selection = _authority_body(snapshot, "phase3_development_selection", canonical=False)
     except (OSError, TypeError, ValueError) as exc:
@@ -661,6 +650,16 @@ def build_outcome_group_diagnostic_plan(
 ) -> OutcomePlan:
     snapshot = load_outcome_group_diagnostic_protocol() if snapshot is None else snapshot
     snapshot = _require_canonical_snapshot(snapshot)
+    return build_outcome_group_diagnostic_plan_from_pinned_snapshot(snapshot)
+
+
+def build_outcome_group_diagnostic_plan_from_pinned_snapshot(
+    snapshot: OutcomeDiagnosticProtocolSnapshot,
+) -> OutcomePlan:
+    """Build from immutable authority bytes held by a readiness capability."""
+
+    if not isinstance(snapshot, OutcomeDiagnosticProtocolSnapshot):
+        raise OutcomeDiagnosticPlanError("pinned outcome protocol snapshot is not typed")
     phase3_plan, evidence, _model_authority, _anchor = _load_authorities(snapshot)
     plan = _construct_outcome_group_diagnostic_plan(snapshot, phase3_plan, evidence)
     plan = OutcomePlan(
@@ -679,7 +678,9 @@ def build_outcome_group_diagnostic_plan(
         plan.units,
         False,
     )
-    validate_outcome_diagnostic_plan(plan, snapshot=snapshot)
+    _validate_outcome_diagnostic_plan_from_pinned_snapshot(
+        plan, snapshot=snapshot, phase3_plan=phase3_plan
+    )
     return plan
 
 
@@ -690,6 +691,19 @@ def validate_outcome_diagnostic_plan(
     phase3_plan: Phase3Plan | None = None,
 ) -> None:
     snapshot = _require_canonical_snapshot(snapshot)
+    _validate_outcome_diagnostic_plan_from_pinned_snapshot(
+        plan, snapshot=snapshot, phase3_plan=phase3_plan
+    )
+
+
+def _validate_outcome_diagnostic_plan_from_pinned_snapshot(
+    plan: OutcomePlan,
+    *,
+    snapshot: OutcomeDiagnosticProtocolSnapshot,
+    phase3_plan: Phase3Plan | None = None,
+) -> None:
+    if not isinstance(snapshot, OutcomeDiagnosticProtocolSnapshot):
+        raise OutcomeDiagnosticPlanError("pinned outcome protocol snapshot is not typed")
     if (
         not isinstance(plan, OutcomePlan)
         or plan.schema_version != SCHEMA_VERSION
@@ -772,6 +786,17 @@ def bind_validated_outcome_diagnostic_plan(
     )
 
 
+def bind_pinned_outcome_diagnostic_plan(
+    plan: OutcomePlan, *, snapshot: OutcomeDiagnosticProtocolSnapshot
+) -> ValidatedOutcomePlan:
+    """Bind a plan without reopening authority paths after readiness capture."""
+
+    _validate_outcome_diagnostic_plan_from_pinned_snapshot(plan, snapshot=snapshot)
+    return ValidatedOutcomePlan(
+        plan, {item.unit_id: item for item in plan.units}, _construction_token=_TOKEN
+    )
+
+
 __all__ = [
     "OutcomeDiagnosticPlanError",
     "OutcomeView",
@@ -780,9 +805,11 @@ __all__ = [
     "OutcomePlan",
     "ValidatedOutcomePlan",
     "PARENT_COMMIT_SHA",
+    "build_outcome_group_diagnostic_plan_from_pinned_snapshot",
     "build_outcome_group_diagnostic_plan",
     "validate_outcome_diagnostic_plan",
     "bind_validated_outcome_diagnostic_plan",
+    "bind_pinned_outcome_diagnostic_plan",
     "canonical_outcome_plan_bytes",
     "outcome_plan_id",
     "feature_mask_sha256",

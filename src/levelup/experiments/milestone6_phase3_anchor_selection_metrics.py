@@ -323,8 +323,8 @@ class Phase3AnchorSelectionMetrics:
         return dict(self.body)
 
 
-def validate_phase3_anchor_selection_metrics_bytes(
-    content: bytes, *, repository: str | Path = ROOT
+def _validate_phase3_anchor_selection_metrics_bytes(
+    content: bytes, *, repository: str | Path, verify_source_lineage: bool
 ) -> Phase3AnchorSelectionMetrics:
     if not isinstance(content, bytes) or not content:
         raise AnchorSelectionMetricsError("anchor selection metrics bytes are missing")
@@ -382,12 +382,33 @@ def validate_phase3_anchor_selection_metrics_bytes(
         "phase3_protocol_sha256",
     ):
         _require_digest(lineage.get(key), f"anchor lineage {key}")
-    _validate_source_lineage(body, Path(repository).resolve(strict=True))
+    if verify_source_lineage:
+        _validate_source_lineage(body, Path(repository).resolve(strict=True))
     return Phase3AnchorSelectionMetrics(
         body=body,
         canonical_bytes=content,
         anchor_selection_metrics_sha256=supplied,
         _construction_token=_TOKEN,
+    )
+
+
+def validate_phase3_anchor_selection_metrics_bytes(
+    content: bytes, *, repository: str | Path = ROOT
+) -> Phase3AnchorSelectionMetrics:
+    """Validate canonical anchor bytes and their live committed source lineage."""
+
+    return _validate_phase3_anchor_selection_metrics_bytes(
+        content, repository=repository, verify_source_lineage=True
+    )
+
+
+def validate_pinned_phase3_anchor_selection_metrics_bytes(
+    content: bytes,
+) -> Phase3AnchorSelectionMetrics:
+    """Validate anchor bytes already authenticated by a descriptor-pinned snapshot."""
+
+    return _validate_phase3_anchor_selection_metrics_bytes(
+        content, repository=ROOT, verify_source_lineage=False
     )
 
 
@@ -487,5 +508,6 @@ __all__ = [
     "load_phase3_anchor_selection_metrics_bytes",
     "phase3_anchor_selected_metrics",
     "require_phase3_anchor_selection_metrics",
+    "validate_pinned_phase3_anchor_selection_metrics_bytes",
     "validate_phase3_anchor_selection_metrics_bytes",
 ]

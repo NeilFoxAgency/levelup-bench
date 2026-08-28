@@ -968,6 +968,77 @@ class OutcomeDiagnosticModelReadinessSnapshot:
         self.close()
 
 
+@dataclass(slots=True, init=False)
+class OutcomeDiagnosticAnalysisReadinessSnapshot:
+    """Read-only reduction authority without the unused prepared model store."""
+
+    base: OutcomeDiagnosticReadinessSnapshot
+    authority: object
+    authority_file: AuthorityFileSnapshot
+    _sealed: bool
+
+    def __init__(
+        self,
+        base: OutcomeDiagnosticReadinessSnapshot,
+        authority: object,
+        authority_file: AuthorityFileSnapshot,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _SNAPSHOT_TOKEN:
+            raise OutcomeDiagnosticReadinessError(
+                "analysis readiness snapshot requires the canonical capture boundary"
+            )
+        object.__setattr__(self, "base", base)
+        object.__setattr__(self, "authority", authority)
+        object.__setattr__(self, "authority_file", authority_file)
+        object.__setattr__(self, "_sealed", True)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        if getattr(self, "_sealed", False):
+            raise AttributeError("analysis readiness snapshot is immutable")
+        object.__setattr__(self, name, value)
+
+    @property
+    def protocol(self) -> OutcomeDiagnosticProtocolSnapshot:
+        return self.base.protocol
+
+    @property
+    def git_commit_sha(self) -> str:
+        return self.base.git_commit_sha
+
+    @property
+    def output_root(self) -> Path:
+        return self.base.output_root
+
+    @property
+    def authority_bytes(self) -> bytes:
+        return self.authority_file.content
+
+    def recheck(self, *, expected_git_commit: str) -> None:
+        self.base.recheck(expected_git_commit=expected_git_commit)
+        current = _read_source(self.base.repository, OUTCOME_MODEL_AUTHORITY_RELATIVE)
+        if current != self.authority_file:
+            raise OutcomeDiagnosticReadinessError(
+                "outcome model authority bytes or identity changed"
+            )
+        _validate_outcome_model_authority(
+            current.content, self.base.protocol, self.base.repository
+        )
+
+    def preflight(self, *, expected_git_commit: str) -> None:
+        self.recheck(expected_git_commit=expected_git_commit)
+
+    def close(self) -> None:
+        """Mirror model-readiness ownership; this snapshot owns no open lease."""
+
+    def __enter__(self) -> "OutcomeDiagnosticAnalysisReadinessSnapshot":
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+
 def _validate_outcome_model_authority(
     content: bytes,
     protocol: OutcomeDiagnosticProtocolSnapshot,
@@ -1258,6 +1329,46 @@ def _validate_store_payloads_against_authority(
         ) from exc
 
 
+def capture_outcome_group_diagnostic_analysis_readiness(
+    repository: str | os.PathLike[str] = ROOT,
+    *,
+    output_root: str | os.PathLike[str],
+    expected_git_commit: str,
+    authority_path: str | os.PathLike[str] | None = None,
+    output_state: OutcomeDiagnosticOutputState = "activated",
+) -> OutcomeDiagnosticAnalysisReadinessSnapshot:
+    """Capture the activated tree and compact authority needed for reduction."""
+
+    repo = _absolute_path(Path.cwd(), repository, "repository")
+    base = capture_outcome_group_diagnostic_readiness(
+        repository=repo,
+        output_root=output_root,
+        expected_git_commit=expected_git_commit,
+        output_state=output_state,
+    )
+    authority = _outcome_model_authority_path(repo, authority_path)
+    _reject_lexical_symlinks(authority, "outcome model authority")
+    try:
+        authority_file = _read_source(repo, OUTCOME_MODEL_AUTHORITY_RELATIVE)
+        typed_authority = _validate_outcome_model_authority(
+            authority_file.content, base.protocol, repo
+        )
+        snapshot = OutcomeDiagnosticAnalysisReadinessSnapshot(
+            base,
+            typed_authority,
+            authority_file,
+            _token=_SNAPSHOT_TOKEN,
+        )
+        snapshot.recheck(expected_git_commit=expected_git_commit)
+        return snapshot
+    except OutcomeDiagnosticReadinessError:
+        raise
+    except Exception as exc:
+        raise OutcomeDiagnosticReadinessError(
+            "outcome analysis authority cannot be captured"
+        ) from exc
+
+
 def capture_outcome_group_diagnostic_model_readiness(
     repository: str | os.PathLike[str] = ROOT,
     *,
@@ -1382,11 +1493,13 @@ __all__ = [
     "DIAGNOSTIC_OUTPUT_ROOT_RELATIVE",
     "OUTCOME_MODEL_AUTHORITY_RELATIVE",
     "OutcomeDiagnosticActivationReadinessLease",
+    "OutcomeDiagnosticAnalysisReadinessSnapshot",
     "OutcomeDiagnosticModelReadinessLease",
     "OutcomeDiagnosticModelReadinessSnapshot",
     "OutcomeDiagnosticOutputState",
     "OutcomeDiagnosticReadinessError",
     "OutcomeDiagnosticReadinessSnapshot",
     "capture_outcome_group_diagnostic_readiness",
+    "capture_outcome_group_diagnostic_analysis_readiness",
     "capture_outcome_group_diagnostic_model_readiness",
 ]

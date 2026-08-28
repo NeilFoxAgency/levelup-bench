@@ -14,8 +14,10 @@ from levelup.experiments.milestone6_phase3_outcome_diagnostic_plan import (
     PARENT_COMMIT_SHA,
     OutcomeDiagnosticPlanError,
     _require_canonical_snapshot,
+    bind_pinned_outcome_diagnostic_plan,
     bind_validated_outcome_diagnostic_plan,
     build_outcome_group_diagnostic_plan,
+    build_outcome_group_diagnostic_plan_from_pinned_snapshot,
     canonical_outcome_plan_bytes,
     feature_mask_sha256,
     outcome_plan_id,
@@ -47,6 +49,23 @@ def test_outcome_plan_exact_matrix_and_scope() -> None:
     assert len(plan.model_owners) == 240
     assert len(plan.units) == 5_760
     assert all(not unit.final_family_access for unit in plan.units)
+
+
+def test_pinned_plan_builder_does_not_reopen_canonical_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = load_outcome_group_diagnostic_protocol()
+
+    def fail_reopen(_snapshot):
+        raise AssertionError("pinned plan builder reopened an authority path")
+
+    monkeypatch.setattr(
+        "levelup.experiments.milestone6_phase3_outcome_diagnostic_plan._require_canonical_snapshot",
+        fail_reopen,
+    )
+    plan = build_outcome_group_diagnostic_plan_from_pinned_snapshot(snapshot)
+    validated = bind_pinned_outcome_diagnostic_plan(plan, snapshot=snapshot)
+    assert len(validated.plan.units) == 5_760
 
 
 def test_outcome_plan_owner_and_unit_fanout_is_exact() -> None:

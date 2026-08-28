@@ -1507,6 +1507,175 @@ class OutcomeDiagnosticActivatedBatch:
         except ValueError as exc:
             raise OutcomeDiagnosticResultStoreError(f"unknown diagnostic family: {family_id}") from exc
 
+    def require_complete_resume_baseline(self, baseline: object) -> None:
+        """Bind all existing record bytes to the schema-neutral readiness snapshot.
+
+        This method deliberately fingerprints names and bytes before any record
+        JSON is parsed.  It also requires the exact completed-unit filename
+        universe, so attempts, omissions, and foreign files fail closed.
+        """
+
+        if type(baseline) is not OutcomeDiagnosticResumeBaseline:
+            raise OutcomeDiagnosticResultStoreError(
+                "activated analysis requires the canonical resume baseline"
+            )
+        self._require_live()
+        if (
+            baseline.output_state != "activated"
+            or baseline.output_root_identity != self._identities[0]["root"]
+        ):
+            raise OutcomeDiagnosticResultStoreError(
+                "diagnostic resume baseline root or state differs"
+            )
+        current: list[OutcomeDiagnosticResumeRecordFingerprint] = []
+        for index, descriptor in enumerate(self._descriptors):
+            family = self._stores[index].family_id
+            for condition in CONDITIONS:
+                records_fd = descriptor["records"][condition]
+                names = _runtime_read_entries(records_fd)
+                expected_names = {
+                    f"{unit_id}.json"
+                    for unit_id, planned in self._unit_maps[index].items()
+                    if planned.condition_id == condition
+                }
+                if set(names) != expected_names or len(names) != len(expected_names):
+                    raise OutcomeDiagnosticResultStoreError(
+                        "diagnostic record namespace is incomplete, foreign, or contains attempts"
+                    )
+                for name in names:
+                    stat_value, digest = _resume_file_snapshot(records_fd, name)
+                    current.append(
+                        OutcomeDiagnosticResumeRecordFingerprint(
+                            family, condition, name, stat_value, digest
+                        )
+                    )
+        def key(item: OutcomeDiagnosticResumeRecordFingerprint) -> tuple[str, str, str]:
+            return item.family_id, item.condition_id, item.name
+
+        if tuple(sorted(current, key=key)) != tuple(sorted(baseline.records, key=key)):
+            raise OutcomeDiagnosticResultStoreError(
+                "diagnostic record identities or bytes changed since readiness capture"
+            )
+        self._require_live()
+
+    def validate_existing_records(self) -> None:
+        """Parse, identity-check, and start tracking every existing record."""
+
+        if self._record_fingerprints:
+            raise OutcomeDiagnosticResultStoreError(
+                "existing diagnostic records were already validated"
+            )
+        for index in range(len(self._stores)):
+            self._validate_record_namespace(index, track_new=True)
+        self._require_live(validate_records=True)
+
+    def validate_existing_records_against_resume_baseline(
+        self, baseline: object
+    ) -> None:
+        """Parse the exact bytes fingerprinted by readiness, with no race gap."""
+
+        self.require_complete_resume_baseline(baseline)
+        assert isinstance(baseline, OutcomeDiagnosticResumeBaseline)
+        if self._record_fingerprints:
+            raise OutcomeDiagnosticResultStoreError(
+                "existing diagnostic records were already validated"
+            )
+        baseline_by_key = {
+            (row.family_id, row.condition_id, row.name): row
+            for row in baseline.records
+        }
+        for index, descriptor in enumerate(self._descriptors):
+            family = self._stores[index].family_id
+            expected_ids = set(self._unit_maps[index])
+            for condition in CONDITIONS:
+                records_fd = descriptor["records"][condition]
+                for name in _runtime_read_entries(records_fd):
+                    unit_id, _attempt, kind = _runtime_parse_name(name, expected_ids)
+                    planned = self._unit_maps[index][unit_id]
+                    rendered, fingerprint = _runtime_record_snapshot(records_fd, name)
+                    baseline_row = baseline_by_key.get((family, condition, name))
+                    if baseline_row is None:
+                        raise OutcomeDiagnosticResultStoreError(
+                            "diagnostic record is absent from the readiness baseline"
+                        )
+                    expected_fingerprint = (
+                        baseline_row.stat[0],
+                        baseline_row.stat[1],
+                        baseline_row.stat[3],
+                        baseline_row.stat[4],
+                        baseline_row.stat[5],
+                        baseline_row.sha256,
+                    )
+                    if fingerprint != expected_fingerprint:
+                        raise OutcomeDiagnosticResultStoreError(
+                            "diagnostic record changed between readiness and parsing"
+                        )
+                    model = UnitRecord if kind == "completed" else AttemptRecord
+                    record = _runtime_parse_record(rendered, name, model)
+                    _runtime_validate_record_identity(
+                        record,
+                        planned,
+                        self._stores[index].spec,
+                        filename=name,
+                        condition_id=condition,
+                    )
+                    self._record_fingerprints[(f"{family}:{condition}", name)] = (
+                        fingerprint
+                    )
+        if len(self._record_fingerprints) != len(baseline.records):
+            raise OutcomeDiagnosticResultStoreError(
+                "diagnostic parsed record universe differs from readiness"
+            )
+        self._require_live(validate_records=True)
+
+    def records_manifest(self) -> tuple[dict[str, object], ...]:
+        """Return the canonical tracked-record fingerprint manifest."""
+
+        self._require_live(validate_records=True)
+        return tuple(
+            {
+                "namespace": namespace,
+                "name": name,
+                "fingerprint": list(fingerprint),
+            }
+            for (namespace, name), fingerprint in sorted(
+                self._record_fingerprints.items()
+            )
+        )
+
+    def runtime_lineage(self) -> dict[str, object]:
+        """Return descriptor identities for the exact activated read capability."""
+
+        self._require_live(validate_records=True)
+        stores: list[dict[str, object]] = []
+        for index, store in enumerate(self._stores):
+            identities = self._identities[index]
+            stores.append(
+                {
+                    "family_id": store.family_id,
+                    "run_id": store.run_id,
+                    "config_sha256": store.config_sha256,
+                    "identities": {
+                        "root": list(identities["root"]),
+                        "family": list(identities["family"]),
+                        "run": list(identities["run"]),
+                        "namespaces": list(identities["namespaces"]),
+                        "records": {
+                            condition: list(identities[f"records:{condition}"])
+                            for condition in CONDITIONS
+                        },
+                    },
+                }
+            )
+        return {
+            "activation_marker_sha256": hashlib.sha256(
+                self._marker_bytes
+            ).hexdigest(),
+            "activation_marker_identity": list(self._marker_identity),
+            "root_identity": list(self._identities[0]["root"]),
+            "stores": stores,
+        }
+
     def _require_live(self, *, validate_records: bool = False) -> None:
         if self._token is not _RUNTIME_TOKEN or not self._active:
             raise OutcomeDiagnosticResultStoreError("diagnostic runtime capability has expired")
@@ -2267,6 +2436,7 @@ def activate_outcome_diagnostic_result_stores(
     readiness_lease: OutcomeDiagnosticActivationReadinessLease,
     *,
     expected_git_commit: str,
+    validate_existing_records: bool = True,
 ) -> Iterator[OutcomeDiagnosticActivatedBatch]:
     """Atomically authorize and open the complete six-store runtime matrix."""
 
@@ -2387,7 +2557,8 @@ def activate_outcome_diagnostic_result_stores(
         for index in range(len(typed_stores)):
             # Existing records are only valid when resuming an already marked
             # tree.  Track every identity before yielding to the driver.
-            batch._validate_record_namespace(index, track_new=True)
+            if validate_existing_records:
+                batch._validate_record_namespace(index, track_new=True)
         batch._require_live()
         yield batch
     finally:
