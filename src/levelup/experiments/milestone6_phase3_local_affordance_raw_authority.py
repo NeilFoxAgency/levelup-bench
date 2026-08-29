@@ -180,6 +180,33 @@ class ExpectedDevelopmentTask(BaseModel):
     environment_seed: StrictInt = Field(ge=0)
 
 
+@dataclass(frozen=True, slots=True)
+class _ExpectedRawProbeAuthoritySeal:
+    content_sha256: str
+    token: object
+
+
+def _expected_authority_content(
+    *,
+    manifest: RawProbeStoreManifest,
+    selected_tasks: tuple[ExpectedDevelopmentTask, ...],
+    keys: tuple[RawProbeArtifactKey, ...],
+    evidence_lock_file_sha256: str,
+    key_filenames: tuple[str, ...],
+    training_fold_filenames: tuple[str, ...],
+    heldout_binding_filenames: tuple[str, ...],
+) -> dict[str, object]:
+    return {
+        "manifest": manifest.model_dump(mode="json"),
+        "selected_tasks": tuple(task.model_dump(mode="json") for task in selected_tasks),
+        "keys": tuple(key.model_dump(mode="json") for key in keys),
+        "evidence_lock_file_sha256": evidence_lock_file_sha256,
+        "key_filenames": key_filenames,
+        "training_fold_filenames": training_fold_filenames,
+        "heldout_binding_filenames": heldout_binding_filenames,
+    }
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class ExpectedRawProbeAuthority:
     """Opaque deterministic expectation built from the four frozen source files."""
@@ -191,6 +218,7 @@ class ExpectedRawProbeAuthority:
     key_filenames: tuple[str, ...]
     training_fold_filenames: tuple[str, ...]
     heldout_binding_filenames: tuple[str, ...]
+    _seal: _ExpectedRawProbeAuthoritySeal
     _token: object
 
     def __init__(
@@ -210,21 +238,42 @@ class ExpectedRawProbeAuthority:
         object.__setattr__(self, "selected_tasks", selected_tasks)
         object.__setattr__(self, "keys", keys)
         object.__setattr__(self, "evidence_lock_file_sha256", evidence_lock_file_sha256)
-        object.__setattr__(self, "key_filenames", tuple(f"{key.key_id}.json" for key in keys))
+        key_filenames = tuple(f"{key.key_id}.json" for key in keys)
+        object.__setattr__(self, "key_filenames", key_filenames)
+        training_fold_filenames = tuple(
+            f"{family}.r{replicate}.json" for family in FAMILY_ORDER for replicate in REPLICATES
+        )
         object.__setattr__(
             self,
             "training_fold_filenames",
-            tuple(
-                f"{family}.r{replicate}.json" for family in FAMILY_ORDER for replicate in REPLICATES
-            ),
+            training_fold_filenames,
+        )
+        heldout_binding_filenames = tuple(
+            f"{task.family_id}.r{replicate}.task-{task.task_index}.json"
+            for task in selected_tasks
+            for replicate in REPLICATES
         )
         object.__setattr__(
             self,
             "heldout_binding_filenames",
-            tuple(
-                f"{task.family_id}.r{replicate}.task-{task.task_index}.json"
-                for task in selected_tasks
-                for replicate in REPLICATES
+            heldout_binding_filenames,
+        )
+        object.__setattr__(
+            self,
+            "_seal",
+            _ExpectedRawProbeAuthoritySeal(
+                content_sha256=_digest(
+                    _expected_authority_content(
+                        manifest=manifest,
+                        selected_tasks=selected_tasks,
+                        keys=keys,
+                        evidence_lock_file_sha256=evidence_lock_file_sha256,
+                        key_filenames=key_filenames,
+                        training_fold_filenames=training_fold_filenames,
+                        heldout_binding_filenames=heldout_binding_filenames,
+                    )
+                ),
+                token=_EXPECTED_TOKEN,
             ),
         )
         object.__setattr__(self, "_token", _EXPECTED_TOKEN)
@@ -603,15 +652,38 @@ def build_expected_raw_probe_authority(
     )
 
 
-def _require_expected(expected: ExpectedRawProbeAuthority) -> None:
+def require_expected_raw_probe_authority(
+    expected: ExpectedRawProbeAuthority,
+) -> ExpectedRawProbeAuthority:
+    """Require an expectation built from the exact committed frozen sources."""
+
+    try:
+        seal = expected._seal
+        content_sha256 = _digest(
+            _expected_authority_content(
+                manifest=expected.manifest,
+                selected_tasks=expected.selected_tasks,
+                keys=expected.keys,
+                evidence_lock_file_sha256=expected.evidence_lock_file_sha256,
+                key_filenames=expected.key_filenames,
+                training_fold_filenames=expected.training_fold_filenames,
+                heldout_binding_filenames=expected.heldout_binding_filenames,
+            )
+        )
+    except (AttributeError, TypeError, ValueError):
+        raise RawProbeAuthorityError("expected raw authority is not canonical") from None
     if (
         type(expected) is not ExpectedRawProbeAuthority
         or expected._token is not _EXPECTED_TOKEN
+        or type(seal) is not _ExpectedRawProbeAuthoritySeal
+        or seal.token is not _EXPECTED_TOKEN
+        or seal.content_sha256 != content_sha256
         or len(expected.selected_tasks) != 48
         or len(expected.keys) != 240
         or len(set(expected.key_filenames)) != 240
     ):
         raise RawProbeAuthorityError("expected raw authority is not canonical")
+    return expected
 
 
 def require_raw_probe_authority_snapshot(
@@ -713,7 +785,7 @@ def validate_complete_raw_probe_authority(
 
     if type(reader) is not PinnedRawProbeStoreReader:
         raise RawProbeAuthorityError("complete authority requires a pinned raw-store reader")
-    _require_expected(expected)
+    require_expected_raw_probe_authority(expected)
     reader.recheck()
     _root_shape(reader)
     manifest_value, manifest_record = _parse_snapshot(
@@ -874,6 +946,7 @@ __all__ = [
     "RawProbeAuthorityError",
     "RawProbeAuthoritySnapshot",
     "build_expected_raw_probe_authority",
+    "require_expected_raw_probe_authority",
     "require_raw_probe_authority_snapshot",
     "validate_complete_raw_probe_authority",
 ]
