@@ -88,6 +88,58 @@ def test_raw_probe_authority_is_new_immutable_and_learner_safe() -> None:
         assert forbidden in visibility["forbidden_fields"]
 
 
+def test_raw_store_layout_and_actual_task_identity_are_frozen() -> None:
+    layout = _load()["raw_probe_evidence_authority"]["raw_store_layout"]
+    assert layout["status"] == (
+        "frozen-before-raw-capture-model-preparation-and-comparative-results"
+    )
+    assert "does not change" in layout["method_selection_effect"]
+    assert layout["root_exact_shape"] == [
+        "manifest.json",
+        "artifacts/",
+        "keys/",
+        "training-folds/",
+        "heldout-bindings/",
+    ]
+    assert "staging" in layout["completed_authority_directory_policy"]
+    assert layout["canonical_file_format"] == (
+        "UTF-8 JSON with one trailing newline; canonical serialization and exact filenames are required"
+    )
+    assert "traversal-free" in layout["filename_policy"]
+    assert layout["canonical_files"] == {
+        "artifacts": (
+            "artifacts/{artifact_id}.json: persisted envelope containing typed key, body, manifest, and affordances; reducer capabilities are never persisted"
+        ),
+        "keys": "keys/{key_id}.json",
+        "training_folds": "training-folds/{fold_id}.r{replicate}.json",
+        "heldout_bindings": (
+            "heldout-bindings/{family_id}.r{replicate}.task-{actual_manifest_task_index}.json"
+        ),
+    }
+    assert layout["namespace_entry_counts"] == {
+        "artifacts": 240,
+        "keys": 240,
+        "training-folds": 30,
+        "heldout-bindings": 240,
+    }
+    identity = layout["identity_requirements"]
+    assert "symlink" in identity["namespace_contents"]
+    assert "actual development manifest index" in identity["task_index"]
+    assert "never the ordinal 0..7" in identity["task_index"]
+    assert "exact values" in identity["generator_and_environment"]
+    assert identity["probe_seed_formula"] == (
+        "6200000 + family_order_index * 10000 + replicate * 100000 + actual_manifest_task_index"
+    )
+    assert layout["selected_task_indices_by_family"] == {
+        "plain": [1, 3, 4, 6, 7, 9, 10, 11],
+        "battery": list(range(8)),
+        "cooldown": list(range(8)),
+        "heat": [1, 2, 4, 5, 6, 7, 8, 10],
+        "momentum": [12, 13, 17, 18, 19, 21, 31, 32],
+        "combo": list(range(8)),
+    }
+
+
 def test_matrix_conditions_capacity_and_full_grid_are_matched() -> None:
     body = _load()
     matrix = body["development_matrix"]

@@ -98,6 +98,46 @@
       "heldout_view_isolation": "candidate generation receives exactly one authorized heldout task binding for its planned unit; it cannot enumerate or read any other task raw artifact",
       "readiness_check": "fail closed on any missing, extra, duplicate, cross-fold, cross-replicate, or unauthorized task-artifact capability"
     },
+    "raw_store_layout": {
+      "status": "frozen-before-raw-capture-model-preparation-and-comparative-results",
+      "method_selection_effect": "clarifies storage and identity validation only; does not change the frozen method-selection rule, eligible hyperparameters, seeds, budgets, or conditions",
+      "root_exact_shape": [
+        "manifest.json",
+        "artifacts/",
+        "keys/",
+        "training-folds/",
+        "heldout-bindings/"
+      ],
+      "completed_authority_directory_policy": "the root and each namespace must contain exactly the declared entries; staging, temporary, backup, hidden, or other extra entries are forbidden",
+      "canonical_file_format": "UTF-8 JSON with one trailing newline; canonical serialization and exact filenames are required",
+      "filename_policy": "filenames are exact, namespace-local, and traversal-free; symlinks and non-regular files are rejected",
+      "canonical_files": {
+        "artifacts": "artifacts/{artifact_id}.json: persisted envelope containing typed key, body, manifest, and affordances; reducer capabilities are never persisted",
+        "keys": "keys/{key_id}.json",
+        "training_folds": "training-folds/{fold_id}.r{replicate}.json",
+        "heldout_bindings": "heldout-bindings/{family_id}.r{replicate}.task-{actual_manifest_task_index}.json"
+      },
+      "namespace_entry_counts": {
+        "artifacts": 240,
+        "keys": 240,
+        "training-folds": 30,
+        "heldout-bindings": 240
+      },
+      "identity_requirements": {
+        "namespace_contents": "exactly 240 artifacts, 240 keys, 30 training-fold manifests, and 240 heldout bindings; missing, duplicate, extra, symlink, or non-regular entries fail closed",
+        "task_index": "task_index is always the actual development manifest index used by the frozen seed formula, never the ordinal 0..7 position within a selected task array",
+        "generator_and_environment": "generator_seed and environment_reset_seed must equal the exact values in the selected development manifest entry",
+        "probe_seed_formula": "6200000 + family_order_index * 10000 + replicate * 100000 + actual_manifest_task_index"
+      },
+      "selected_task_indices_by_family": {
+        "plain": [1, 3, 4, 6, 7, 9, 10, 11],
+        "battery": [0, 1, 2, 3, 4, 5, 6, 7],
+        "cooldown": [0, 1, 2, 3, 4, 5, 6, 7],
+        "heat": [1, 2, 4, 5, 6, 7, 8, 10],
+        "momentum": [12, 13, 17, 18, 19, 21, 31, 32],
+        "combo": [0, 1, 2, 3, 4, 5, 6, 7]
+      }
+    },
     "cost_ownership": {
       "physical_raw_probe_actions": 15360,
       "physical_formula": "240 unique task raw artifacts x 64 actions",

@@ -934,6 +934,26 @@ tasks in its fold/replicate training manifest and cannot enumerate or read that 
 family. Candidate generation receives only its one planned held-out binding. Readiness fails closed
 on any broader, missing, duplicate, or cross-fold capability.
 
+Before raw capture, model preparation, or any comparative result, the raw authority's on-disk
+layout is frozen as an exact, descriptor-validated shape: `manifest.json`, `artifacts/`, `keys/`,
+`training-folds/`, and `heldout-bindings/`, with no staging, temporary, hidden, backup, or other
+extra entries. Canonical files are UTF-8 JSON with one trailing newline and traversal-free exact
+names: `artifacts/{artifact_id}.json` is the persisted typed key/body/manifest/affordances envelope
+(never a reducer capability), `keys/{key_id}.json`,
+`training-folds/{fold_id}.r{replicate}.json`, and
+`heldout-bindings/{family_id}.r{replicate}.task-{actual_manifest_task_index}.json`. The completed
+authority must contain exactly 240 artifacts, 240 keys, 30 training-fold manifests, and 240
+held-out bindings; missing, duplicate, extra, symlink, and non-regular entries fail closed.
+
+Task identity uses the actual `task_index` from the frozen development manifest, not the ordinal
+position 0..7 in a selected array. The selected indices are plain `[1,3,4,6,7,9,10,11]`, battery
+`[0,1,2,3,4,5,6,7]`, cooldown `[0,1,2,3,4,5,6,7]`, heat `[1,2,4,5,6,7,8,10]`, momentum
+`[12,13,17,18,19,21,31,32]`, and combo `[0,1,2,3,4,5,6,7]`. Each artifact must retain the manifest's exact
+`generator_seed` and `environment_reset_seed`; its probe seed is
+`6200000 + family_order_index * 10000 + replicate * 100000 + actual_manifest_task_index`.
+This is a storage and identity clarification only: it does not alter method selection, eligible
+hyperparameters, seeds, budgets, or conditions.
+
 The complete development matrix is 4 conditions x 12 numeric tuples x 6 families x 5 replicates
 x 8 held-out tasks = 11,520 units and 480 model owners. B2 is the full 3,601-parameter global
 optimum-imitation anchor; S is the 3,841-parameter state/availability pooled representation; P is
