@@ -10,8 +10,10 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 
 import torch
@@ -79,6 +81,56 @@ class ObservedTransition:
 
 
 @dataclass(frozen=True, slots=True)
+class IndexedProbeRow:
+    """One raw probe observation with its non-learner-visible stream index.
+
+    The index exists solely for artifact validation and deterministic tie breaking.  It is
+    intentionally kept outside :class:`ObservedTransition`, so callers cannot accidentally
+    serialize it into a learner feature tensor.
+    """
+
+    probe_index: int
+    transition: ObservedTransition
+
+    def __post_init__(self) -> None:
+        if type(self.probe_index) is not int or not 0 <= self.probe_index < 64:
+            raise ValueError("probe_index must be an integer in 0..63")
+        if type(self.transition) is not ObservedTransition:
+            raise ValueError("probe row transition must be an ObservedTransition")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskProbeRows:
+    """Exactly one task's complete, indexed 64-action probe stream.
+
+    Metadata identifying the task, fold, or family is deliberately not represented here.  A
+    capability owner binds this value to that identity externally; the reducer only receives
+    the 64 sanitized transitions and their canonical indices.
+    """
+
+    rows: tuple[IndexedProbeRow, ...]
+
+    def __post_init__(self) -> None:
+        rows = tuple(self.rows)
+        object.__setattr__(self, "rows", rows)
+        if len(rows) != 64:
+            raise ValueError("one task probe artifact must contain exactly 64 rows")
+        if any(type(row) is not IndexedProbeRow for row in rows):
+            raise ValueError("task probe rows must be typed IndexedProbeRow values")
+        indices = tuple(row.probe_index for row in rows)
+        if indices != tuple(range(64)):
+            raise ValueError("task probe rows must be in canonical probe_index order 0..63")
+
+
+# Compatibility aliases make the storage vocabulary explicit at call sites while retaining
+# one concrete immutable type and one validation path.
+ProbeRow = IndexedProbeRow
+RawProbeRow = IndexedProbeRow
+IndexedObservedTransition = IndexedProbeRow
+TaskProbeArtifact = TaskProbeRows
+
+
+@dataclass(frozen=True, slots=True)
 class ObservableTrace:
     """A sanitized reference replay consumed by state-conditioned training."""
 
@@ -111,6 +163,85 @@ class AffordanceTable:
 
     def for_alias(self, alias: str) -> tuple[float, ...] | None:
         return self.features.get(alias)
+
+
+_LOCAL_AFFORDANCE_EVIDENCE_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskLocalAffordanceEvidenceSeal:
+    task_rows: TaskProbeRows
+    rows: tuple[IndexedProbeRow, ...]
+    row_signature: tuple[tuple[object, ...], ...]
+    pooled_affordances: AffordanceTable
+    pooled_features: Mapping[str, tuple[float, ...]]
+    pooled_sample_counts: Mapping[str, int]
+    token: object
+
+
+def _local_probe_row_signature(
+    rows: tuple[IndexedProbeRow, ...],
+) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (
+            id(row),
+            row.probe_index,
+            id(row.transition),
+            id(row.transition.before),
+            row.transition.before.features(),
+            row.transition.before.available_aliases,
+            row.transition.action_alias,
+            id(row.transition.after),
+            row.transition.after.features(),
+            row.transition.after.available_aliases,
+            row.transition.completed,
+        )
+        for row in rows
+    )
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class TaskLocalAffordanceEvidence:
+    """One task's canonical rows bound to their bitwise-identical pooled table."""
+
+    task_rows: TaskProbeRows
+    pooled_affordances: AffordanceTable
+    _seal: _TaskLocalAffordanceEvidenceSeal
+    _token: object
+
+    def __init__(
+        self,
+        task_rows: TaskProbeRows,
+        pooled_affordances: AffordanceTable,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _LOCAL_AFFORDANCE_EVIDENCE_TOKEN:
+            raise ValueError("local affordance evidence requires parity validation")
+        object.__setattr__(self, "task_rows", task_rows)
+        object.__setattr__(self, "pooled_affordances", pooled_affordances)
+        object.__setattr__(
+            self,
+            "_seal",
+            _TaskLocalAffordanceEvidenceSeal(
+                task_rows,
+                task_rows.rows,
+                _local_probe_row_signature(task_rows.rows),
+                pooled_affordances,
+                pooled_affordances.features,
+                pooled_affordances.sample_counts,
+                _LOCAL_AFFORDANCE_EVIDENCE_TOKEN,
+            ),
+        )
+        object.__setattr__(self, "_token", _LOCAL_AFFORDANCE_EVIDENCE_TOKEN)
+
+    @property
+    def rows(self) -> tuple[IndexedProbeRow, ...]:
+        return self.task_rows.rows
+
+    @property
+    def affordances(self) -> AffordanceTable:
+        return self.pooled_affordances
 
 
 @dataclass(frozen=True, slots=True)
@@ -616,6 +747,124 @@ def build_affordance_table(
     return AffordanceTable(features=features, sample_counts=counts)
 
 
+def _validate_local_observable_state(
+    state: ObservableState,
+    *,
+    require_available_alias: bool,
+) -> None:
+    if type(state) is not ObservableState:
+        raise ValueError("local affordance state must be a typed ObservableState")
+    coordinates = (
+        state.progress_fraction,
+        state.remaining_fraction,
+        state.elapsed_per_target,
+        state.resource_fraction,
+        state.pressure_fraction,
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+        for value in coordinates
+    ):
+        raise ValueError("local affordance distance coordinates must be finite numeric values")
+    if (
+        not 0.0 <= float(state.progress_fraction) <= 1.0
+        or not 0.0 <= float(state.remaining_fraction) <= 1.0
+        or float(state.elapsed_per_target) < 0.0
+        or not 0.0 <= float(state.resource_fraction) <= 1.0
+        or not 0.0 <= float(state.pressure_fraction) <= 1.0
+    ):
+        raise ValueError("local affordance state coordinates are outside canonical bounds")
+    aliases = state.available_aliases
+    if (
+        type(aliases) is not tuple
+        or (require_available_alias and not aliases)
+        or any(
+            not isinstance(alias, str)
+            or not alias
+            or any(ord(char) < 32 for char in alias)
+            for alias in aliases
+        )
+        or len(set(aliases)) != len(aliases)
+    ):
+        raise ValueError("local affordance aliases must be safe, nonempty, and unique")
+
+
+def bind_task_local_affordance_evidence(
+    task_rows: TaskProbeRows,
+    pooled_affordances: AffordanceTable,
+) -> TaskLocalAffordanceEvidence:
+    """Validate pooled-table parity once and return one inseparable task evidence value."""
+
+    if type(task_rows) is not TaskProbeRows:
+        raise ValueError("local affordance evidence requires typed TaskProbeRows")
+    if type(pooled_affordances) is not AffordanceTable:
+        raise ValueError("local affordance evidence requires a typed AffordanceTable")
+    for row in task_rows.rows:
+        transition = row.transition
+        _validate_local_observable_state(transition.before, require_available_alias=True)
+        # Completed transitions can legitimately expose no next action.  The after-state
+        # remains range/safety validated, but only a query/pre-action state must be actionable.
+        _validate_local_observable_state(transition.after, require_available_alias=False)
+        if transition.action_alias not in transition.before.available_aliases:
+            raise ValueError("probe row action is unavailable in its pre-action observation")
+    rebuilt = build_affordance_table(
+        tuple(row.transition for row in task_rows.rows),
+        target_samples_per_alias=8,
+    )
+    if rebuilt.sample_counts != pooled_affordances.sample_counts or set(rebuilt.features) != set(
+        pooled_affordances.features
+    ):
+        raise ValueError("pooled affordance table does not match the bound task probe rows")
+    for alias in sorted(rebuilt.features):
+        rebuilt_row = torch.tensor(rebuilt.features[alias], dtype=torch.float32)
+        supplied_row = torch.tensor(pooled_affordances.features[alias], dtype=torch.float32)
+        if _tensor_bytes(rebuilt_row) != _tensor_bytes(supplied_row):
+            raise ValueError("pooled affordance table is not bitwise-identical to rebuilt rows")
+    # Keep the freshly rebuilt canonical values rather than caller-owned mutable mappings.
+    # A frozen dataclass does not itself freeze a dict stored inside it.
+    frozen_rebuilt = AffordanceTable(
+        features=MappingProxyType(
+            {alias: tuple(rebuilt.features[alias]) for alias in sorted(rebuilt.features)}
+        ),
+        sample_counts=MappingProxyType(
+            {alias: rebuilt.sample_counts[alias] for alias in sorted(rebuilt.sample_counts)}
+        ),
+    )
+    return TaskLocalAffordanceEvidence(
+        task_rows,
+        frozen_rebuilt,
+        _token=_LOCAL_AFFORDANCE_EVIDENCE_TOKEN,
+    )
+
+
+bind_local_affordance_evidence = bind_task_local_affordance_evidence
+
+
+def _require_sealed_local_affordance_evidence(
+    evidence: TaskLocalAffordanceEvidence,
+    *,
+    representation: str,
+    inspect_rows: bool = False,
+) -> TaskLocalAffordanceEvidence:
+    seal = getattr(evidence, "_seal", None)
+    if (
+        type(evidence) is not TaskLocalAffordanceEvidence
+        or getattr(evidence, "_token", None) is not _LOCAL_AFFORDANCE_EVIDENCE_TOKEN
+        or type(seal) is not _TaskLocalAffordanceEvidenceSeal
+        or seal.token is not _LOCAL_AFFORDANCE_EVIDENCE_TOKEN
+        or evidence.task_rows is not seal.task_rows
+        or evidence.task_rows.rows is not seal.rows
+        or evidence.pooled_affordances is not seal.pooled_affordances
+        or evidence.pooled_affordances.features is not seal.pooled_features
+        or evidence.pooled_affordances.sample_counts is not seal.pooled_sample_counts
+        or (inspect_rows and _local_probe_row_signature(seal.rows) != seal.row_signature)
+    ):
+        raise ValueError(f"{representation} representation requires sealed parity evidence")
+    return evidence
+
+
 def candidate_tensor(
     state: ObservableState,
     affordances: AffordanceTable,
@@ -638,6 +887,260 @@ def candidate_tensor(
         torch.tensor(rows, dtype=torch.float32),
         unknown,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAffordanceDiagnostics:
+    """Non-selection diagnostics emitted by the fixed local-affordance reducer."""
+
+    alias: str
+    n: int
+    k_eff: int
+    selected_max_distance: float | None
+    eligible: bool
+    local_used: bool
+    local_vs_pooled_outcome_block_byte_difference: bool
+
+    @property
+    def alias_n(self) -> int:
+        return self.n
+
+    @property
+    def alias_count(self) -> int:
+        return self.n
+
+    @property
+    def kth_distance(self) -> float | None:
+        return self.selected_max_distance
+
+    @property
+    def n_less_than_4(self) -> bool:
+        return self.n < 4
+
+
+@dataclass(frozen=True, slots=True)
+class LocalAffordanceCandidateView:
+    """Candidate tensors plus typed reducer diagnostics for one observable state."""
+
+    aliases: tuple[str, ...]
+    features: torch.Tensor
+    unknown: int
+    diagnostics: tuple[LocalAffordanceDiagnostics, ...]
+
+    def __post_init__(self) -> None:
+        if self.features.ndim != 2 or self.features.shape[0] != len(self.aliases):
+            raise ValueError("local candidate view aliases and tensor rows differ")
+        if self.features.shape[1] != STATE_CONDITIONED_FEATURE_COUNT:
+            raise ValueError("unexpected local candidate feature width")
+        if len(self.diagnostics) != len(self.aliases):
+            raise ValueError("local diagnostics must cover every visible alias")
+
+    def __iter__(self):
+        """Allow compatibility unpacking as ``aliases, features, unknown``."""
+
+        yield self.aliases
+        yield self.features
+        yield self.unknown
+
+
+def pooled_candidate_tensor(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int]:
+    """P condition: the canonical full pooled T candidate tensor, byte-for-byte."""
+
+    _validate_local_observable_state(state, require_available_alias=True)
+    evidence = _require_sealed_local_affordance_evidence(evidence, representation="P")
+    return candidate_tensor(state, evidence.pooled_affordances)
+
+
+def p_candidate_tensor(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int]:
+    """Short alias for :func:`pooled_candidate_tensor`."""
+
+    return pooled_candidate_tensor(state, evidence)
+
+
+def state_availability_candidate_tensor(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int]:
+    """S condition: canonical candidate tensor with the frozen outcome mask applied."""
+
+    aliases, features, unknown = pooled_candidate_tensor(state, evidence)
+    return aliases, apply_state_availability_mask(features), unknown
+
+
+def s_candidate_tensor(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int]:
+    """Short alias for :func:`state_availability_candidate_tensor`."""
+
+    return state_availability_candidate_tensor(state, evidence)
+
+
+def _outcome_block_tensor_indices() -> tuple[int, ...]:
+    return tuple(
+        STATE_FEATURE_COUNT + block * TRANSITION_SUMMARY_FEATURE_COUNT + index
+        for block in range(TRANSITION_SUMMARY_BLOCK_COUNT)
+        for index in STATE_AVAILABILITY_ZEROED_INDICES
+    )
+
+
+def _tensor_bytes(tensor: torch.Tensor) -> bytes:
+    contiguous = tensor.detach().to(device="cpu").contiguous()
+    # View the exact float32 bit patterns, rather than comparing rounded Python floats.
+    return contiguous.view(torch.int32).numpy().tobytes()
+
+
+def _local_affordance_candidate_view(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> LocalAffordanceCandidateView:
+    _validate_local_observable_state(state, require_available_alias=True)
+    evidence = _require_sealed_local_affordance_evidence(
+        evidence,
+        representation="local",
+        inspect_rows=True,
+    )
+    rows = evidence.rows
+    affordances = evidence.pooled_affordances
+    aliases, pooled, unknown = candidate_tensor(state, affordances)
+    masked = apply_state_availability_mask(pooled)
+    output = masked.clone()
+    outcome_indices = _outcome_block_tensor_indices()
+    diagnostics: list[LocalAffordanceDiagnostics] = []
+    state_coordinates = torch.tensor(
+        (
+            state.progress_fraction,
+            state.remaining_fraction,
+            state.resource_fraction,
+            state.pressure_fraction,
+        ),
+        dtype=torch.float32,
+    )
+
+    for row_index, alias in enumerate(aliases):
+        pooled_row = pooled[row_index]
+        matching = [row for row in rows if row.transition.action_alias == alias]
+        if not matching or affordances.for_alias(alias) is None:
+            diagnostics.append(
+                LocalAffordanceDiagnostics(
+                    alias=alias,
+                    n=0,
+                    k_eff=0,
+                    selected_max_distance=None,
+                    eligible=False,
+                    local_used=False,
+                    local_vs_pooled_outcome_block_byte_difference=False,
+                )
+            )
+            continue
+
+        ranked: list[tuple[float, int, IndexedProbeRow]] = []
+        for indexed in matching:
+            before = indexed.transition.before
+            coordinates = torch.tensor(
+                (
+                    before.progress_fraction,
+                    before.remaining_fraction,
+                    before.resource_fraction,
+                    before.pressure_fraction,
+                ),
+                dtype=torch.float32,
+            )
+            distance = float(torch.sum((coordinates - state_coordinates) ** 2).item())
+            ranked.append((distance, indexed.probe_index, indexed))
+        ranked.sort(key=lambda item: (item[0], item[1]))
+        n = len(ranked)
+        k_eff = min(4, n)
+        selected = ranked[:k_eff]
+        selected_features = torch.tensor(
+            [transition_features(item[2].transition) for item in selected],
+            dtype=torch.float32,
+        )
+        summary = torch.cat(
+            (
+                selected_features.mean(dim=0),
+                selected_features.std(dim=0, unbiased=False),
+                selected_features.min(dim=0).values,
+                selected_features.max(dim=0).values,
+            )
+        )
+        for block in range(TRANSITION_SUMMARY_BLOCK_COUNT):
+            block_start = block * TRANSITION_SUMMARY_FEATURE_COUNT
+            for outcome_index in STATE_AVAILABILITY_ZEROED_INDICES:
+                output[row_index, STATE_FEATURE_COUNT + block_start + outcome_index] = summary[
+                    block_start + outcome_index
+                ]
+
+        outcome_difference = _tensor_bytes(output[row_index, list(outcome_indices)]) != _tensor_bytes(
+            pooled_row[list(outcome_indices)]
+        )
+        vectors = {
+            tuple(transition_features(item.transition)[index] for index in STATE_AVAILABILITY_ZEROED_INDICES)
+            for item in matching
+        }
+        eligible = n > 4 and len(vectors) >= 2
+        diagnostics.append(
+            LocalAffordanceDiagnostics(
+                alias=alias,
+                n=n,
+                k_eff=k_eff,
+                selected_max_distance=selected[-1][0],
+                eligible=eligible,
+                local_used=n > 4,
+                local_vs_pooled_outcome_block_byte_difference=outcome_difference,
+            )
+        )
+
+    return LocalAffordanceCandidateView(
+        aliases=aliases,
+        features=output,
+        unknown=unknown,
+        diagnostics=tuple(diagnostics),
+    )
+
+
+def local_affordance_candidate_view(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> LocalAffordanceCandidateView:
+    """Build L features and typed non-selection diagnostics for one task/state."""
+
+    return _local_affordance_candidate_view(state, evidence)
+
+
+def local_affordance_candidate_tensor(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int]:
+    """Build the fixed local-affordance L candidate tensor."""
+
+    view = _local_affordance_candidate_view(state, evidence)
+    return view.aliases, view.features, view.unknown
+
+
+def local_affordance_candidate_tensor_with_diagnostics(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[tuple[str, ...], torch.Tensor, int, tuple[LocalAffordanceDiagnostics, ...]]:
+    """L candidate tensor plus diagnostics, without exposing indices to the tensor."""
+
+    view = _local_affordance_candidate_view(state, evidence)
+    return view.aliases, view.features, view.unknown, view.diagnostics
+
+
+def local_affordance_diagnostics(
+    state: ObservableState,
+    evidence: TaskLocalAffordanceEvidence,
+) -> tuple[LocalAffordanceDiagnostics, ...]:
+    """Return only typed reducer diagnostics for a state/query population."""
+
+    return _local_affordance_candidate_view(state, evidence).diagnostics
 
 
 def optimum_imitation_examples(
