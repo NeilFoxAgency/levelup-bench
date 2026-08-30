@@ -642,6 +642,46 @@ class LocalAffordanceActivationLease:
             raise LocalAffordanceReadinessError("activation lease is invalid") from exc
         return self
 
+    def phase3_evidence_lock_bytes(self) -> bytes:
+        """Return only the retained identity lock through its held descriptor.
+
+        The lock contains development evidence identities but deliberately no
+        payloads or outcomes.  Downstream preparation gates use this narrow
+        accessor instead of reaching into the lease's private source matrix.
+        """
+
+        self.require_active()
+        relative_path = SOURCE_RELATIVE_PATHS[3]
+        try:
+            source_fd = self._source_fds[relative_path]
+            expected = next(
+                item for item in self._sources if item.relative_path == relative_path
+            )
+            before = os.fstat(source_fd)
+            os.lseek(source_fd, 0, os.SEEK_SET)
+            chunks: list[bytes] = []
+            while chunk := os.read(source_fd, 1024 * 1024):
+                chunks.append(chunk)
+            after = os.fstat(source_fd)
+            os.lseek(source_fd, 0, os.SEEK_SET)
+            content = b"".join(chunks)
+            if (
+                _identity(before) != expected.file_identity
+                or _identity(after) != expected.file_identity
+                or content != expected.content
+                or _sha256(content) != expected.sha256
+            ):
+                raise LocalAffordanceReadinessError(
+                    "held Phase 3 evidence lock differs from activation"
+                )
+        except LocalAffordanceReadinessError:
+            raise
+        except (AttributeError, OSError, StopIteration, TypeError, ValueError) as exc:
+            raise LocalAffordanceReadinessError(
+                "held Phase 3 evidence lock is unavailable"
+            ) from exc
+        return content
+
     def _deactivate(self) -> None:
         object.__setattr__(self, "_active", False)
 

@@ -240,6 +240,9 @@ def test_activation_holds_exact_descriptors_and_expires_lease(
     with snapshot.activation(expected_git_commit=CLEAN_COMMIT) as lease:
         assert lease.require_active() is lease
         assert require_expected_raw_probe_authority(lease.authority) is lease.authority
+        assert lease.phase3_evidence_lock_bytes() == (
+            authority_repository / readiness.SOURCE_RELATIVE_PATHS[3]
+        ).read_bytes()
         repository_root_fd = lease.repository_root_fd
         parent_fd = lease.destination_parent_fd
         source_fds = tuple(lease._source_fds.values())
@@ -254,6 +257,8 @@ def test_activation_holds_exact_descriptors_and_expires_lease(
 
     with pytest.raises(readiness.LocalAffordanceReadinessError, match="expired or forged"):
         lease.require_active()
+    with pytest.raises(readiness.LocalAffordanceReadinessError, match="expired or forged"):
+        lease.phase3_evidence_lock_bytes()
     for fd in (repository_root_fd, parent_fd, *source_fds):
         with pytest.raises(OSError):
             os.fstat(fd)
