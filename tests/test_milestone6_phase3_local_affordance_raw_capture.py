@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import ast
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import SimpleNamespace
 
 import pytest
@@ -39,7 +39,19 @@ class _Key:
 
 @dataclass(frozen=True)
 class _Manifest:
-    artifact_id: str
+    artifact_id: str = ""
+    manifest_id: str = "a" * 64
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    manifest: _Manifest = _Manifest()
+    authority_content_sha256: str = "b" * 64
+    manifest_file: object = field(
+        default_factory=lambda: SimpleNamespace(
+            snapshot=SimpleNamespace(sha256="c" * 64)
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -63,7 +75,7 @@ class _Persisted:
 
 class _Lease:
     def __init__(self, keys: tuple[_Key, ...]) -> None:
-        self.authority = SimpleNamespace(manifest=SimpleNamespace(manifest_id="manifest-id"), keys=keys)
+        self.authority = SimpleNamespace(manifest=_Manifest(), keys=keys)
         self.git_commit_sha = "f" * 40
         self.calls = 0
 
@@ -130,6 +142,7 @@ def patched_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[_Lease, _Tables, l
     monkeypatch.setattr(capture, "SanitizedRawProbeArtifact", _Sanitized)
     monkeypatch.setattr(capture, "PersistedRawProbeArtifact", _Persisted)
     monkeypatch.setattr(capture, "require_expected_raw_probe_authority", lambda authority: authority)
+    monkeypatch.setattr(capture, "require_raw_probe_authority_snapshot", lambda snapshot: snapshot)
 
     def environment(*args: object) -> object:
         calls.append(("combo", args, {}))
@@ -184,7 +197,7 @@ def patched_capture(monkeypatch: pytest.MonkeyPatch) -> tuple[_Lease, _Tables, l
 
     def publish(_lease: object, *, artifacts: tuple[_Persisted, ...]) -> object:
         published.append((_lease, artifacts))
-        return object()
+        return _Snapshot()
 
     monkeypatch.setattr(capture, "make_combo_track", environment)
     monkeypatch.setattr(capture, "make_adaptive_track", adaptive)
@@ -228,7 +241,9 @@ def test_capture_uses_frozen_key_order_budgets_factories_and_single_publication(
     assert type(artifacts) is tuple
     assert tuple(artifact.key for artifact in artifacts) == lease.authority.keys
     assert lease.calls == tables.calls == 2
-    assert summary.manifest_id == "manifest-id"
+    assert summary.manifest_id == "a" * 64
+    assert summary.authority_content_sha256 == "b" * 64
+    assert summary.manifest_file_sha256 == "c" * 64
     assert summary.activation_git_commit == "f" * 40
     assert summary.physical_probe_actions == 15_360
     assert summary.logical_consumer_equivalent_actions == 737_280
@@ -285,7 +300,7 @@ def test_invalid_authority_is_rejected_before_environment_construction(
     else:
         keys.append(keys[0])
     lease.authority = SimpleNamespace(
-        manifest=SimpleNamespace(manifest_id="manifest-id"), keys=tuple(keys)
+        manifest=_Manifest(), keys=tuple(keys)
     )
 
     def validating_authority(authority: object) -> object:
@@ -346,7 +361,7 @@ def test_publication_is_called_once_after_complete_ordered_batch(
                 tuple(artifact.key for artifact in artifacts),
             )
         )
-        return object()
+        return _Snapshot()
 
     monkeypatch.setattr(capture, "publish_raw_probe_store_from_readiness", publish_once)
     capture.capture_and_publish_raw_probe_store(lease, tables)

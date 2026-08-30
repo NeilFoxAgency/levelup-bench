@@ -30,7 +30,9 @@ from levelup.experiments.milestone6_phase3_local_affordance_evidence import (
 from levelup.experiments.milestone6_phase3_local_affordance_raw_authority import (
     PersistedRawProbeArtifact,
     RawProbeAuthorityError,
+    RawProbeAuthoritySnapshot,
     require_expected_raw_probe_authority,
+    require_raw_probe_authority_snapshot,
 )
 from levelup.experiments.milestone6_phase3_local_affordance_raw_publication import (
     RawProbePublicationError,
@@ -62,6 +64,8 @@ class RawProbeCaptureSummary:
     """
 
     manifest_id: str
+    authority_content_sha256: str
+    manifest_file_sha256: str
     activation_git_commit: str
     ordered_key_ids: tuple[str, ...]
     ordered_artifact_ids: tuple[str, ...]
@@ -77,6 +81,17 @@ class RawProbeCaptureSummary:
     oracle_calls: int = 0
 
     def __post_init__(self) -> None:
+        if any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in (
+                self.manifest_id,
+                self.authority_content_sha256,
+                self.manifest_file_sha256,
+            )
+        ):
+            raise ValueError("raw capture summary content identities are invalid")
         if (
             len(self.ordered_key_ids) != _RAW_ARTIFACT_COUNT
             or len(self.ordered_artifact_ids) != _RAW_ARTIFACT_COUNT
@@ -271,12 +286,20 @@ def capture_and_publish_raw_probe_store(
     if len({artifact.manifest.artifact_id for artifact in persisted}) != _RAW_ARTIFACT_COUNT:
         raise RawProbeCaptureError("raw probe artifact identities are not unique")
 
+    authority_snapshot: RawProbeAuthoritySnapshot
     try:
         active_lease.require_active()
         active_tables.require_active()
         if getattr(active_tables, "_lease", None) is not active_lease:
             raise RawProbeCaptureError("canonical tables changed capability binding")
-        publish_raw_probe_store_from_readiness(active_lease, artifacts=tuple(persisted))
+        authority_snapshot = require_raw_probe_authority_snapshot(
+            publish_raw_probe_store_from_readiness(
+                active_lease,
+                artifacts=tuple(persisted),
+            )
+        )
+        if authority_snapshot.manifest != active_lease.authority.manifest:
+            raise RawProbeCaptureError("published raw-store manifest differs from authority")
     except RawProbeCaptureError:
         raise
     except (
@@ -291,7 +314,9 @@ def capture_and_publish_raw_probe_store(
         raise RawProbeCaptureError("raw probe publication readiness changed") from exc
 
     return RawProbeCaptureSummary(
-        manifest_id=active_lease.authority.manifest.manifest_id,
+        manifest_id=authority_snapshot.manifest.manifest_id,
+        authority_content_sha256=authority_snapshot.authority_content_sha256,
+        manifest_file_sha256=authority_snapshot.manifest_file.snapshot.sha256,
         activation_git_commit=active_lease.git_commit_sha,
         ordered_key_ids=tuple(key.key_id for key in keys),
         ordered_artifact_ids=tuple(artifact.manifest.artifact_id for artifact in persisted),
