@@ -998,3 +998,22 @@ for a full-rung claim, and differences within 0.05 support no robust claim. Adva
 history experiment additionally requires both gates, no family drop over 0.05 versus selected B2,
 and L no more than 0.05 below B2. Pairing, sequence, history, final-method, and final-family
 claims remain forbidden, and historical Phase 3 outcomes remain contextual rather than pooled.
+
+### Phase 3 local-affordance raw capture (development only)
+
+The frozen raw capture completed at clean execution commit `59aac16f3a87ea73946159a4bd811e0d400a5554`
+after the exact-head detached full suite, repository-wide Ruff, and GitHub Actions run
+`33322524065` passed. The descriptor-pinned source was the development-only
+`phase2-screening-readiness-9daa444` tree. The resulting ignored raw authority contains exactly
+240 artifacts, 240 key indexes, 30 leave-one-family-out manifests, and 240 held-out bindings; its
+complete content digest is recorded in
+[`milestone6_phase3_local_affordance_raw_capture.json`](../experiments/milestone6_phase3_local_affordance_raw_capture.json).
+No training, search, replay, evaluator, oracle, comparative result, or final-family access occurred.
+
+The capture spent the frozen 15,360 physical probe actions, while the matrix retains 737,280
+consumer-equivalent probe actions as a separate accounting view. Publication completed before the
+one-shot reporting command failed while hashing a misnamed source readiness path. Consequently the
+non-scientific aggregate attempt, reset, and wall-time fields were not retained and are recorded as
+`null`; the raw authority was independently descriptor-reloaded and validated after that reporting
+failure. The probes were not rerun or reconstructed, preserving both the one-shot authority and
+honest resource accounting.
