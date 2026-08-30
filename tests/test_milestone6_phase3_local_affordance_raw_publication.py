@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 from pathlib import Path
 
 import pytest
+
+from levelup.experiments import milestone6_phase3_local_affordance_readiness as readiness
 
 authority = pytest.importorskip(
     "levelup.experiments.milestone6_phase3_local_affordance_raw_authority"
@@ -243,3 +246,75 @@ def test_destination_race_is_refused_and_staged_tree_is_cleaned(
     assert destination.is_dir()
     assert not (destination / "manifest.json").exists()
     _assert_one_empty_failed_stage_skeleton(tmp_path)
+
+
+def test_active_readiness_lease_binds_exact_publication_parent(monkeypatch, tmp_path, artifacts):
+    commit = "a" * 40
+    monkeypatch.setattr(readiness, "_git_state", lambda _repository: (commit, False))
+    parent = tmp_path / "raw-parent"
+    parent.mkdir()
+    destination = parent / "raw-authority"
+    snapshot = readiness.capture_local_affordance_readiness(
+        ROOT,
+        raw_publication_destination=destination,
+    )
+
+    with snapshot.activation(expected_git_commit=commit) as lease:
+        published = publication.publish_raw_probe_store_from_readiness(
+            lease,
+            artifacts=artifacts,
+        )
+        assert published.manifest == snapshot.authority.manifest
+        assert published.manifest.execution_authorized is False
+    assert destination.is_dir()
+
+    with pytest.raises(publication.RawProbePublicationError, match="lease"):
+        publication.publish_raw_probe_store_from_readiness(lease, artifacts=artifacts)
+
+
+def test_readiness_publication_rejects_lexical_parent_substitution(
+    monkeypatch, tmp_path, artifacts
+):
+    commit = "a" * 40
+    monkeypatch.setattr(readiness, "_git_state", lambda _repository: (commit, False))
+    parent = tmp_path / "raw-parent"
+    parent.mkdir()
+    snapshot = readiness.capture_local_affordance_readiness(
+        ROOT,
+        raw_publication_destination=parent / "raw-authority",
+    )
+
+    with snapshot.activation(expected_git_commit=commit) as lease:
+        parent.rename(tmp_path / "old-parent")
+        parent.mkdir()
+        with pytest.raises(publication.RawProbePublicationError, match="parent identity"):
+            publication.publish_raw_probe_store_from_readiness(lease, artifacts=artifacts)
+
+
+def test_readiness_publication_rejects_same_byte_source_replacement(
+    monkeypatch, tmp_path, artifacts
+):
+    commit = "a" * 40
+    monkeypatch.setattr(readiness, "_git_state", lambda _repository: (commit, False))
+    repository = tmp_path / "repository"
+    for relative in readiness.SOURCE_RELATIVE_PATHS:
+        source = ROOT / relative
+        destination = repository / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+    parent = tmp_path / "raw-parent"
+    parent.mkdir()
+    destination = parent / "raw-authority"
+    snapshot = readiness.capture_local_affordance_readiness(
+        repository,
+        raw_publication_destination=destination,
+    )
+
+    with snapshot.activation(expected_git_commit=commit) as lease:
+        source = repository / readiness.SOURCE_RELATIVE_PATHS[0]
+        replacement = source.with_name("replacement.json")
+        replacement.write_bytes(source.read_bytes())
+        os.replace(replacement, source)
+        with pytest.raises(publication.RawProbePublicationError, match="lease"):
+            publication.publish_raw_probe_store_from_readiness(lease, artifacts=artifacts)
+    assert not destination.exists()

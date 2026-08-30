@@ -327,6 +327,8 @@ def publish_raw_probe_store(
     *,
     expected: ExpectedRawProbeAuthority,
     artifacts: Iterable[PersistedRawProbeArtifact],
+    _pinned_parent_fd: int | None = None,
+    _expected_parent_identity: tuple[int, int] | None = None,
 ) -> RawProbeAuthoritySnapshot:
     """Publish and validate one exact, immutable development-only raw store."""
 
@@ -339,6 +341,8 @@ def publish_raw_probe_store(
     target = Path(os.path.abspath(destination))
     if not target.name or target == target.parent:
         raise RawProbePublicationError("raw-store destination must name one child root")
+    if (_pinned_parent_fd is None) != (_expected_parent_identity is None):
+        raise RawProbePublicationError("pinned publication parent binding is incomplete")
     ordered_artifacts = _validated_artifacts(expected, artifacts)
     indices, folds, bindings = _derived_manifests(expected, ordered_artifacts)
     parent_fd: int | None = None
@@ -349,8 +353,16 @@ def publish_raw_probe_store(
     staging_identity: tuple[int, int] | None = None
     activated = False
     try:
-        parent_fd = secure_fs.open_directory_chain(target.parent)
+        if _pinned_parent_fd is None:
+            parent_fd = secure_fs.open_directory_chain(target.parent)
+        else:
+            parent_fd = os.dup(_pinned_parent_fd)
         parent_identity = secure_fs.directory_identity(parent_fd)
+        if _expected_parent_identity is not None and (
+            parent_identity != _expected_parent_identity
+            or _lexical_parent_identity(target.parent) != _expected_parent_identity
+        ):
+            raise RawProbePublicationError("pinned publication parent identity differs")
         if _entry_exists(parent_fd, target.name):
             raise RawProbePublicationError("raw-store destination already exists")
         staging_name, staging_fd, staging_identity = _allocate_staging(parent_fd, target.name)
@@ -469,7 +481,43 @@ def publish_raw_probe_store(
             ) from cleanup_error
 
 
+def publish_raw_probe_store_from_readiness(
+    lease: object,
+    *,
+    artifacts: Iterable[PersistedRawProbeArtifact],
+) -> RawProbeAuthoritySnapshot:
+    """Publish only through an active local-affordance readiness lease."""
+
+    from levelup.experiments.milestone6_phase3_local_affordance_readiness import (
+        LocalAffordanceActivationLease,
+    )
+
+    if type(lease) is not LocalAffordanceActivationLease:
+        raise RawProbePublicationError("publication requires an exact readiness lease")
+    try:
+        active = lease.require_active()
+    except ValueError as exc:
+        raise RawProbePublicationError("publication readiness lease is invalid") from exc
+    snapshot = publish_raw_probe_store(
+        active.destination_parent / active.destination_name,
+        expected=active.authority,
+        artifacts=artifacts,
+        _pinned_parent_fd=active.destination_parent_fd,
+        _expected_parent_identity=active.destination_parent_identity,
+    )
+    try:
+        active.require_active()
+    except ValueError as exc:
+        raise RawProbePublicationError(
+            "publication readiness lease changed during activation"
+        ) from exc
+    if _lexical_parent_identity(active.destination_parent) != active.destination_parent_identity:
+        raise RawProbePublicationError("publication readiness parent changed after activation")
+    return snapshot
+
+
 __all__ = [
     "RawProbePublicationError",
     "publish_raw_probe_store",
+    "publish_raw_probe_store_from_readiness",
 ]
