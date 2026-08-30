@@ -692,6 +692,20 @@ def evaluate_outcome_diagnostic_claims(
         locked_s, "S-state-availability-listwise-optimum", MATCHED_S_TUPLE
     )
     _require_locked_metric(locked_t, "T-markov-state-transition-listwise-optimum", "lr0p003-e120-t1p2")
+    # ``by_condition``/``condition_by_id`` are convenience lookups. Reject
+    # duplicate or foreign rows before using them so a forged selection cannot
+    # silently replace one condition in the fixed two-condition matrix.
+    if (
+        len(selection.condition_selections) != len(CONDITIONS)
+        or len({row.condition_id for row in selection.condition_selections})
+        != len(CONDITIONS)
+        or any(
+            type(row) is not OutcomeDiagnosticConditionSelection
+            or row.condition_id not in CONDITIONS
+            for row in selection.condition_selections
+        )
+    ):
+        _fail("diagnostic selection condition matrix is malformed")
     by_condition = selection.by_condition()
     if set(by_condition) != set(CONDITIONS):
         _fail("diagnostic selection does not cover both conditions")

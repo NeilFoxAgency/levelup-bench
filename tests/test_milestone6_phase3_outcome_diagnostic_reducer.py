@@ -222,6 +222,122 @@ def test_claims_report_exact_deltas_and_possible_interaction_without_final_acces
     assert result.final_family_access is False
 
 
+def test_claims_reject_duplicate_condition_rows_in_forged_selection_trace() -> None:
+    """Convenience lookups must not collapse a forged duplicate condition row."""
+    locked_s = _locked("S-state-availability-listwise-optimum", Fraction(1, 2))
+    locked_t = _locked("T-markov-state-transition-listwise-optimum", Fraction(1, 4))
+    rows = tuple(
+        OutcomeDiagnosticConditionSelection(
+            condition,
+            _candidate_set(condition, Fraction(1, 2)),
+            Fraction(1, 2),
+            reducer.EXPECTED_TUPLES,
+            _metric(condition, Fraction(1, 2), reducer.EXPECTED_TUPLES[0]),
+        )
+        for condition in CONDITIONS
+    )
+    forged = OutcomeDiagnosticSelectionResult((rows[0], rows[1], rows[0]))
+    with pytest.raises(OutcomeDiagnosticReducerError, match="condition matrix"):
+        evaluate_outcome_diagnostic_claims(
+            forged, locked_s=locked_s, locked_t=locked_t
+        )
+
+
+def test_claims_recompute_retention_and_tie_break_from_candidates() -> None:
+    """Stale trace fields cannot override the reducer's frozen selection rule."""
+    locked_s = _locked("S-state-availability-listwise-optimum", Fraction(1, 2))
+    locked_t = _locked("T-markov-state-transition-listwise-optimum", Fraction(1, 4))
+    rows = []
+    for condition in CONDITIONS:
+        candidates = list(_candidate_set(condition, Fraction(1, 2)))
+        # Make the final tuple the unique best candidate while retaining a
+        # forged trace that claims the first tuple was selected.
+        winner = candidates[-1]
+        family_metrics = tuple(
+            row.__class__(
+                row.family_id,
+                row.units,
+                30,
+                Fraction(3, 4),
+                row.median_restricted_interactions,
+            )
+            for row in winner.family_metrics
+        )
+        candidates[-1] = winner.__class__(
+            winner.condition_id,
+            winner.tuple_id,
+            winner.training_tuple_id,
+            family_metrics,
+            Fraction(3, 4),
+            winner.worst_family_median_restricted_interactions,
+            winner.macro_average_family_median_restricted_interactions,
+            winner.optimizer_steps,
+            winner.forward_passes,
+            winner.recurrent_steps,
+        )
+        rows.append(
+            OutcomeDiagnosticConditionSelection(
+                condition,
+                tuple(candidates),
+                Fraction(1, 2),
+                reducer.EXPECTED_TUPLES,
+                candidates[0],
+            )
+        )
+    with pytest.raises(OutcomeDiagnosticReducerError, match="selection trace"):
+        evaluate_outcome_diagnostic_claims(
+            OutcomeDiagnosticSelectionResult(tuple(rows)),
+            locked_s=locked_s,
+            locked_t=locked_t,
+        )
+
+
+def test_claims_recompute_tie_break_when_primary_rates_are_equal() -> None:
+    locked_s = _locked("S-state-availability-listwise-optimum", Fraction(1, 2))
+    locked_t = _locked("T-markov-state-transition-listwise-optimum", Fraction(1, 4))
+    rows = []
+    for condition in CONDITIONS:
+        candidates = list(_candidate_set(condition, Fraction(1, 2)))
+        winner = candidates[-1]
+        families = tuple(
+            row.__class__(
+                row.family_id,
+                row.units,
+                row.successes,
+                row.success_rate,
+                Fraction(50),
+            )
+            for row in winner.family_metrics
+        )
+        candidates[-1] = winner.__class__(
+            winner.condition_id,
+            winner.tuple_id,
+            winner.training_tuple_id,
+            families,
+            winner.minimum_family_success_rate,
+            Fraction(50),
+            Fraction(50),
+            winner.optimizer_steps,
+            winner.forward_passes,
+            winner.recurrent_steps,
+        )
+        rows.append(
+            OutcomeDiagnosticConditionSelection(
+                condition,
+                tuple(candidates),
+                Fraction(1, 2),
+                reducer.EXPECTED_TUPLES,
+                candidates[0],
+            )
+        )
+    with pytest.raises(OutcomeDiagnosticReducerError, match="selection trace"):
+        evaluate_outcome_diagnostic_claims(
+            OutcomeDiagnosticSelectionResult(tuple(rows)),
+            locked_s=locked_s,
+            locked_t=locked_t,
+        )
+
+
 def test_one_group_harm_does_not_trigger_interaction_flag() -> None:
     locked_s = _locked("S-state-availability-listwise-optimum", Fraction(1, 2))
     locked_t = _locked("T-markov-state-transition-listwise-optimum", Fraction(1, 4))
