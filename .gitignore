@@ -35,3 +35,4 @@ emulator_states/
 .env.*
 !.env.example
 test_readiness_output/
+debug_output/
