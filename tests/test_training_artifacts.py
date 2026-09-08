@@ -677,3 +677,85 @@ def test_descriptor_loader_is_anchored_across_rename_and_substitution(
     assert not replacer.is_alive()
     assert loaded == manifest
     assert (external_artifact / "manifest.json").read_text(encoding="utf-8") == "not-json"
+
+
+@pytest.mark.parametrize("substitute_ancestor", [False, True])
+def test_load_training_model_at_is_anchored_across_rename_and_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substitute_ancestor: bool,
+) -> None:
+    """Adversarial test: load_training_model_at must read from the original
+    artifact directory even if it is replaced with a symlink after manifest
+    access. This mirrors the manifest test but exercises the full model load
+    path including tensor reads."""
+    parent = tmp_path / "parent"
+    root = parent / "run"
+    root.mkdir(parents=True)
+    key = _key()
+    # Create and save the original model
+    original_model = StateConditionedScorer()
+    original_model.eval()
+    inputs = torch.randn(5, 54)
+    original_out = original_model(inputs).detach()
+    manifest = write_training_artifact(
+        root,
+        key=key,
+        model_id=key.backbone_id,
+        model=original_model,
+        accounting=ResourceAccounting(),
+        report=_report(),
+    )
+    external = tmp_path / "external"
+    external_artifact = external / "run" / "training-artifacts" / manifest.artifact_id
+    external_artifact.mkdir(parents=True)
+    (external_artifact / "manifest.json").write_text("not-json", encoding="utf-8")
+    # Write invalid tensors to detect if replacement is read
+    for item in manifest.tensors:
+        (external_artifact / "tensors").mkdir(exist_ok=True)
+        (external_artifact / "tensors" / item.filename).write_bytes(b"replaced")
+
+    barrier = threading.Barrier(2)
+    original_read = secure_fs.read_bytes_at
+    gated = False
+
+    def read_bytes(directory_fd: int, name: str) -> bytes:
+        nonlocal gated
+        # Gate after manifest read but before tensor reads
+        if name == "manifest.json" and not gated:
+            gated = True
+            barrier.wait(timeout=5)
+            barrier.wait(timeout=5)
+        return original_read(directory_fd, name)
+
+    monkeypatch.setattr(secure_fs, "read_bytes_at", read_bytes)
+    run_fd = secure_fs.open_directory_chain(root)
+
+    def substitute() -> None:
+        barrier.wait(timeout=5)
+        if substitute_ancestor:
+            detached = tmp_path / "parent-detached"
+            parent.rename(detached)
+            parent.symlink_to(external, target_is_directory=True)
+        else:
+            detached = tmp_path / "run-detached"
+            root.rename(detached)
+            root.symlink_to(external / "run", target_is_directory=True)
+        barrier.wait(timeout=5)
+
+    replacer = threading.Thread(target=substitute)
+    replacer.start()
+    try:
+        loaded_model, loaded_manifest = load_training_model_at(
+            run_fd,
+            key,
+            model_factory=lambda _: StateConditionedScorer(),
+        )
+    finally:
+        os.close(run_fd)
+    replacer.join(timeout=10)
+    assert not replacer.is_alive()
+    assert loaded_manifest == manifest
+    # Verify model weights match the original (not the replacement)
+    assert torch.equal(loaded_model(inputs).detach(), original_out)
+    assert (external_artifact / "manifest.json").read_text(encoding="utf-8") == "not-json"
