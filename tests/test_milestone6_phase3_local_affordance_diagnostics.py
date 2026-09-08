@@ -46,6 +46,7 @@ def _queries() -> tuple[LocalAffordanceQuery, ...]:
         LocalAffordanceQuery(population=population, family_id=family, evidence=evidence, states=(state,))
         for population in POPULATION_ORDER
         for family in FAMILY_ORDER
+        for _ in range(200 if population == "training" else 40)
     )
 
 
@@ -55,11 +56,13 @@ def test_aggregation_is_complete_deterministic_and_fraction_backed() -> None:
     training = report.for_population("training")
     assert tuple(item.family_id for item in training.family_summaries) == FAMILY_ORDER
     assert training.alias_counts[0].alias == "a"
-    assert training.alias_counts[0].count == 6
-    assert training.n == 384
-    assert training.k_eff == 24
-    assert training.eligible == 6
-    assert training.local_vs_pooled_outcome_block_byte_difference == 6
+    assert training.alias_counts[0].count == 1200
+    assert training.evidence_query_count == 1200
+    assert training.state_query_count == 1200
+    assert training.n == 76800
+    assert training.k_eff == 4800
+    assert training.eligible == 1200
+    assert training.local_vs_pooled_outcome_block_byte_difference == 1200
     assert training.coverage_gate.fraction.numerator == 1
     assert training.coverage_gate.fraction.denominator == 1
     assert training.coverage_gate.passes is True
@@ -130,3 +133,28 @@ def test_query_rejects_forged_or_unknown_family() -> None:
         LocalAffordanceQuery(
             population="training", family_id="secret", evidence=_evidence(), states=(ObservableState(0, 1, 0, 0.5, 0.25, ("a",)),)
         )
+
+
+def test_query_serialization_is_identity_free() -> None:
+    dumped = _queries()[0].model_dump(mode="json")
+    assert dumped == {
+        "population": "training",
+        "family_id": "plain",
+        "evidence_query_count": 1,
+        "state_query_count": 1,
+    }
+    forbidden = {"evidence", "states", "probe_index", "task_id", "digest", "seal"}
+    assert not forbidden.intersection(dumped)
+
+
+def test_coupled_family_and_population_mutations_are_rejected() -> None:
+    report = aggregate_local_affordance_diagnostics(_queries())
+    payload = report.model_dump(mode="json")
+    payload["populations"][0]["family_summaries"][0]["population"] = "heldout"
+    with pytest.raises(LocalAffordanceDiagnosticsError):
+        validate_local_affordance_diagnostic_report(payload)
+
+    payload = report.model_dump(mode="json")
+    payload["populations"][0]["evidence_query_count"] = 240
+    with pytest.raises(LocalAffordanceDiagnosticsError):
+        validate_local_affordance_diagnostic_report(payload)

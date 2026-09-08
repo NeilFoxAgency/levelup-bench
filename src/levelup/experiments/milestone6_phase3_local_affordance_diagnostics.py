@@ -12,7 +12,15 @@ import math
 from fractions import Fraction
 from typing import Any, Literal, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    model_serializer,
+    model_validator,
+)
 
 from levelup.learning.state_conditioned import (
     LocalAffordanceDiagnostics,
@@ -73,6 +81,16 @@ class LocalAffordanceQuery(BaseModel):
         if any(type(state) is not ObservableState for state in self.states):
             raise ValueError("query states must be exact observable states")
         return self
+
+    @model_serializer(mode="plain")
+    def _safe_dump(self) -> dict[str, Any]:
+        """Expose only non-sensitive query accounting; evidence remains in-memory only."""
+        return {
+            "population": self.population,
+            "family_id": self.family_id,
+            "evidence_query_count": 1,
+            "state_query_count": len(self.states),
+        }
 
 
 class AliasCount(BaseModel):
@@ -205,6 +223,8 @@ class _DiagnosticScope(BaseModel):
             raise ValueError("alias counts must be unique and canonically sorted")
         if sum(item.count for item in self.alias_counts) != self.alias_rows:
             raise ValueError("alias counts do not sum to alias rows")
+        if not 1 <= self.evidence_query_count <= self.state_query_count <= self.alias_rows:
+            raise ValueError("query counts must satisfy evidence <= states <= alias rows")
         for name in ("n_less_than_4", "unknown", "local_used", "eligible", "local_vs_pooled_outcome_block_byte_difference", "kth_distance_count"):
             if getattr(self, name) > self.alias_rows:
                 raise ValueError(f"{name} exceeds alias rows")
@@ -212,6 +232,16 @@ class _DiagnosticScope(BaseModel):
             raise ValueError("scope diagnostic counts are inconsistent")
         if self.unknown_alias_count != self.unknown:
             raise ValueError("scope unknown-alias count differs from unknown count")
+        if self.kth_distance_count != self.alias_rows - self.unknown:
+            raise ValueError("kth-distance count differs from known alias rows")
+        if not self.kth_distance_count <= self.k_eff <= 4 * self.kth_distance_count:
+            raise ValueError("k_eff is inconsistent with kth-distance row count")
+        if not self.kth_distance_count <= self.n <= 64 * self.kth_distance_count:
+            raise ValueError("n is inconsistent with kth-distance row count")
+        if self.n_less_than_4 < self.unknown:
+            raise ValueError("small-support count must include unknown aliases")
+        if self.n_less_than_4 + self.local_used > self.alias_rows:
+            raise ValueError("small-support and local-use counts overlap")
         if self.local_vs_pooled_outcome_block_byte_difference > self.eligible:
             raise ValueError("scope differences require eligible rows")
         if self.kth_distance_count and self.kth_distance_sum is None:
@@ -236,6 +266,7 @@ class _DiagnosticScope(BaseModel):
 
 
 class FamilyDiagnosticSummary(_DiagnosticScope):
+    population: DiagnosticPopulation
     family_id: str
     coverage_gate: CoverageGate
 
@@ -243,6 +274,8 @@ class FamilyDiagnosticSummary(_DiagnosticScope):
     def family_id_is_known(self) -> "FamilyDiagnosticSummary":
         if self.family_id not in FAMILY_ORDER:
             raise ValueError("unknown diagnostic family")
+        if self.evidence_query_count != (200 if self.population == "training" else 40):
+            raise ValueError("family evidence-query count differs from frozen matrix")
         if self.coverage_gate.threshold.as_fraction() != Fraction(1, 2):
             raise ValueError("family coverage threshold drifted from frozen 1/2")
         if self.coverage_gate.eligible != self.eligible:
@@ -268,8 +301,12 @@ class PopulationDiagnosticSummary(_DiagnosticScope):
         if self.coverage_gate.threshold.as_fraction() != Fraction(4, 5):
             raise ValueError("population coverage threshold drifted from frozen 4/5")
         for family in self.family_summaries:
+            if family.population != self.population:
+                raise ValueError("family summary population differs from parent")
             if family.coverage_gate.threshold.as_fraction() != Fraction(1, 2):
                 raise ValueError("family coverage threshold drifted from frozen 1/2")
+        if self.evidence_query_count != (1200 if self.population == "training" else 240):
+            raise ValueError("population evidence-query count differs from frozen matrix")
         for name in ("evidence_query_count", "state_query_count", "alias_rows", "n", "k_eff", "kth_distance_count", "n_less_than_4", "unknown", "unknown_alias_count", "local_used", "eligible", "local_vs_pooled_outcome_block_byte_difference"):
             if getattr(self, name) != sum(getattr(item, name) for item in self.family_summaries):
                 raise ValueError(f"population {name} does not equal family sum")
@@ -443,6 +480,7 @@ def _gate(scope: _DiagnosticScope, *, threshold: Fraction) -> CoverageGate:
 
 
 def _family_summary(
+    population: DiagnosticPopulation,
     family_id: str,
     rows: Sequence[LocalAffordanceDiagnostics],
     *,
@@ -455,6 +493,7 @@ def _family_summary(
         state_query_count=state_query_count,
     )
     return FamilyDiagnosticSummary(
+        population=population,
         family_id=family_id,
         **scope.model_dump(),
         coverage_gate=_gate(scope, threshold=Fraction(1, 2)),
@@ -469,6 +508,7 @@ def _population_summary(
 ) -> PopulationDiagnosticSummary:
     families = tuple(
         _family_summary(
+            population,
             family,
             family_rows[family],
             evidence_query_count=family_evidence_counts[family],
@@ -520,6 +560,10 @@ def aggregate_local_affordance_diagnostics(
             rows[query.population][query.family_id].extend(diagnostics)
     if any(not rows[population][family] for population in POPULATION_ORDER for family in FAMILY_ORDER):
         raise LocalAffordanceDiagnosticsError("diagnostic query matrix is missing population/family coverage")
+    for population in POPULATION_ORDER:
+        expected = 200 if population == "training" else 40
+        if any(evidence_counts[population][family] != expected for family in FAMILY_ORDER):
+            raise LocalAffordanceDiagnosticsError("diagnostic query matrix has incomplete family coverage")
     try:
         return LocalAffordanceDiagnosticReport(
             populations=tuple(
