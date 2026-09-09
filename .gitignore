@@ -36,3 +36,4 @@ emulator_states/
 !.env.example
 test_readiness_output/
 debug_output/
+.python-version
