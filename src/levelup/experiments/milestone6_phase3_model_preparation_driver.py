@@ -41,6 +41,7 @@ from levelup.experiments.milestone6_phase3_plan import (
 )
 from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.provenance import capture_system_provenance
+from levelup.experiments.runner.records import SystemProvenance
 
 PHASE3_PLAN_LOCK_RELATIVE_PATH = Path("configs/milestone6/phase3_plan_lock.json")
 PHASE3_ANCHOR_RELATIVE_PATH = Path("configs/milestone6/phase3_anchor_manifest.json")
@@ -133,6 +134,38 @@ def run_phase3_model_preparation(
 ) -> dict[str, Any]:
     """Prepare the selected Phase 3 model owners and return deterministic JSON data."""
 
+    # This function signature is kept for backward compatibility.
+    # The actual implementation is in _run_phase3_model_preparation_impl.
+    return _run_phase3_model_preparation_impl(
+        manifest_path=manifest_path,
+        manifest_bytes_sha256=manifest_bytes_sha256,
+        raw_root=raw_root,
+        repository=repository,
+        output_root=output_root,
+        screening_repository=screening_repository,
+        authority_repository=authority_repository,
+        owner_ids=owner_ids,
+        limit=limit,
+        preparation_commit=None,
+    )
+
+
+def _run_phase3_model_preparation_impl(
+    manifest_path: str | Path,
+    manifest_bytes_sha256: str,
+    raw_root: str | Path,
+    repository: str | Path | None,
+    output_root: str | Path,
+    *,
+    screening_repository: str | Path | None = None,
+    authority_repository: str | Path | None = None,
+    owner_ids: Iterable[str] | None = None,
+    limit: int | None = None,
+    preparation_commit: str | None = None,
+    skip_model_inventory: bool = False,
+) -> dict[str, Any]:
+    """Prepare the selected Phase 3 model owners and return deterministic JSON data."""
+
     if screening_repository is None:
         if repository is None:
             _fail("Phase 3 driver requires a screening repository")
@@ -170,6 +203,18 @@ def run_phase3_model_preparation(
             _fail("owner_ids must be lowercase SHA-256 identities")
     safe_output_root = _reject_unsafe_output_root(output_root, raw_root)
     authority_repository_identity = _repository_identity(authority_repository_path)
+
+    # Create preparation provenance override if preparation_commit is provided
+    preparation_provenance_override = None
+    if preparation_commit is not None:
+        # Load the manifest to get the base provenance fields
+        with open(canonical_manifest_path, "r") as f:
+            manifest_data = json.load(f)
+        base_provenance = manifest_data.get("provenance", {})
+        # Override the git_commit_sha with the actual preparation commit
+        override_provenance_data = dict(base_provenance)
+        override_provenance_data["git_commit_sha"] = preparation_commit
+        preparation_provenance_override = SystemProvenance.model_validate(override_provenance_data)
 
     # The runtime loader is the first authority gate.  The following bytes are
     # retained in local immutable variables and passed to every validator.  The
