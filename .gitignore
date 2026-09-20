@@ -37,3 +37,6 @@ emulator_states/
 test_readiness_output/
 debug_output/
 .python-version
+
+# uv lock file
+uv.lock
