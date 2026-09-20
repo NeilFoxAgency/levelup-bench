@@ -52,6 +52,10 @@ def _stable_non_git_fields(value: SystemProvenance) -> tuple[object, ...]:
             "git_dirty",
             "git_diff_sha256",
             "captured_at_utc",
+            "python_version",
+            "installed_packages_sha256",
+            "actual_torch_threads",
+            "actual_torch_interop_threads",
         }
     )
 
