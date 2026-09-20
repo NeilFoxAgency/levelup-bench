@@ -294,11 +294,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--screening-repository", type=Path, required=True)
     parser.add_argument("--authority-repository", type=Path, required=True)
     parser.add_argument("--output-root", type=Path, required=True)
+    parser.add_argument("--preparation-commit", type=str, default=None)
+    parser.add_argument("--skip-model-inventory", action="store_true", default=False)
     selection = parser.add_mutually_exclusive_group()
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--owner-id", action="append", default=None)
     args = parser.parse_args(argv)
-    result = run_phase3_model_preparation(
+    result = _run_phase3_model_preparation_impl(
         args.manifest_path,
         args.manifest_sha256,
         args.raw_root,
@@ -307,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
         authority_repository=args.authority_repository,
         owner_ids=args.owner_id,
         limit=args.limit,
+        preparation_commit=args.preparation_commit,
+        skip_model_inventory=args.skip_model_inventory,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
