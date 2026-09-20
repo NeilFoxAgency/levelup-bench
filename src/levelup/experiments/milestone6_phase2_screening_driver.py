@@ -90,6 +90,7 @@ def run_development_screening(
     repository: str | Path,
     *,
     dry_run: bool = False,
+    preparation_commit: str | None = None,
 ) -> dict[str, Any]:
     """Execute missing validation units from the pinned development inventory.
 
@@ -111,6 +112,7 @@ def run_development_screening(
         raw_root,
         repository,
         manifest_bytes_sha256=manifest_bytes_sha256,
+        preparation_commit=preparation_commit,
     )
     folds = _validate_runtime_inventory(runtime)
     # Validation-only deliberately leaves every store locked.  Execution has one
@@ -180,6 +182,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--manifest-sha256", required=True)
     parser.add_argument("--raw-root", type=Path, required=True)
     parser.add_argument("--repository", type=Path, required=True)
+    parser.add_argument("--preparation-commit", type=str, default=None)
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--validate-only",
@@ -198,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         args.raw_root,
         args.repository,
         dry_run=args.validate_only,
+        preparation_commit=args.preparation_commit,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0

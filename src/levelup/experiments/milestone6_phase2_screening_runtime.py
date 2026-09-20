@@ -1303,7 +1303,7 @@ def load_screening_runtime(
         # to the preparation commit. This allows validation to pass when the
         # current environment differs from the original screening environment.
         validation_preparation_provenance = SystemProvenance.model_validate(
-            captured_provenance.model_dump(mode="json") | {"git_commit_sha": preparation_commit}
+            manifest.provenance.model_dump(mode="json") | {"git_commit_sha": preparation_commit}
         )
     else:
         validation_preparation_provenance = manifest.provenance
