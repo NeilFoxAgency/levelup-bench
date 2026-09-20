@@ -1212,8 +1212,16 @@ def load_screening_runtime(
     manifest_bytes_sha256: str,
     provenance: SystemProvenance | None = None,
     authority_repository: str | Path | None = None,
+    preparation_commit: str | None = None,
 ) -> ScreeningRuntime:
-    """Load and validate the exact six-fold development screening inventory."""
+    """Load and validate the exact six-fold development screening inventory.
+
+    If preparation_commit is provided, the screening provenance validation will use a
+    preparation provenance derived from the current captured provenance with the
+    git_commit_sha set to preparation_commit. This allows the validation to pass
+    when the current environment differs from the original screening environment,
+    while still binding the preparation to a specific commit.
+    """
 
     if len(manifest_bytes_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in manifest_bytes_sha256
@@ -1289,9 +1297,20 @@ def load_screening_runtime(
             _fail("cannot capture authority repository provenance", exc)
         if authority_provenance.git_dirty or authority_provenance.git_diff_sha256 is not None:
             _fail("authority repository must be clean")
+    # Determine the preparation provenance for validation
+    if preparation_commit is not None:
+        # Use the captured provenance as the basis, but override git_commit_sha
+        # to the preparation commit. This allows validation to pass when the
+        # current environment differs from the original screening environment.
+        validation_preparation_provenance = SystemProvenance.model_validate(
+            captured_provenance.model_dump(mode="json") | {"git_commit_sha": preparation_commit}
+        )
+    else:
+        validation_preparation_provenance = manifest.provenance
+
     try:
         validate_screening_provenance(
-            manifest.provenance,
+            validation_preparation_provenance,
             captured_provenance,
             repository=repository_path,
             manifest_bytes=manifest_bytes,

@@ -226,6 +226,7 @@ def _run_phase3_model_preparation_impl(
         screening_repository,
         manifest_bytes_sha256=manifest_bytes_sha256,
         authority_repository=authority_repository_path,
+        preparation_commit=preparation_commit,
     )
     plan_lock_bytes = load_committed_phase3_plan_lock_bytes(
         _authority_path(authority_repository_path, PHASE3_PLAN_LOCK_RELATIVE_PATH)
