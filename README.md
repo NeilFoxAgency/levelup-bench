@@ -115,12 +115,14 @@ missing raw-unit and provenance infrastructure. Phase 1 now provides strict conf
 task-bound exposure manifests, deterministic seed planning, atomic per-unit records, interruption
 and resume behavior, multidimensional resource accounting, and pure aggregation. The known-family
 task pool, clean observation boundary, paired budget tiers, and robust Phase 9 selection rule are
-now frozen. No Milestone 6 learner result or new final-family result has been claimed yet.
+now frozen. The 9,120-unit Phase 2 development screening has completed and reproduced the frozen
+within-baseline picks; it is not the Phase 9 method freeze, and no new final family has been accessed.
 
 See [`docs/milestone-6-phase-0-report.md`](docs/milestone-6-phase-0-report.md),
 [`docs/milestone-6-phase-1-infrastructure.md`](docs/milestone-6-phase-1-infrastructure.md),
 [`docs/milestone-6-development-protocol.md`](docs/milestone-6-development-protocol.md), and
-[`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md).
+[`docs/milestone-6-research-plan.md`](docs/milestone-6-research-plan.md). The complete Phase 2
+screening aggregate is [`experiments/milestone6_phase2_screening_analysis.json`](experiments/milestone6_phase2_screening_analysis.json).
 
 ## Reproduce current experiments
 

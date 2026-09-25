@@ -573,6 +573,28 @@ result does not support claims about transition information beyond state, histor
 transitions, or explicit frontier-to-optimum pairing; those comparisons remain deferred until
 their named same-data, capacity-matched conditions are frozen.
 
+#### Phase 2 runtime reproduction (2026-09-24; append-only)
+
+The frozen screening matrix was rerun from the exact readiness-manifest publication snapshot in
+commit `6d3194a6e128a65aa930e9f744db27d596629cf7`, using the recorded Python 3.11.15 CPU
+environment. The driver completed all six development folds: 1,520 units per fold, 9,120 total,
+with zero failed, interrupted, skipped, or unselected units. The read-only reducer validated all
+38 variants (240 units each) and published
+[`experiments/milestone6_phase2_screening_analysis.json`](../experiments/milestone6_phase2_screening_analysis.json).
+Its whole-file SHA-256 is `737bed689c25d6153e411ef128b10ef24024b1fcaa0dde640da3c9546bfa87c2` and its
+canonical analysis SHA-256 is `8f5b8077f9fbd664ef0ab8a2c9f24b1d647288a017be88a10175b00051eb754d`.
+
+The within-baseline numeric picks and headline metrics exactly reproduce the earlier frozen
+`phase2_screening_selection.json` record. Because this rerun uses the same tasks, seeds, and budgets,
+it is an end-to-end reproducibility check, not an independent statistical replication. It does not
+change the selection rule or promote a Phase 9 method. For the objective-matched B2/C comparison,
+state-conditioned optimum imitation improved Combo at the 2,048-action screening endpoint
+(success 0.650 vs. 0.575; median restricted interactions 370.5 vs. 855.5) but reduced Heat success
+from 0.400 to 0.075. Accordingly, C's minimum-family success was 0.075 versus B2's 0.400 despite
+C's slightly lower macro median. This is mixed, development-only evidence: it does not establish a
+robust transfer benefit from state conditioning. No final family was generated, unlocked, or
+inspected; transition, history, and pairing claims remain deferred.
+
 The Phase 3 representation comparison is now frozen in
 [`docs/milestone-6-phase-3-representation-plan.md`](milestone-6-phase-3-representation-plan.md).
 It names a state/availability control with transition outcomes removed, the historical C
