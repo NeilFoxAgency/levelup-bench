@@ -41,7 +41,6 @@ from levelup.experiments.milestone6_phase3_plan import (
 )
 from levelup.experiments.runner import secure_fs
 from levelup.experiments.runner.provenance import capture_system_provenance
-from levelup.experiments.runner.records import SystemProvenance
 
 PHASE3_PLAN_LOCK_RELATIVE_PATH = Path("configs/milestone6/phase3_plan_lock.json")
 PHASE3_ANCHOR_RELATIVE_PATH = Path("configs/milestone6/phase3_anchor_manifest.json")
@@ -204,29 +203,18 @@ def _run_phase3_model_preparation_impl(
     safe_output_root = _reject_unsafe_output_root(output_root, raw_root)
     authority_repository_identity = _repository_identity(authority_repository_path)
 
-    # Create preparation provenance override if preparation_commit is provided
-    preparation_provenance_override = None
-    if preparation_commit is not None:
-        # Load the manifest to get the base provenance fields
-        with open(canonical_manifest_path, "r") as f:
-            manifest_data = json.load(f)
-        base_provenance = manifest_data.get("provenance", {})
-        # Override the git_commit_sha with the actual preparation commit
-        override_provenance_data = dict(base_provenance)
-        override_provenance_data["git_commit_sha"] = preparation_commit
-        preparation_provenance_override = SystemProvenance.model_validate(override_provenance_data)
-
     # The runtime loader is the first authority gate.  The following bytes are
     # retained in local immutable variables and passed to every validator.  The
     # batch then reopens this exact pinned repository and byte-compares the same
     # files immediately before preparation.
+    runtime_kwargs: dict[str, Any] = {
+        "manifest_bytes_sha256": manifest_bytes_sha256,
+        "authority_repository": authority_repository_path,
+    }
+    if preparation_commit is not None:
+        runtime_kwargs["preparation_commit"] = preparation_commit
     runtime = load_screening_runtime(
-        manifest_path,
-        raw_root,
-        screening_repository,
-        manifest_bytes_sha256=manifest_bytes_sha256,
-        authority_repository=authority_repository_path,
-        preparation_commit=preparation_commit,
+        manifest_path, raw_root, screening_repository, **runtime_kwargs
     )
     plan_lock_bytes = load_committed_phase3_plan_lock_bytes(
         _authority_path(authority_repository_path, PHASE3_PLAN_LOCK_RELATIVE_PATH)
@@ -301,18 +289,30 @@ def main(argv: list[str] | None = None) -> int:
     selection.add_argument("--limit", type=int, default=None)
     selection.add_argument("--owner-id", action="append", default=None)
     args = parser.parse_args(argv)
-    result = _run_phase3_model_preparation_impl(
-        args.manifest_path,
-        args.manifest_sha256,
-        args.raw_root,
-        args.screening_repository,
-        args.output_root,
-        authority_repository=args.authority_repository,
-        owner_ids=args.owner_id,
-        limit=args.limit,
-        preparation_commit=args.preparation_commit,
-        skip_model_inventory=args.skip_model_inventory,
-    )
+    if args.preparation_commit is None and not args.skip_model_inventory:
+        result = run_phase3_model_preparation(
+            args.manifest_path,
+            args.manifest_sha256,
+            args.raw_root,
+            args.screening_repository,
+            args.output_root,
+            authority_repository=args.authority_repository,
+            owner_ids=args.owner_id,
+            limit=args.limit,
+        )
+    else:
+        result = _run_phase3_model_preparation_impl(
+            args.manifest_path,
+            args.manifest_sha256,
+            args.raw_root,
+            args.screening_repository,
+            args.output_root,
+            authority_repository=args.authority_repository,
+            owner_ids=args.owner_id,
+            limit=args.limit,
+            preparation_commit=args.preparation_commit,
+            skip_model_inventory=args.skip_model_inventory,
+        )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

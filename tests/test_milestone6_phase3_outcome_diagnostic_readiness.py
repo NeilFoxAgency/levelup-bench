@@ -18,7 +18,6 @@ from levelup.experiments import milestone6_phase3_outcome_diagnostic_readiness a
 from levelup.experiments import milestone6_phase3_readiness as phase3
 
 REPOSITORY = Path(readiness.ROOT)
-OUTPUT_ROOT = REPOSITORY / readiness.DIAGNOSTIC_OUTPUT_ROOT_RELATIVE
 _MODEL_STORE_ID = "phase3-model-preparation-cc08207"
 _MODEL_METADATA_FIXTURE = Path(__file__).parent / "fixtures" / "phase3_model_preparation_metadata"
 
@@ -71,14 +70,20 @@ def _materialize_metadata_only_model_store() -> Iterator[None]:
 @pytest.fixture
 def snapshot(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> Iterator[readiness.OutcomeDiagnosticReadinessSnapshot]:
     commit = subprocess.check_output(
         ("git", "rev-parse", "HEAD"), cwd=REPOSITORY, text=True
     ).strip()
     monkeypatch.setattr(phase3, "_git_state", lambda _repository: (commit, False))
-    output_root = OUTPUT_ROOT
-    output_root.mkdir(parents=True, exist_ok=True)
-    assert not tuple(output_root.iterdir())
+    # The real canonical namespace may already hold a completed experiment.
+    # Give this fixture a distinct ignored, inert namespace without deleting
+    # or inspecting those historical result files.
+    relative_output = f"runs/milestone6/.outcome-readiness-test-{tmp_path.name}"
+    monkeypatch.setattr(readiness, "DIAGNOSTIC_OUTPUT_ROOT_RELATIVE", relative_output)
+    output_root = REPOSITORY / relative_output
+    assert not output_root.exists()
+    output_root.mkdir(parents=True)
     try:
         captured = readiness.capture_outcome_group_diagnostic_readiness(
             repository=REPOSITORY,
@@ -197,7 +202,7 @@ def test_final_family_authority_is_rejected(monkeypatch, snapshot) -> None:
     with pytest.raises(readiness.OutcomeDiagnosticReadinessError, match="final-family"):
         readiness.capture_outcome_group_diagnostic_readiness(
             repository=REPOSITORY,
-            output_root=OUTPUT_ROOT,
+            output_root=snapshot.output_root,
             expected_git_commit=snapshot.git_commit_sha,
         )
 
