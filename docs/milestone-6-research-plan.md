@@ -1017,3 +1017,49 @@ non-scientific aggregate attempt, reset, and wall-time fields were not retained 
 `null`; the raw authority was independently descriptor-reloaded and validated after that reporting
 failure. The probes were not rerun or reconstructed, preserving both the one-shot authority and
 honest resource accounting.
+
+### Phase 3 local-affordance pre-outcome diagnostic (development only)
+
+Before model preparation or comparative search, the frozen diagnostic completed from the clean
+Phase 2 readiness-publication checkout with the exact `ee2cd37c...` manifest, the clean Phase 3
+authority checkout at `60c19fb7c5fb9d3b90733993132b1eaf32d8fa0a`, and the recorded raw-probe
+store. Its full typed report is
+[`milestone6_phase3_local_affordance_preoutcome_diagnostic.json`](../experiments/milestone6_phase3_local_affordance_preoutcome_diagnostic.json),
+file SHA-256 `e6cb9352e836bbe87f848728d3ad46dad8847c894c80e9eeaf1e1ccea8615337`.
+The diagnostic required the originally recorded PyTorch `2.13.0`, Pydantic `2.13.4`, and NumPy
+`2.4.6`; a separate temporary virtual environment restored those versions without altering the
+main development environment. It queried 7,725 training decision states and 15,360 held-out
+probe states, not candidate-search trajectories or comparative outcomes.
+
+The frozen local-versus-pooled effective-change gate passed: 27,000 of 27,030 eligible training
+rows and 50,929 of 51,005 eligible held-out probe rows changed. Every development family also
+exceeded its separate 0.50 threshold. These are non-selection representation diagnostics only;
+they do not establish a transfer benefit, authorize a pairing/history claim, change the frozen
+selection rule, or unlock final families. The 15,360 physical raw-probe preparation actions and
+737,280 consumer-equivalent probe actions remain distinct costs; the missing capture attempt,
+reset, and wall-time metadata remain `null`, not reconstructed.
+
+During the pre-outcome diagnostic audit, the working branch at `60c19fb` contained a later
+Phase 2 readiness manifest with file SHA-256 `2ba74db3fd11bc0a2e8c707b9ad6e50ce1ce3aeb0eee04828487eaa8cde19eb1`.
+That file described a different preparation commit and model identities, while the frozen Phase 2
+selection lock and the actual `phase2-screening-readiness-9daa444` raw root both bind the original
+`ee2cd37c0981b459237bc8691511ed6e048863cdcf5aa04bc7f0713726ef1109` bytes. The branch
+restores the exact manifest from historical publication commit
+`4e29dec2976e9040716fe7eaad784603053e4e5c`, rather than changing the selection lock or
+reinterpreting its development result. The divergent version remains recoverable in Git history
+at `60c19fb`; no raw evidence, outcome, or historical reference metric was regenerated.
+
+The local-affordance preparation-readiness slice now pins the committed protocol, task manifest,
+representation ladder, evidence lock, plan lock, and raw-capture summary; validates the complete
+raw store; and recaptures byte, descriptor, and clean-commit identity before an activation lease.
+The durable snapshot retains only raw-store fingerprints, not all 240 probe payloads. An active
+lease issues only an exact 40-task, identity-free training-fold capability, which the pure
+B2/S/P/L view builder consumes alongside the exact immutable Phase 3 optimum evidence bundle.
+The builder verifies the typed bundle, payload bytes, source-lock digest, and 40-task order before
+reconstructing traces and returning a sealed view-bound training receipt. B2 retains its
+separate 49-input global architecture; S, P, and L use their common 54-input state architecture.
+One-owner training, metadata, and safe-tensor storage implementations now exist, but the complete
+480-owner resumable preparation driver, canonical model authority, and execution-readiness gate
+remain absent. These components are implementation-only until clean-commit/exact-head CI and the
+full authority gates pass; they do not authorize comparative outcome inspection or final-family
+access.

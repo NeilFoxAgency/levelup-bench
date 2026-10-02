@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +13,7 @@ from levelup.experiments.milestone6_phase3_local_affordance_diagnostics import (
     LocalAffordanceQuery,
     aggregate_local_affordance_diagnostics,
 )
+from levelup.experiments.milestone6_phase3_local_affordance_plan import ROOT
 from levelup.learning.state_conditioned import (
     IndexedProbeRow,
     ObservableState,
@@ -174,3 +177,24 @@ def test_capture_path_rejects_noncanonical_manifest(monkeypatch: pytest.MonkeyPa
             repository,
             repository,
         )
+
+
+def test_committed_preoutcome_report_binds_frozen_raw_capture() -> None:
+    report_path = ROOT / "experiments/milestone6_phase3_local_affordance_preoutcome_diagnostic.json"
+    content = report_path.read_bytes()
+    assert hashlib.sha256(content).hexdigest() == (
+        "e6cb9352e836bbe87f848728d3ad46dad8847c894c80e9eeaf1e1ccea8615337"
+    )
+    report = capture.LocalAffordanceDiagnosticCapture.model_validate_json(content)
+    raw = json.loads(
+        (ROOT / "experiments/milestone6_phase3_local_affordance_raw_capture.json").read_bytes()
+    )
+    assert report.raw_authority_content_sha256 == raw["raw_authority_content_sha256"]
+    assert report.raw_authority_manifest_id == raw["raw_authority_manifest_id"]
+    assert (report.training_state_query_count, report.heldout_state_query_count) == (7725, 15360)
+    assert report.diagnostics_pass is True
+    assert report.final_family_access is False
+    assert report.comparative_results_inspected is False
+    for population in report.report.populations:
+        assert population.coverage_gate.passes
+        assert all(family.coverage_gate.passes for family in population.family_summaries)
