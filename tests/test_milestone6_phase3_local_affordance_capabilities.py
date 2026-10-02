@@ -172,6 +172,58 @@ def test_training_capability_preserves_pooled_parity(authority_snapshot):
     assert all(item.affordances == first for item in rows)
 
 
+def test_training_issue_parses_only_the_exact_fold_artifacts(
+    authority_snapshot, monkeypatch
+):
+    fold = capabilities._training_fold(
+        authority_snapshot, fold_id="plain", replicate=0
+    )
+    records = {record.name: record for record in authority_snapshot.artifact_files}
+    selected_bytes = {
+        records[f"{reference.artifact_id}.json"].snapshot.canonical_bytes
+        for reference in fold.task_references
+    }
+    assert len(selected_bytes) == 40
+    calls: list[bytes] = []
+    original = capabilities.PersistedRawProbeArtifact.model_validate_json
+
+    def track_selected_parser(cls, data, *args, **kwargs):
+        assert data in selected_bytes, "training issuer parsed an unselected artifact body"
+        calls.append(data)
+        return original(data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        capabilities.PersistedRawProbeArtifact,
+        "model_validate_json",
+        classmethod(track_selected_parser),
+    )
+    capability = capabilities.issue_training_fold_probe_capability(
+        authority_snapshot, fold_id="plain", replicate=0
+    )
+    assert len(capability.consume_for(tuple(
+        reference.task_id for reference in fold.task_references
+    ))) == 40
+    assert len(calls) == 40
+    assert set(calls) == selected_bytes
+
+
+def test_wrong_training_fold_fails_before_parsing_any_artifact(
+    authority_snapshot, monkeypatch
+):
+    def fail_if_parsed(*_args, **_kwargs):
+        raise AssertionError("invalid fold reached artifact parsing")
+
+    monkeypatch.setattr(
+        capabilities.PersistedRawProbeArtifact,
+        "model_validate_json",
+        classmethod(fail_if_parsed),
+    )
+    with pytest.raises(CapabilityError):
+        capabilities.issue_training_fold_probe_capability(
+            authority_snapshot, fold_id="not-a-family", replicate=0
+        )
+
+
 def test_heldout_capability_releases_one_exact_identity_free_evidence(
     authority_snapshot, phase3_planned_unit
 ):

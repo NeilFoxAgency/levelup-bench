@@ -37,8 +37,10 @@ from levelup.experiments.milestone6_phase3_local_affordance_raw_authority import
     validate_complete_raw_probe_authority,
 )
 from levelup.experiments.milestone6_phase3_local_affordance_raw_store import (
+    FAMILY_ORDER,
     PinnedRawProbeStoreReader,
     RawProbeStoreError,
+    TrainingFoldManifest,
     open_existing_raw_probe_store,
 )
 from levelup.experiments.runner import secure_fs
@@ -671,6 +673,59 @@ class LocalAffordancePreparationLease:
                 "training capability issuer returned an unexpected capability"
             )
         return capability
+
+    def training_fold_manifest(
+        self, fold_id: str, replicate: int
+    ) -> TrainingFoldManifest:
+        """Return the exact typed 40-task training manifest under this lease.
+
+        Unlike a probe capability, this manifest intentionally retains task
+        references for the training-data driver.  It is selected only from
+        the validator-issued training-fold namespace; artifact payloads and
+        held-out bindings are never included.
+        """
+        self.require_active()
+        authority = self._raw_authority
+        if authority is None:
+            raise LocalAffordancePreparationReadinessError("preparation lease is expired")
+        if (
+            not isinstance(fold_id, str)
+            or fold_id not in FAMILY_ORDER
+            or type(replicate) is not int
+            or replicate not in range(5)
+        ):
+            raise LocalAffordancePreparationReadinessError(
+                "training fold request is outside the frozen development matrix"
+            )
+        name = f"{fold_id}.r{replicate}.json"
+        matches = tuple(
+            record for record in authority.training_fold_files if record.name == name
+        )
+        if len(matches) != 1:
+            raise LocalAffordancePreparationReadinessError(
+                "training fold manifest is missing or duplicated"
+            )
+        try:
+            manifest = TrainingFoldManifest.model_validate_json(
+                matches[0].snapshot.canonical_bytes
+            )
+        except (TypeError, ValueError) as exc:
+            raise LocalAffordancePreparationReadinessError(
+                "training fold manifest is invalid"
+            ) from exc
+        if (
+            type(manifest) is not TrainingFoldManifest
+            or manifest.fold_id != fold_id
+            or manifest.replicate != replicate
+            or len(manifest.task_references) != 40
+        ):
+            raise LocalAffordancePreparationReadinessError(
+                "training fold manifest identity differs from request"
+            )
+        # Recheck after reading the pinned bytes so source replacement during
+        # issuance cannot return a manifest from a stale or replaced lease.
+        self.require_active()
+        return manifest
 
     @property
     def provenance(self) -> Mapping[str, str]:

@@ -133,6 +133,28 @@ def _parse_artifacts(
     return artifacts
 
 
+def _index_artifact_records_by_filename(
+    snapshot: RawProbeAuthoritySnapshot,
+) -> dict[str, Any]:
+    """Index snapshot metadata without opening any artifact bodies."""
+
+    records: dict[str, Any] = {}
+    for record in snapshot.artifact_files:
+        name = record.name
+        artifact_id = name[:-5] if name.endswith(".json") else ""
+        if (
+            len(artifact_id) != 64
+            or any(character not in "0123456789abcdef" for character in artifact_id)
+        ):
+            raise LocalAffordanceCapabilityError("snapshot artifact filename is foreign")
+        if name in records:
+            raise LocalAffordanceCapabilityError("snapshot artifact filenames are duplicated")
+        records[name] = record
+    if len(records) != 240:
+        raise LocalAffordanceCapabilityError("snapshot artifact matrix is incomplete")
+    return records
+
+
 def _training_fold(
     snapshot: RawProbeAuthoritySnapshot,
     *,
@@ -389,13 +411,37 @@ def issue_training_fold_probe_capability(
     if snapshot.manifest.execution_authorized is not False:
         raise LocalAffordanceCapabilityError("raw evidence authority cannot authorize execution")
     fold = _training_fold(snapshot, fold_id=fold_id, replicate=replicate)
-    artifacts = _parse_artifacts(snapshot)
+    records_by_filename = _index_artifact_records_by_filename(snapshot)
+    if len(fold.task_references) != 40:
+        raise LocalAffordanceCapabilityError("training fold is not exactly 40 tasks")
     selected: list[TaskLocalAffordanceEvidence] = []
     task_ids: list[str] = []
+    selected_artifact_ids: set[str] = set()
     for reference in fold.task_references:
-        artifact = artifacts.get(reference.artifact_id)
         if (
-            artifact is None
+            reference.artifact_id in selected_artifact_ids
+            or reference.key.family_id == fold.heldout_family
+            or reference.key.replicate != replicate
+        ):
+            raise LocalAffordanceCapabilityError(
+                "training reference is duplicated or outside its requested fold"
+            )
+        selected_artifact_ids.add(reference.artifact_id)
+        filename = f"{reference.artifact_id}.json"
+        record = records_by_filename.get(filename)
+        if record is None:
+            raise LocalAffordanceCapabilityError(
+                "training reference does not resolve to an exact artifact filename"
+            )
+        try:
+            artifact = PersistedRawProbeArtifact.model_validate_json(
+                record.snapshot.canonical_bytes
+            )
+        except (TypeError, ValueError) as exc:
+            raise LocalAffordanceCapabilityError("selected training artifact is invalid") from exc
+        if (
+            record.name != f"{artifact.manifest.artifact_id}.json"
+            or artifact.manifest.artifact_id != reference.artifact_id
             or artifact.key != reference.key
             or artifact.manifest.key_id != reference.key_id
         ):
