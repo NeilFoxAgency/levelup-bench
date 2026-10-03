@@ -128,6 +128,20 @@ def test_concurrent_writer_fails_before_claiming_any_owner(tmp_path, plan, train
     assert _write(root, plan, prepared, record).owner_id == prepared.owner.owner_id
 
 
+def test_read_only_open_never_creates_missing_store_or_namespace(tmp_path):
+    root = tmp_path / "store"
+    with pytest.raises(store.LocalAffordanceModelStoreError):
+        with store.open_local_affordance_model_store(root, create=False):
+            pytest.fail("missing store cannot be read")
+    assert not root.exists()
+
+    root.mkdir()
+    with pytest.raises(store.LocalAffordanceModelStoreError):
+        with store.open_local_affordance_model_store(root, create=False):
+            pytest.fail("incomplete store cannot be read")
+    assert tuple(root.iterdir()) == ()
+
+
 def test_safe_tensor_encoding_is_deterministic_and_has_no_pickle_signature(plan, trained_model):
     prepared, _record, payload = trained_model
     assert store.serialize_local_affordance_model(plan, prepared) == payload

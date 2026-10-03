@@ -263,9 +263,9 @@ class PinnedLocalAffordanceModelStore:
 
 @contextmanager
 def open_local_affordance_model_store(
-    root: str | Path, *, exclusive_writer: bool = False
+    root: str | Path, *, exclusive_writer: bool = False, create: bool = True
 ) -> Iterator[PinnedLocalAffordanceModelStore]:
-    """Create/open the dedicated store namespace and pin all directories."""
+    """Pin the dedicated store, optionally refusing to create any directory."""
     path = Path(os.path.abspath(root))
     if os.path.lexists(path) and path.is_symlink():
         raise LocalAffordanceModelStoreError("refusing symlink store root")
@@ -275,11 +275,12 @@ def open_local_affordance_model_store(
     try:
         parent_fd = secure_fs.open_directory_chain(parent)
         try:
-            try:
-                os.mkdir(path.name, 0o700, dir_fd=parent_fd)
-                os.fsync(parent_fd)
-            except FileExistsError:
-                pass
+            if create:
+                try:
+                    os.mkdir(path.name, 0o700, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except FileExistsError:
+                    pass
         finally:
             os.close(parent_fd)
     except (OSError, secure_fs.SecureFilesystemError) as exc:
@@ -290,11 +291,12 @@ def open_local_affordance_model_store(
             stack.callback(os.close, root_fd)
             child: dict[str, int] = {}
             for name in (RECORDS_DIR, MODELS_DIR, STAGING_DIR):
-                try:
-                    os.mkdir(name, 0o700, dir_fd=root_fd)
-                    os.fsync(root_fd)
-                except FileExistsError:
-                    pass
+                if create:
+                    try:
+                        os.mkdir(name, 0o700, dir_fd=root_fd)
+                        os.fsync(root_fd)
+                    except FileExistsError:
+                        pass
                 child[name] = secure_fs.open_child_directory(root_fd, name)
                 stack.callback(os.close, child[name])
             identities = tuple(secure_fs.directory_identity(fd) for fd in (root_fd, child[RECORDS_DIR], child[MODELS_DIR], child[STAGING_DIR]))
