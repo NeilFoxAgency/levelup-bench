@@ -832,6 +832,226 @@ def validate_phase3_anchor_manifest_bytes(
     )
 
 
+def validate_committed_phase3_anchor_for_local_affordance_preparation(
+    content: bytes,
+    *,
+    runtime: Any,
+    evidence_lock_bytes: bytes,
+) -> Phase3AnchorManifest:
+    """Validate the committed Phase 3 anchor without opening unit-result payloads.
+
+    This is intentionally a preparation-only boundary.  The anchor's outcome-derived
+    result digests are trusted only as part of the exact committed canonical bytes;
+    current Phase 2 readiness, owner identities, planned unit identities, and frozen
+    protocol lineage are checked from the already loaded runtime metadata.
+    """
+
+    if not isinstance(content, bytes) or not content:
+        raise AnchorManifestError("anchor manifest bytes are missing")
+    try:
+        committed = load_committed_phase3_anchor_manifest_bytes()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise AnchorManifestError("committed Phase 3 anchor authority is unavailable") from exc
+    if content != committed:
+        raise AnchorManifestError("anchor bytes differ from the committed Phase 3 authority")
+    try:
+        body = json.loads(content)
+    except (TypeError, ValueError) as exc:
+        raise AnchorManifestError("anchor manifest bytes are not valid JSON") from exc
+    if not isinstance(body, dict) or canonical_json_bytes(body) != content:
+        raise AnchorManifestError("anchor manifest bytes are not canonical")
+
+    supplied = body.get("anchor_manifest_sha256")
+    _require_digest(supplied, "anchor_manifest_sha256")
+    unsigned = dict(body)
+    unsigned.pop("anchor_manifest_sha256", None)
+    if _sha256(canonical_json_bytes(unsigned)) != supplied:
+        raise AnchorManifestError("anchor manifest self-hash mismatch")
+
+    expected_keys = {
+        "schema_version", "scope", "final_family_access", "new_execution",
+        "aggregates", "final_results", "lineage", "t_alias", "counts",
+        "model_owners", "unit_results", "anchor_manifest_sha256",
+    }
+    if set(body) != expected_keys:
+        raise AnchorManifestError("anchor manifest schema fields drifted")
+    if (
+        body.get("schema_version") != SCHEMA_VERSION
+        or body.get("scope") != "known-development-only"
+        or body.get("final_family_access") is not False
+        or body.get("new_execution") is not False
+        or body.get("aggregates") != []
+        or body.get("final_results") != []
+    ):
+        raise AnchorManifestError("anchor manifest scope or schema drifted")
+    expected_counts = {
+        "families": len(FAMILIES),
+        "anchor_base_conditions": len(ANCHOR_BASES),
+        "model_owners": EXPECTED_OWNER_COUNT,
+        "unit_results": EXPECTED_UNIT_COUNT,
+    }
+    if body.get("counts") != expected_counts:
+        raise AnchorManifestError("anchor manifest counts drifted")
+    expected_alias = {
+        "condition_id": T_ALIAS,
+        "historical_condition_id": ANCHOR_BASES[1],
+        "source_base_condition_id": ANCHOR_BASES[1],
+        "analysis_only": True,
+        "new_view": False,
+        "new_model": False,
+        "new_unit_results": False,
+    }
+    if body.get("t_alias") != expected_alias:
+        raise AnchorManifestError("T alias is not analysis-only historical C")
+
+    protocol = load_phase3_protocol()
+    folds = _require_development_runtime(runtime)
+    expected_lineage = _lineage(runtime, protocol)
+    for key, value in expected_lineage.items():
+        if key.endswith("sha256"):
+            _require_digest(value, key)
+    _validate_frozen_lineage(expected_lineage, protocol)
+    if body.get("lineage") != expected_lineage:
+        raise AnchorManifestError("anchor lineage differs from in-memory Phase 2 authority")
+
+    owners = body.get("model_owners")
+    if not isinstance(owners, list) or len(owners) != EXPECTED_OWNER_COUNT:
+        raise AnchorManifestError("anchor model-owner inventory is incomplete")
+    expected_owners = _model_owner_rows(folds)
+    if owners != expected_owners:
+        raise AnchorManifestError("anchor model-owner identities differ from runtime")
+
+    units = body.get("unit_results")
+    if not isinstance(units, list) or len(units) != EXPECTED_UNIT_COUNT:
+        raise AnchorManifestError("anchor unit inventory is incomplete")
+    expected_tasks = _canonical_tasks_by_family()
+    task_ids = {
+        family: {index: task_id for task_id, index in rows}
+        for family, rows in expected_tasks.items()
+    }
+    expected_unit_ids: dict[str, dict[str, Any]] = {}
+    for fold in folds:
+        family = str(fold.family_id)
+        condition_map = _conditions_by_id(fold.config)
+        planned_units = tuple(getattr(fold.store.expected, "units", ()))
+        expected_local = 0
+        observed_local: set[tuple[str, str, int, int, int]] = set()
+        for planned in planned_units:
+            key = planned.key
+            condition_id = getattr(key, "condition_id", None)
+            condition_identity = condition_map.get(condition_id)
+            if condition_identity is None:
+                continue
+            base, candidate = condition_identity
+            task_id = str(getattr(key, "task_id", ""))
+            task_index = int(getattr(key, "task_index", -1))
+            replicate = int(getattr(key, "replicate", -1))
+            phase = str(getattr(key, "phase", ""))
+            unit_id = getattr(planned, "unit_id", None)
+            if (
+                not isinstance(unit_id, str)
+                or unit_id in expected_unit_ids
+                or task_ids[family].get(task_index) != task_id
+                or phase != "validation"
+                or replicate not in range(5)
+            ):
+                raise AnchorManifestError("runtime planned unit identity is malformed")
+            identity = (base, candidate, task_id, task_index, replicate)
+            if identity in observed_local:
+                raise AnchorManifestError("runtime planned unit identity is duplicated")
+            observed_local.add(identity)
+            expected_local += 1
+            expected_unit_ids[unit_id] = {
+                "unit_id": unit_id,
+                "result_id": unit_id,
+                "run_id": str(getattr(fold.store, "run_id", "")),
+                "family_id": family,
+                "base_condition_id": base,
+                "candidate_tuple_id": candidate,
+                "condition_id": str(condition_id),
+                "task_id": task_id,
+                "task_index": task_index,
+                "replicate": replicate,
+                "phase": phase,
+            }
+        required_local = {
+            (base, candidate, task_id, task_index, replicate)
+            for base in ANCHOR_BASES
+            for candidate in CANDIDATE_TUPLE_IDS
+            for task_id, task_index in expected_tasks[family]
+            for replicate in range(5)
+        }
+        if expected_local != EXPECTED_UNITS_PER_FOLD or observed_local != required_local:
+            raise AnchorManifestError("runtime planned unit matrix is incomplete or extra")
+    if len(expected_unit_ids) != EXPECTED_UNIT_COUNT:
+        raise AnchorManifestError("runtime planned unit matrix has an invalid count")
+    unit_rows_by_id: dict[str, dict[str, Any]] = {}
+    required_unit_fields = {
+        *next(iter(expected_unit_ids.values())).keys(),
+        "result_bytes", "result_bytes_sha256",
+    }
+    for row in units:
+        if not isinstance(row, dict) or set(row) != required_unit_fields:
+            raise AnchorManifestError("anchor unit row schema is malformed")
+        unit_id = row.get("unit_id")
+        if not isinstance(unit_id, str) or unit_id in unit_rows_by_id:
+            raise AnchorManifestError("anchor unit identities are duplicate or malformed")
+        _require_digest(row.get("result_bytes_sha256"), "result_bytes_sha256")
+        if not isinstance(row.get("result_bytes"), int) or row["result_bytes"] < 1:
+            raise AnchorManifestError("anchor unit result-byte identity is malformed")
+        expected_identity = expected_unit_ids.get(unit_id)
+        if expected_identity is None or any(
+            row.get(key) != value for key, value in expected_identity.items()
+        ):
+            raise AnchorManifestError("anchor unit identity differs from runtime plan")
+        unit_rows_by_id[unit_id] = row
+    if set(unit_rows_by_id) != set(expected_unit_ids):
+        raise AnchorManifestError("anchor unit matrix is incomplete or extra")
+
+    if not isinstance(evidence_lock_bytes, bytes) or not evidence_lock_bytes:
+        raise AnchorManifestError("Phase 3 evidence-lock bytes are missing")
+    from levelup.experiments.milestone6_phase3_evidence import (
+        load_committed_phase3_evidence_lock_bytes,
+    )
+
+    try:
+        committed_lock = load_committed_phase3_evidence_lock_bytes()
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise AnchorManifestError("committed Phase 3 evidence lock is unavailable") from exc
+    if evidence_lock_bytes != committed_lock:
+        raise AnchorManifestError("evidence-lock bytes differ from committed authority")
+    try:
+        lock = json.loads(evidence_lock_bytes)
+    except (TypeError, ValueError) as exc:
+        raise AnchorManifestError("Phase 3 evidence-lock bytes are not valid JSON") from exc
+    if not isinstance(lock, dict) or canonical_json_bytes(lock) != evidence_lock_bytes:
+        raise AnchorManifestError("Phase 3 evidence-lock bytes are not canonical")
+    lock_digest = lock.get("evidence_lock_sha256")
+    _require_digest(lock_digest, "evidence_lock_sha256")
+    lock_unsigned = dict(lock)
+    lock_unsigned.pop("evidence_lock_sha256", None)
+    if _sha256(canonical_json_bytes(lock_unsigned)) != lock_digest:
+        raise AnchorManifestError("Phase 3 evidence-lock self-hash mismatch")
+    lock_lineage = lock.get("lineage")
+    if (
+        lock.get("schema_version") != "milestone6.phase3.evidence-lock.v1"
+        or lock.get("scope") != "known-development-only"
+        or lock.get("final_family_access") is not False
+        or not isinstance(lock_lineage, dict)
+        or lock_lineage.get("phase3_anchor_manifest_sha256") != supplied
+        or lock_lineage.get("phase3_anchor_file_sha256") != _sha256(content)
+        or lock_lineage.get("phase3_protocol_sha256") != protocol.sha256
+    ):
+        raise AnchorManifestError("evidence lock is not bound to this committed anchor")
+
+    return Phase3AnchorManifest(
+        body=body,
+        canonical_bytes=content,
+        anchor_manifest_sha256=supplied,
+        _construction_token=_ANCHOR_MANIFEST_TOKEN,
+    )
+
+
 # Descriptive aliases for callers that use “create” or “anchor” terminology.
 create_phase3_anchor_manifest = build_phase3_anchor_manifest
 validate_anchor_manifest = validate_phase3_anchor_manifest
@@ -847,4 +1067,5 @@ __all__ = [
     "validate_anchor_manifest",
     "validate_phase3_anchor_manifest",
     "validate_phase3_anchor_manifest_bytes",
+    "validate_committed_phase3_anchor_for_local_affordance_preparation",
 ]
