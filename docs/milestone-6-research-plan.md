@@ -1063,3 +1063,46 @@ One-owner training, metadata, and safe-tensor storage implementations now exist,
 remain absent. These components are implementation-only until clean-commit/exact-head CI and the
 full authority gates pass; they do not authorize comparative outcome inspection or final-family
 access.
+
+The development-only preparation boundary at `3b99fac752e62f83568928cd4dd2c72b0ff3cbbe`
+passed the exact-head GitHub Actions run `37016769776` (1,145 tests and repository-wide Ruff).
+Its CI fixture constructs a synthetic 240-artifact raw authority; it does not require or publish
+the ignored 12 MB captured raw store. Separately, the clean local checkout activated the real
+captured authority and issued one exact 40-task training-fold capability. Neither verification
+trains a model or authorizes comparative execution.
+
+Publication is currently on `codex/phase3-local-affordance-preparation`. The existing `main`
+history independently changed the Phase 3 representation/plan/anchor locks and the Phase 2
+readiness manifest; a naive merge conflicts on the manifest and would require reconciling
+frozen authority identities. The validated branch is not silently merged or described as
+the `main` state. Reconciliation must preserve the actual raw-root/selection lineage and pass
+the full suite before `main` can become the canonical research branch.
+An identity-only comparison found no overlap between `main` and the selected Phase 2 lineage's
+30 evidence, 90 view, 360 model, or 480 shared artifact IDs, despite identical logical child
+run IDs and expected counts. No matching raw root for `main`'s alternate preparation identity
+was verified. Its manifest is therefore an unverified alternate record, not a replacement for
+the exact `ee2cd37c...` authority behind the frozen selection result.
+
+The exact local-affordance raw-probe store is also retained as a
+[development-only GitHub prerelease asset](https://github.com/NeilFoxAgency/levelup-bench/releases/tag/m6-local-affordance-raw-v1)
+at tag `m6-local-affordance-raw-v1` (target commit `3b99fac`). The compressed archive is 755,601
+bytes with SHA-256 `ba8a03eb5b82a1f6d43a48eaf0c289e85a200917046f20ef8d381780c185ca0a`.
+Its extracted 751-file authority was independently descriptor-reloaded: 240 task artifacts,
+manifest ID `8632bbfa4c2a57c4fe531bddc7f09e05d61d152477ceca0d039571b7aa1b07f8`,
+and content SHA-256 `909f2724a5723c53e57d965a82b4350fc3bc9a690c671310a964f7a3ecd561a3`.
+The archive contains only frozen synthetic development probe evidence, not outcomes, model
+checkpoints, final-family material, or a performance claim. The large extracted tree remains
+ignored in Git; the asset preserves its exact bytes for independent preparation.
+
+The next implementation tranche adds an outcome-free validator for the already committed Phase 3
+anchor, a descriptor-pinned loader for one optimum evidence bundle, and a read-only progress
+inventory that can report `complete` only after reloading all 480 frozen model owners. A narrow
+one-owner driver is being integrated, but is not yet an authorized execution entrypoint or a
+full-matrix scheduler.
+The ordinary anchor validator remains unchanged for analyses that need independent result-byte
+validation. Model preparation instead binds the exact committed anchor and evidence-lock bytes to
+the pinned runtime's frozen lineage without opening the 5,760 historical Phase 2 result payloads.
+This tranche has not yet run an actual model owner or comparative unit. A metadata-only Phase 2
+runtime gate is still required because the ordinary screening runtime loader reads completed
+Phase 2 result payloads during inventory validation. Until that gate and exact-head CI pass,
+even one bounded owner preparation remains forbidden.
