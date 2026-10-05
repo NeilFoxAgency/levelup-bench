@@ -18,6 +18,7 @@ from typing import Any, Mapping
 
 from levelup.experiments.milestone6_phase2_screening_runtime import (
     ScreeningRuntime,
+    recheck_screening_runtime_metadata_only,
     recheck_screening_runtime_readonly,
 )
 from levelup.experiments.milestone6_phase3_anchor import (
@@ -168,7 +169,18 @@ def _require_gates(
 ) -> tuple[tuple[Any, ...], Any, Any]:
     if not _allow_test_runtime:
         try:
-            recheck_screening_runtime_readonly(runtime)
+            metadata_only = any(
+                getattr(runtime, name, None) is not None
+                for name in (
+                    "metadata_only_snapshot_bytes",
+                    "metadata_only_snapshot_sha256",
+                    "metadata_only_selection_lock_sha256",
+                )
+            )
+            if metadata_only:
+                recheck_screening_runtime_metadata_only(runtime)
+            else:
+                recheck_screening_runtime_readonly(runtime)
         except (OSError, RuntimeError, TypeError, ValueError) as exc:
             raise EvidenceLockError(
                 "Phase 3 evidence requires a freshly revalidated ScreeningRuntime"

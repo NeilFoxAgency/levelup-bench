@@ -285,3 +285,35 @@ def test_rejects_wrong_runtime_task_order(monkeypatch, tmp_path: Path) -> None:
         load_local_affordance_training_source(
             runtime, lock, family_id="plain", replicate=0
         )
+
+
+def test_metadata_runtime_uses_metadata_recheck_and_rejects_missing_identity(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runtime, lock, _row, _run_dir = _source(tmp_path)
+    from levelup.experiments import milestone6_phase3_local_affordance_training_source as source
+
+    # Exercise the real metadata-only gate with a deliberately invalid pinned
+    # identity. The legacy payload-inventory path must never be consulted.
+    object.__setattr__(runtime, "metadata_only_snapshot_bytes", b"{}")
+    object.__setattr__(runtime, "metadata_only_snapshot_sha256", _sha("snapshot"))
+    object.__setattr__(runtime, "metadata_only_selection_lock_sha256", _sha("selection"))
+    object.__setattr__(runtime, "raw_root_identity", None)
+    calls: list[str] = []
+    metadata_recheck = source.recheck_screening_runtime_metadata_only
+
+    def checked_metadata_recheck(candidate):
+        calls.append("metadata")
+        return metadata_recheck(candidate)
+
+    def forbidden_legacy_recheck(_candidate):
+        calls.append("legacy")
+        raise AssertionError("metadata-only runtime reached legacy recheck")
+
+    monkeypatch.setattr(source, "recheck_screening_runtime_metadata_only", checked_metadata_recheck)
+    monkeypatch.setattr(source, "recheck_screening_runtime_readonly", forbidden_legacy_recheck)
+    with pytest.raises(LocalAffordanceTrainingSourceError, match="freshly rechecked"):
+        load_local_affordance_training_source(
+            runtime, lock, family_id="plain", replicate=0
+        )
+    assert calls == ["metadata"]

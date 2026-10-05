@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import levelup.experiments.milestone6_phase3_evidence as evidence_module
 from levelup.experiments.milestone6_phase3_anchor import (
     _ANCHOR_MANIFEST_TOKEN,
     Phase3AnchorManifest,
@@ -331,3 +332,121 @@ def test_phase3_evidence_lock_rejects_unvalidated_runtime_and_lineage_drift(lock
             )
     finally:
         first_fold.data.evidence_cost_ids[0] = original_cost_id
+
+
+def test_evidence_gate_dispatches_metadata_runtime_without_legacy_recheck(
+    locked, monkeypatch
+):
+    runtime, validated, anchor, anchor_file_bytes, plan_lock_bytes = locked
+    runtime = SimpleNamespace(
+        **vars(runtime),
+        metadata_only_snapshot_bytes=b"frozen-identities",
+        metadata_only_snapshot_sha256="8" * 64,
+        metadata_only_selection_lock_sha256="9" * 64,
+    )
+    calls = []
+
+    def metadata_recheck(candidate):
+        calls.append(candidate)
+        assert candidate.metadata_only_snapshot_bytes == b"frozen-identities"
+
+    def legacy_recheck(_candidate):
+        raise AssertionError("metadata runtime reached payload-capable legacy recheck")
+
+    monkeypatch.setattr(
+        evidence_module, "recheck_screening_runtime_metadata_only", metadata_recheck
+    )
+    monkeypatch.setattr(
+        evidence_module, "recheck_screening_runtime_readonly", legacy_recheck
+    )
+    monkeypatch.setattr(
+        evidence_module, "load_committed_phase3_anchor_manifest_bytes", lambda: anchor_file_bytes
+    )
+    monkeypatch.setattr(
+        evidence_module, "load_committed_phase3_plan_lock_bytes", lambda: plan_lock_bytes
+    )
+
+    evidence_module._require_gates(
+        runtime,
+        validated,
+        anchor,
+        anchor_file_bytes,
+        plan_lock_bytes,
+        _allow_test_runtime=False,
+    )
+    assert calls == [runtime]
+
+
+def test_evidence_gate_keeps_ordinary_runtime_on_strict_legacy_recheck(
+    locked, monkeypatch
+):
+    runtime, validated, anchor, anchor_file_bytes, plan_lock_bytes = locked
+    calls = []
+
+    def legacy_recheck(candidate):
+        calls.append(candidate)
+
+    def metadata_recheck(_candidate):
+        raise AssertionError("ordinary runtime reached metadata-only recheck")
+
+    monkeypatch.setattr(
+        evidence_module, "recheck_screening_runtime_readonly", legacy_recheck
+    )
+    monkeypatch.setattr(
+        evidence_module, "recheck_screening_runtime_metadata_only", metadata_recheck
+    )
+    monkeypatch.setattr(
+        evidence_module, "load_committed_phase3_anchor_manifest_bytes", lambda: anchor_file_bytes
+    )
+    monkeypatch.setattr(
+        evidence_module, "load_committed_phase3_plan_lock_bytes", lambda: plan_lock_bytes
+    )
+
+    evidence_module._require_gates(
+        runtime,
+        validated,
+        anchor,
+        anchor_file_bytes,
+        plan_lock_bytes,
+        _allow_test_runtime=False,
+    )
+    assert calls == [runtime]
+
+
+@pytest.mark.parametrize("snapshot", [b"wrong-identities", None])
+def test_metadata_evidence_gate_rejects_wrong_or_missing_snapshot(
+    locked, monkeypatch, snapshot
+):
+    runtime, validated, anchor, anchor_file_bytes, plan_lock_bytes = locked
+    runtime = SimpleNamespace(
+        **vars(runtime),
+        metadata_only_snapshot_bytes=snapshot,
+        # These remain present when snapshot bytes are missing, so the gate must
+        # still dispatch to the metadata-only validator instead of the legacy path.
+        metadata_only_snapshot_sha256="8" * 64,
+        metadata_only_selection_lock_sha256="9" * 64,
+    )
+
+    def metadata_recheck(candidate):
+        if candidate.metadata_only_snapshot_bytes != b"frozen-identities":
+            raise ValueError("metadata-only result snapshot is wrong or missing")
+
+    monkeypatch.setattr(
+        evidence_module, "recheck_screening_runtime_metadata_only", metadata_recheck
+    )
+    monkeypatch.setattr(
+        evidence_module,
+        "recheck_screening_runtime_readonly",
+        lambda _candidate: (_ for _ in ()).throw(
+            AssertionError("metadata runtime reached legacy recheck")
+        ),
+    )
+    with pytest.raises(EvidenceLockError, match="freshly revalidated"):
+        evidence_module._require_gates(
+            runtime,
+            validated,
+            anchor,
+            anchor_file_bytes,
+            plan_lock_bytes,
+            _allow_test_runtime=False,
+        )

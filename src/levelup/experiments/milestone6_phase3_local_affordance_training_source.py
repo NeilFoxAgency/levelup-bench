@@ -15,6 +15,7 @@ from typing import Any
 from levelup.experiments.milestone6_phase2_screening_runtime import (
     ScreeningRuntime,
     ScreeningRuntimeFold,
+    recheck_screening_runtime_metadata_only,
     recheck_screening_runtime_readonly,
 )
 from levelup.experiments.milestone6_phase3_evidence import (
@@ -177,7 +178,15 @@ def load_local_affordance_training_source(
     row = _lock_row(evidence_lock, family_id=family_id, replicate=replicate)
     fold = _runtime_fold(runtime, family_id)
     try:
-        recheck_screening_runtime_readonly(runtime)
+        # Metadata-only runtimes deliberately cannot pass the historical
+        # payload-inventory recheck. Dispatch only on the exact validated
+        # runtime type and the presence of its frozen snapshot bytes.
+        if type(runtime) is not ScreeningRuntime:
+            raise TypeError("training source requires an exact ScreeningRuntime")
+        if runtime.metadata_only_snapshot_bytes is not None:
+            recheck_screening_runtime_metadata_only(runtime)
+        else:
+            recheck_screening_runtime_readonly(runtime)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
         raise LocalAffordanceTrainingSourceError(
             "training source requires a freshly rechecked development runtime"
