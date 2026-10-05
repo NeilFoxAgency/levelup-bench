@@ -76,6 +76,13 @@ from levelup.experiments.runner.training_data_artifacts import (
 
 FileIdentity = tuple[int, int, int, int, int]
 DirectorySnapshot = tuple[int, int, int, int, int, tuple[tuple[str, str], ...]]
+NamespaceFileIdentity = tuple[str, tuple[int, int, int, int, int, int]]
+MetadataNamespaceSnapshot = tuple[
+    str,
+    tuple[int, int, int, int, int],
+    tuple[NamespaceFileIdentity, ...],
+]
+MetadataFoldSnapshot = tuple[str, tuple[MetadataNamespaceSnapshot, ...]]
 
 
 def load_screening_data_inventory(
@@ -198,6 +205,9 @@ class ScreeningRuntime:
     authority_repository: Path | None = None
     authority_repository_identity: tuple[int, int] | None = None
     authority_provenance: SystemProvenance | None = None
+    metadata_only_snapshot_bytes: bytes | None = None
+    metadata_only_snapshot_sha256: str | None = None
+    metadata_only_selection_lock_sha256: str | None = None
 
     @property
     def authority_bytes_by_path(self) -> tuple[tuple[Path, bytes], ...]:
@@ -214,6 +224,8 @@ class ScreeningRuntime:
     def recheck_before_execution(self) -> None:
         """Reconfirm all authority, then transactionally open execution gates."""
 
+        if self.metadata_only_snapshot_bytes is not None:
+            _fail("metadata-only screening runtimes cannot activate execution stores")
         stores = tuple(fold.store for fold in self.folds)
         for store in stores:
             store._execution_ready = False
@@ -315,6 +327,112 @@ def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
 
     if not isinstance(runtime, ScreeningRuntime):
         _fail("read-only screening recheck requires a loaded ScreeningRuntime")
+    if runtime.metadata_only_snapshot_bytes is not None:
+        _fail("metadata-only runtime requires recheck_screening_runtime_metadata_only")
+    _recheck_screening_runtime_inventory(runtime, metadata_only=False)
+
+
+def recheck_screening_runtime_metadata_only(runtime: ScreeningRuntime) -> None:
+    """Recheck a prepared runtime using only the frozen result metadata snapshot.
+
+    Unlike the historical read-only path, this never parses or hashes result
+    payloads.  It requires the canonical administrative identity artifact that
+    was supplied to the metadata-only loader and rechecks exact namespace and
+    file identities against it.
+    """
+
+    if (
+        not isinstance(runtime, ScreeningRuntime)
+        or runtime.metadata_only_snapshot_bytes is None
+        or runtime.metadata_only_selection_lock_sha256 is None
+        or runtime.metadata_only_snapshot_sha256 is None
+    ):
+        _fail("metadata-only screening recheck requires its frozen identity artifact")
+    _recheck_screening_runtime_inventory(runtime, metadata_only=True)
+    snapshot_sha256, _snapshot = _parse_result_snapshot_artifact(
+        runtime.metadata_only_snapshot_bytes,
+        selection_lock_sha256=runtime.metadata_only_selection_lock_sha256,
+        manifest=runtime.manifest,
+    )
+    if snapshot_sha256 != runtime.metadata_only_snapshot_sha256:
+        _fail("metadata-only result snapshot digest changed after runtime load")
+    _recheck_metadata_selection_authority(runtime, snapshot_sha256)
+
+
+def _recheck_metadata_selection_authority(
+    runtime: ScreeningRuntime, snapshot_sha256: str
+) -> None:
+    """Bind the metadata artifact to the currently committed frozen selection lock."""
+
+    if runtime.metadata_only_selection_lock_sha256 is None:
+        _fail("metadata-only screening runtime has no frozen selection lock digest")
+    try:
+        from levelup.experiments.milestone6_phase2_result_snapshot_publication import (
+            _canonical_selection_lock,
+        )
+
+        selection_lock, _parent_identity, _file_identity = _canonical_selection_lock(
+            runtime, runtime.metadata_only_selection_lock_sha256
+        )
+    except TrainingDataArtifactError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        _fail("cannot recheck the frozen Phase 2 selection lock", exc)
+    frozen_digest = selection_lock.get("analysis", {}).get(
+        "result_namespace_snapshot_sha256"
+    )
+    authority = selection_lock.get("authority", {})
+    if (
+        frozen_digest != snapshot_sha256
+        or authority.get("readiness_manifest_bytes_sha256") != _sha256(runtime.manifest_bytes)
+        or authority.get("source_git_commit_sha") != runtime.provenance.git_commit_sha
+        or authority.get("source_provenance_sha256")
+        != provenance_identity_sha256(runtime.provenance)
+        or authority.get("prepared_tree_sha256") != runtime.tree_sha256
+    ):
+        _fail("Phase 2 result identity artifact differs from the committed selection authority")
+    try:
+        artifact = json.loads(runtime.metadata_only_snapshot_bytes or b"")
+        # The artifact retains the publisher host's selection-lock parent and
+        # inode metadata for audit, but those identities are not portable to a
+        # distinct clean consumer checkout. The current lock is independently
+        # bound above by its exact committed bytes SHA.
+        readiness = artifact["readiness"]
+        repositories = artifact["repositories"]
+        screening = repositories["screening"]
+        historical_authority = repositories["authority"]
+        expected_sources = [
+            {"label": label, "sha256": digest}
+            for label, digest in runtime.authority_digests
+        ]
+        if (
+            readiness.get("manifest_relative_path") != CANONICAL_READINESS_PATH
+            or readiness.get("manifest_bytes_sha256") != _sha256(runtime.manifest_bytes)
+            or readiness.get("manifest_bytes_length") != len(runtime.manifest_bytes)
+            or readiness.get("manifest_parent_identity") != list(runtime.manifest_parent_identity or ())
+            or readiness.get("manifest_file_identity") != list(runtime.manifest_file_identity or ())
+            or readiness.get("prepared_tree_sha256") != runtime.tree_sha256
+            or screening.get("path") != str(runtime.repository)
+            or screening.get("git_commit_sha") != runtime.provenance.git_commit_sha
+            or screening.get("git_dirty") is not False
+            or screening.get("provenance_sha256")
+            != provenance_identity_sha256(runtime.provenance)
+            # Authority path, commit, provenance digest, and directory identity
+            # describe the publisher checkout. Bind the consumer to the same
+            # source bytes instead; current clean provenance is verified by
+            # _recheck_authority_repository before this function is reached.
+            or historical_authority.get("source_sha256") != expected_sources
+        ):
+            _fail("Phase 2 result identity artifact source or provenance bindings differ")
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail("Phase 2 result identity authority snapshot is malformed", exc)
+
+
+def _recheck_screening_runtime_inventory(
+    runtime: ScreeningRuntime, *, metadata_only: bool
+) -> None:
+    """Shared immutable inventory/provenance check for the two reuse paths."""
+
     if runtime.manifest_path != runtime.repository / CANONICAL_READINESS_PATH:
         _fail("read-only screening reuse requires the canonical committed manifest")
     if (
@@ -388,7 +506,16 @@ def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
         ):
             _fail("screening runtime child inventory differs from readiness authority")
     _assert_global_inventory(runtime.manifest, runtime.folds)
-    _recheck_manifest_and_tree(
+    metadata_snapshot = (
+        _parse_result_snapshot_artifact(
+            runtime.metadata_only_snapshot_bytes,
+            selection_lock_sha256=runtime.metadata_only_selection_lock_sha256,
+            manifest=runtime.manifest,
+        )[1]
+        if metadata_only
+        else None
+    )
+    recheck_arguments = (
         runtime.manifest_path,
         runtime.raw_root,
         runtime.manifest_bytes,
@@ -399,9 +526,15 @@ def recheck_screening_runtime_readonly(runtime: ScreeningRuntime) -> None:
         runtime.child_identities,
         runtime.manifest_parent_identity,
         runtime.manifest_file_identity,
-        (),
-        (),
+        runtime.folds if metadata_only else (),
+        runtime.result_namespace_snapshot if metadata_only else (),
     )
+    if metadata_only:
+        _recheck_manifest_and_tree(
+            *recheck_arguments, metadata_only_snapshot=metadata_snapshot
+        )
+    else:
+        _recheck_manifest_and_tree(*recheck_arguments)
 
 
 def _fail(message: str, exc: BaseException | None = None) -> None:
@@ -916,6 +1049,248 @@ def _result_namespace_snapshot(
     return tuple(snapshots)
 
 
+def _parse_result_snapshot_artifact(
+    artifact_bytes: bytes,
+    *,
+    selection_lock_sha256: str | None,
+    manifest: ScreeningReadinessManifest | None = None,
+) -> tuple[str, tuple[MetadataFoldSnapshot, ...]]:
+    """Validate and type the canonical post-selection metadata identity artifact."""
+
+    from levelup.experiments.milestone6_phase2_result_snapshot_publication import (
+        EXPECTED_FOLD_UNITS,
+        EXPECTED_TOTAL_UNITS,
+        FAMILIES,
+        SCHEMA_VERSION,
+    )
+
+    if (
+        not isinstance(artifact_bytes, bytes)
+        or not isinstance(selection_lock_sha256, str)
+        or len(selection_lock_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in selection_lock_sha256)
+    ):
+        _fail("metadata-only runtime requires canonical result identity bytes and selection SHA")
+    try:
+        document = json.loads(artifact_bytes)
+    except (json.JSONDecodeError, TypeError, ValueError) as exc:
+        _fail("Phase 2 result identity artifact is invalid JSON", exc)
+    if not isinstance(document, dict) or artifact_bytes != canonical_json_bytes(document) + b"\n":
+        _fail("Phase 2 result identity artifact is not canonical JSON")
+    if set(document) != {
+        "schema_version",
+        "purpose",
+        "use_boundary",
+        "frozen_selection",
+        "readiness",
+        "repositories",
+        "development_matrix",
+        "result_namespace_snapshot_sha256",
+        "runtime_result_namespace_snapshot",
+        "folds",
+        "identity_sha256",
+    }:
+        _fail("Phase 2 result identity artifact has missing or extra top-level fields")
+    identity_sha256 = document.get("identity_sha256")
+    body = {key: value for key, value in document.items() if key != "identity_sha256"}
+    if not isinstance(identity_sha256, str) or identity_sha256 != _sha256(canonical_json_bytes(body)):
+        _fail("Phase 2 result identity artifact self-hash is invalid")
+    if (
+        document.get("schema_version") != SCHEMA_VERSION
+        or document.get("purpose") != "trusted_administrative_post_selection_identity_capture"
+        or document.get("use_boundary")
+        != {
+            "development_only": True,
+            "final_family_access": False,
+            "learner_input": False,
+            "administrative_metadata_authority": True,
+            "comparative_inspection_performed_here": False,
+            "outcome_values_serialized": False,
+        }
+    ):
+        _fail("Phase 2 result identity artifact has an invalid schema or use boundary")
+    frozen_selection = document.get("frozen_selection")
+    if (
+        not isinstance(frozen_selection, dict)
+        or frozen_selection.get("selection_lock_sha256") != selection_lock_sha256
+        or frozen_selection.get("frozen_result_namespace_snapshot_sha256")
+        != document.get("result_namespace_snapshot_sha256")
+    ):
+        _fail("Phase 2 result identity artifact does not match the exact frozen selection")
+    snapshot = document.get("runtime_result_namespace_snapshot")
+    if not isinstance(snapshot, list):
+        _fail("Phase 2 result identity artifact has no complete namespace snapshot")
+    if _sha256(canonical_json_bytes(snapshot)) != document.get("result_namespace_snapshot_sha256"):
+        _fail("Phase 2 runtime namespace snapshot digest is invalid")
+    matrix = document.get("development_matrix")
+    folds_document = document.get("folds")
+    if (
+        matrix
+        != {
+            "family_order": list(FAMILIES),
+            "family_count": len(FAMILIES),
+            "units_per_fold": EXPECTED_FOLD_UNITS,
+            "total_units": EXPECTED_TOTAL_UNITS,
+            "final_families": [],
+        }
+        or not isinstance(folds_document, list)
+        or len(folds_document) != len(FAMILIES)
+        or len(snapshot) != len(FAMILIES)
+    ):
+        _fail("Phase 2 result identity artifact does not bind the complete development matrix")
+    if any(not isinstance(row, dict) for row in folds_document):
+        _fail("Phase 2 result identity artifact has malformed fold rows")
+    if manifest is not None and (
+        tuple(manifest.family_order) != tuple(FAMILIES)
+        or tuple(manifest.child_run_ids) != tuple(row.get("run_id") for row in folds_document)
+        or manifest.expected_total_units != EXPECTED_TOTAL_UNITS
+        or manifest.final_family_access is not False
+    ):
+        _fail("Phase 2 result identity artifact differs from readiness family authority")
+
+    parsed_folds: list[MetadataFoldSnapshot] = []
+    namespace_names = {"units", "attempts"}
+    for family, fold_row, snapshot_row in zip(FAMILIES, folds_document, snapshot, strict=True):
+        if (
+            not isinstance(fold_row, dict)
+            or fold_row.get("family_id") != family
+            or fold_row.get("expected_units") != EXPECTED_FOLD_UNITS
+            or not isinstance(fold_row.get("run_id"), str)
+            or not isinstance(fold_row.get("namespaces"), list)
+            or not isinstance(snapshot_row, list)
+            or len(snapshot_row) != 2
+            or snapshot_row[0] != fold_row["run_id"]
+        ):
+            _fail(f"Phase 2 result identity artifact has an incomplete {family} fold")
+        namespace_rows = fold_row["namespaces"]
+        if (
+            len(namespace_rows) != 2
+            or any(
+                not isinstance(row, dict) or not isinstance(row.get("name"), str)
+                for row in namespace_rows
+            )
+            or {row["name"] for row in namespace_rows} != namespace_names
+        ):
+            _fail(f"Phase 2 result identity artifact has incomplete {family} namespaces")
+        snapshot_namespaces = snapshot_row[1]
+        if not isinstance(snapshot_namespaces, list) or len(snapshot_namespaces) != 2:
+            _fail(f"Phase 2 result identity artifact snapshot has incomplete {family} namespaces")
+        parsed_namespaces: list[MetadataNamespaceSnapshot] = []
+        for name in ("units", "attempts"):
+            detail = next(row for row in namespace_rows if row["name"] == name)
+            directory = detail.get("directory")
+            files = detail.get("files")
+            snapshot_namespace = next(
+                (
+                    row
+                    for row in snapshot_namespaces
+                    if isinstance(row, list)
+                    and len(row) == 2
+                    and isinstance(row[0], str)
+                    and row[0] == name
+                ),
+                None,
+            )
+            if (
+                not isinstance(directory, dict)
+                or set(directory) != {"device", "inode", "ctime_ns", "mtime_ns", "file_type"}
+                or not isinstance(files, list)
+                or snapshot_namespace is None
+            ):
+                _fail(f"Phase 2 result identity artifact has malformed {family}/{name} metadata")
+            directory_identity = tuple(directory[key] for key in ("device", "inode", "ctime_ns", "mtime_ns", "file_type"))
+            if any(type(value) is not int or value < 0 for value in directory_identity):
+                _fail(f"Phase 2 result identity artifact has invalid {family}/{name} directory identity")
+            directory_identity = tuple(int(value) for value in directory_identity)
+            if not isinstance(snapshot_namespace[1], list) or len(snapshot_namespace[1]) != 6:
+                _fail(f"Phase 2 result identity artifact snapshot has malformed {family}/{name}")
+            snapshot_dir = tuple(snapshot_namespace[1][:5])
+            snapshot_file_rows = snapshot_namespace[1][5]
+            if (
+                len(snapshot_dir) != 5
+                or any(type(value) is not int or value < 0 for value in snapshot_dir)
+                or snapshot_dir != directory_identity
+                or not isinstance(snapshot_file_rows, list)
+            ):
+                _fail(f"Phase 2 result identity artifact directory metadata disagrees for {family}/{name}")
+            file_rows: list[NamespaceFileIdentity] = []
+            for file_row in files:
+                if not isinstance(file_row, dict) or set(file_row) != {"name", "payload_sha256", "fstat"}:
+                    _fail(f"Phase 2 result identity artifact has malformed {family}/{name} file metadata")
+                filename = file_row.get("name")
+                payload_sha256 = file_row.get("payload_sha256")
+                fstat_value = file_row.get("fstat")
+                if not isinstance(filename, str):
+                    _fail(f"Phase 2 result identity artifact has invalid {family}/{name} filename")
+                _safe_basename(filename, label="result filename")
+                if (
+                    not filename.endswith(".json")
+                    or not isinstance(payload_sha256, str)
+                    or len(payload_sha256) != 64
+                    or any(character not in "0123456789abcdef" for character in payload_sha256)
+                    or not isinstance(fstat_value, dict)
+                    or set(fstat_value)
+                    != {"device", "inode", "ctime_ns", "mtime_ns", "size", "file_type"}
+                ):
+                    _fail(f"Phase 2 result identity artifact has invalid {family}/{name} file entry")
+                identity = tuple(
+                    fstat_value[key]
+                    for key in ("device", "inode", "ctime_ns", "mtime_ns", "size", "file_type")
+                )
+                if any(type(value) is not int or value < 0 for value in identity):
+                    _fail(f"Phase 2 result identity artifact has invalid {family}/{name} fstat")
+                file_rows.append((filename, tuple(int(value) for value in identity)))
+            names = tuple(row[0] for row in file_rows)
+            if len(names) != len(set(names)) or len(names) != len(snapshot_file_rows):
+                _fail(f"Phase 2 result identity artifact has duplicate or missing {family}/{name} files")
+            digest_by_name = {
+                row["name"]: row["payload_sha256"] for row in files
+            }
+            if (
+                not all(isinstance(row, list) and len(row) == 2 for row in snapshot_file_rows)
+                or {row[0] for row in snapshot_file_rows} != set(names)
+                or any(digest_by_name.get(row[0]) != row[1] for row in snapshot_file_rows)
+            ):
+                _fail(f"Phase 2 result identity artifact file lists disagree for {family}/{name}")
+            parsed_namespaces.append((name, directory_identity, tuple(file_rows)))
+        parsed_folds.append((fold_row["run_id"], tuple(parsed_namespaces)))
+    return str(document["result_namespace_snapshot_sha256"]), tuple(parsed_folds)
+
+
+def _typed_result_namespace_snapshot(
+    artifact_bytes: bytes, expected_sha256: str
+) -> tuple[tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...]:
+    """Reconstruct the exact public typed snapshot from validated identity bytes."""
+
+    try:
+        document = json.loads(artifact_bytes)
+        rows = document["runtime_result_namespace_snapshot"]
+        typed_snapshot = tuple(
+            (
+                run_id,
+                tuple(
+                    (
+                        namespace,
+                        (
+                            *tuple(directory_row[:5]),
+                            tuple(
+                                (filename, payload_sha256)
+                                for filename, payload_sha256 in directory_row[5]
+                            ),
+                        ),
+                    )
+                    for namespace, directory_row in namespace_rows
+                ),
+            )
+            for run_id, namespace_rows in rows
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        _fail("cannot reconstruct the typed result namespace identity snapshot", exc)
+    if _sha256(canonical_json_bytes(typed_snapshot)) != expected_sha256:
+        _fail("typed result namespace identity snapshot differs from its frozen digest")
+    return typed_snapshot
+
+
 def _recheck_manifest_and_tree(
     manifest_path: Path,
     raw_root: Path,
@@ -931,6 +1306,8 @@ def _recheck_manifest_and_tree(
     expected_result_namespace_snapshot: tuple[
         tuple[str, tuple[tuple[str, DirectorySnapshot], ...]], ...
     ] = (),
+    *,
+    metadata_only_snapshot: tuple[MetadataFoldSnapshot, ...] | None = None,
 ) -> None:
     current_manifest, _current_parent_identity, _current_file_identity = _read_pinned_file(
         manifest_path,
@@ -982,7 +1359,10 @@ def _recheck_manifest_and_tree(
             child_identities,
             expected_units_by_run if folds else None,
         )
-        _validate_result_namespaces(folds, expected_result_namespace_snapshot)
+        if metadata_only_snapshot is None:
+            _validate_result_namespaces(folds, expected_result_namespace_snapshot)
+        else:
+            _validate_result_namespace_metadata(folds, metadata_only_snapshot)
         if (
             _walk_tree_digest_at(
                 raw_fd,
@@ -1030,6 +1410,112 @@ def _validate_result_namespaces(
         _fail("screening runtime result state changed during validation")
 
 
+def _validate_result_namespace_metadata(
+    folds: tuple[ScreeningRuntimeFold, ...],
+    expected_snapshot: tuple[MetadataFoldSnapshot, ...],
+) -> None:
+    """Compare exact result names and fstat identities without payload reads."""
+
+    expected_by_run = dict(expected_snapshot)
+    if len(expected_by_run) != len(expected_snapshot) or set(expected_by_run) != {
+        fold.store.run_id for fold in folds
+    }:
+        _fail("metadata-only result artifact does not cover the exact runtime folds")
+    for fold in folds:
+        store = fold.store
+        expected_namespaces = {
+            name: (directory_identity, file_rows)
+            for name, directory_identity, file_rows in expected_by_run[store.run_id]
+        }
+        if set(expected_namespaces) != {"units", "attempts"}:
+            _fail(f"metadata-only result artifact is incomplete for {store.run_id}")
+        planned_ids = {item.unit_id for item in store.expected.units}
+        if len(planned_ids) != len(store.expected.units):
+            _fail(f"metadata-only runtime has duplicate expected units for {store.run_id}")
+        try:
+            for namespace in ("units", "attempts"):
+                expected_dir_identity, expected_files = expected_namespaces[namespace]
+                file_identity_by_name = dict(expected_files)
+                if len(file_identity_by_name) != len(expected_files):
+                    _fail(f"metadata-only result artifact has duplicate names in {store.run_id}/{namespace}")
+                with store._open_result_namespace(namespace) as (_, namespace_fd):
+                    before_dir = os.fstat(namespace_fd)
+                    if not stat.S_ISDIR(before_dir.st_mode):
+                        _fail(f"metadata-only result namespace is not a directory: {store.run_id}/{namespace}")
+                    observed_dir_identity = (
+                        int(before_dir.st_dev),
+                        int(before_dir.st_ino),
+                        int(before_dir.st_ctime_ns),
+                        int(before_dir.st_mtime_ns),
+                        int(stat.S_IFMT(before_dir.st_mode)),
+                    )
+                    if observed_dir_identity != expected_dir_identity:
+                        _fail(f"metadata-only result namespace identity changed: {store.run_id}/{namespace}")
+                    names = secure_fs.strict_regular_entries(namespace_fd)
+                    if set(names) != set(file_identity_by_name) or len(names) != len(file_identity_by_name):
+                        _fail(f"metadata-only result namespace names changed: {store.run_id}/{namespace}")
+                    if namespace == "units":
+                        expected_units = {name[:-5] for name in names if name.endswith(".json")}
+                        if expected_units != planned_ids or len(names) != len(planned_ids):
+                            _fail(f"metadata-only completed-unit names are incomplete: {store.run_id}")
+                    else:
+                        for name in names:
+                            if not name.endswith(".json"):
+                                _fail(f"metadata-only attempt filename is malformed: {name}")
+                            unit_id, separator, serial = name[:-5].rpartition(".attempt-")
+                            if (
+                                not separator
+                                or unit_id not in planned_ids
+                                or len(serial) != 4
+                                or not serial.isdigit()
+                                or int(serial) < 1
+                            ):
+                                _fail(f"metadata-only attempt filename is foreign or malformed: {name}")
+                    for name in names:
+                        try:
+                            with secure_fs.open_regular_file_at(namespace_fd, name) as file_fd:
+                                before = os.fstat(file_fd)
+                                if not stat.S_ISREG(before.st_mode):
+                                    _fail(f"metadata-only result entry is not regular: {name}")
+                                identity = (
+                                    int(before.st_dev),
+                                    int(before.st_ino),
+                                    int(before.st_ctime_ns),
+                                    int(before.st_mtime_ns),
+                                    int(before.st_size),
+                                    int(stat.S_IFMT(before.st_mode)),
+                                )
+                                if identity != file_identity_by_name[name]:
+                                    _fail(f"metadata-only result file identity changed: {name}")
+                                after = os.fstat(file_fd)
+                                after_identity = (
+                                    int(after.st_dev),
+                                    int(after.st_ino),
+                                    int(after.st_ctime_ns),
+                                    int(after.st_mtime_ns),
+                                    int(after.st_size),
+                                    int(stat.S_IFMT(after.st_mode)),
+                                )
+                                if after_identity != identity:
+                                    _fail(f"metadata-only result file mutated during identity check: {name}")
+                        except secure_fs.SecureFilesystemError as exc:
+                            _fail(f"metadata-only result entry cannot be securely opened: {name}", exc)
+                    after_dir = os.fstat(namespace_fd)
+                    after_dir_identity = (
+                        int(after_dir.st_dev),
+                        int(after_dir.st_ino),
+                        int(after_dir.st_ctime_ns),
+                        int(after_dir.st_mtime_ns),
+                        int(stat.S_IFMT(after_dir.st_mode)),
+                    )
+                    if after_dir_identity != observed_dir_identity:
+                        _fail(f"metadata-only result namespace changed during check: {store.run_id}/{namespace}")
+        except TrainingDataArtifactError:
+            raise
+        except (OSError, RuntimeError, ValueError, secure_fs.SecureFilesystemError) as exc:
+            _fail(f"metadata-only result namespace is invalid: {store.run_id}", exc)
+
+
 def _assert_global_inventory(
     manifest: ScreeningReadinessManifest,
     folds: tuple[ScreeningRuntimeFold, ...],
@@ -1068,6 +1554,7 @@ def _load_fold(
     expected_child_identity: tuple[int, int],
     repository: Path,
     provenance: SystemProvenance,
+    metadata_only_snapshot: MetadataFoldSnapshot | None = None,
 ) -> ScreeningRuntimeFold:
     try:
         with ExitStack() as stack:
@@ -1195,7 +1682,10 @@ def _load_fold(
             # Existing partial/complete write-once state is valid input to a
             # resumable reload, but every entry must pass the fd-pinned RunStore
             # schema and identity validators before the child descriptor closes.
-            _validate_result_namespaces((fold,))
+            if metadata_only_snapshot is None:
+                _validate_result_namespaces((fold,))
+            else:
+                _validate_result_namespace_metadata((fold,), (metadata_only_snapshot,))
             return fold
     except TrainingDataArtifactError:
         raise
@@ -1204,7 +1694,7 @@ def _load_fold(
 
 
 
-def load_screening_runtime(
+def _load_screening_runtime(
     manifest_path: str | Path,
     raw_root: str | Path,
     repository: str | Path,
@@ -1213,6 +1703,8 @@ def load_screening_runtime(
     provenance: SystemProvenance | None = None,
     authority_repository: str | Path | None = None,
     preparation_commit: str | None = None,
+    metadata_only_snapshot_bytes: bytes | None = None,
+    metadata_only_selection_lock_sha256: str | None = None,
 ) -> ScreeningRuntime:
     """Load and validate the exact six-fold development screening inventory.
 
@@ -1223,6 +1715,8 @@ def load_screening_runtime(
     while still binding the preparation to a specific commit.
     """
 
+    if (metadata_only_snapshot_bytes is None) != (metadata_only_selection_lock_sha256 is None):
+        _fail("metadata-only runtime requires both identity bytes and frozen selection digest")
     if len(manifest_bytes_sha256) != 64 or any(
         character not in "0123456789abcdef" for character in manifest_bytes_sha256
     ):
@@ -1270,6 +1764,28 @@ def load_screening_runtime(
         raw_root_identity, child_identities = _tree_identities_at(root_fd, manifest)
     finally:
         os.close(root_fd)
+    metadata_snapshot_digest: str | None = None
+    metadata_snapshot_folds: tuple[MetadataFoldSnapshot, ...] | None = None
+    if metadata_only_snapshot_bytes is not None:
+        metadata_snapshot_digest, metadata_snapshot_folds = _parse_result_snapshot_artifact(
+            metadata_only_snapshot_bytes,
+            selection_lock_sha256=metadata_only_selection_lock_sha256,
+            manifest=manifest,
+        )
+        try:
+            snapshot_document = json.loads(metadata_only_snapshot_bytes)
+            readiness_identity = snapshot_document["readiness"]
+            if (
+                readiness_identity.get("manifest_bytes_sha256") != _sha256(manifest_bytes)
+                or readiness_identity.get("manifest_bytes_length") != len(manifest_bytes)
+                or tuple(readiness_identity.get("manifest_parent_identity", ()))
+                != manifest_parent_identity
+                or tuple(readiness_identity.get("manifest_file_identity", ()))
+                != manifest_file_identity
+            ):
+                _fail("Phase 2 result identity artifact readiness binding differs")
+        except (KeyError, TypeError, ValueError) as exc:
+            _fail("Phase 2 result identity artifact readiness binding is malformed", exc)
     authority_sources = _authority_sources(manifest)
     _assert_authority_source_paths(authority_sources, authority_repository_path)
     try:
@@ -1344,20 +1860,31 @@ def load_screening_runtime(
                 child_identity_map[child.run_id],
                 repository_path,
                 provenance_value,
+                None
+                if metadata_snapshot_folds is None
+                else metadata_snapshot_folds[index],
             )
-            for config, child in zip(configs, manifest.children, strict=True)
+            for index, (config, child) in enumerate(
+                zip(configs, manifest.children, strict=True)
+            )
         )
     finally:
         os.close(fold_root_fd)
     _assert_global_inventory(manifest, folds)
-    result_namespace_snapshot = _result_namespace_snapshot(folds)
+    result_namespace_snapshot = (
+        _typed_result_namespace_snapshot(
+            metadata_only_snapshot_bytes, metadata_snapshot_digest
+        )
+        if metadata_snapshot_folds is not None
+        else _result_namespace_snapshot(folds)
+    )
     stores = tuple(fold.store for fold in folds)
     for store in stores:
         store._execution_ready = False
     # Loading proves the immutable inventory but deliberately leaves execution
     # locked.  The caller must perform a fresh required recheck immediately
     # before execution to open all gates transactionally.
-    _recheck_manifest_and_tree(
+    recheck_arguments = (
         committed,
         root,
         manifest_bytes,
@@ -1371,9 +1898,15 @@ def load_screening_runtime(
         folds,
         result_namespace_snapshot,
     )
+    if metadata_snapshot_folds is None:
+        _recheck_manifest_and_tree(*recheck_arguments)
+    else:
+        _recheck_manifest_and_tree(
+            *recheck_arguments, metadata_only_snapshot=metadata_snapshot_folds
+        )
     if _directory_identity(authority_repository_path) != authority_repository_identity:
         _fail("screening authority repository identity changed during runtime load")
-    return ScreeningRuntime(
+    runtime = ScreeningRuntime(
         manifest_path=committed,
         raw_root=root,
         repository=repository_path,
@@ -1392,6 +1925,67 @@ def load_screening_runtime(
         authority_repository=authority_repository_path,
         authority_repository_identity=authority_repository_identity,
         authority_provenance=authority_provenance,
+        metadata_only_snapshot_bytes=metadata_only_snapshot_bytes,
+        metadata_only_snapshot_sha256=metadata_snapshot_digest,
+        metadata_only_selection_lock_sha256=metadata_only_selection_lock_sha256,
+    )
+    if metadata_snapshot_digest is not None:
+        _recheck_metadata_selection_authority(runtime, metadata_snapshot_digest)
+    return runtime
+
+
+def load_screening_runtime(
+    manifest_path: str | Path,
+    raw_root: str | Path,
+    repository: str | Path,
+    *,
+    manifest_bytes_sha256: str,
+    provenance: SystemProvenance | None = None,
+    authority_repository: str | Path | None = None,
+    preparation_commit: str | None = None,
+) -> ScreeningRuntime:
+    """Load using the historical strict record-validation behavior."""
+
+    return _load_screening_runtime(
+        manifest_path,
+        raw_root,
+        repository,
+        manifest_bytes_sha256=manifest_bytes_sha256,
+        provenance=provenance,
+        authority_repository=authority_repository,
+        preparation_commit=preparation_commit,
+    )
+
+
+def load_screening_runtime_metadata_only(
+    manifest_path: str | Path,
+    raw_root: str | Path,
+    repository: str | Path,
+    *,
+    manifest_bytes_sha256: str,
+    result_snapshot_bytes: bytes,
+    selection_lock_sha256: str,
+    provenance: SystemProvenance | None = None,
+    authority_repository: str | Path | None = None,
+    preparation_commit: str | None = None,
+) -> ScreeningRuntime:
+    """Load the prepared development inventory without opening result payloads.
+
+    The exact canonical post-selection namespace identity bytes and frozen
+    selection-lock digest are mandatory. This is a provenance/reuse path, not
+    an execution or comparative-result interface.
+    """
+
+    return _load_screening_runtime(
+        manifest_path,
+        raw_root,
+        repository,
+        manifest_bytes_sha256=manifest_bytes_sha256,
+        provenance=provenance,
+        authority_repository=authority_repository,
+        preparation_commit=preparation_commit,
+        metadata_only_snapshot_bytes=result_snapshot_bytes,
+        metadata_only_selection_lock_sha256=selection_lock_sha256,
     )
 
 
@@ -1400,7 +1994,9 @@ __all__ = [
     "ScreeningRuntime",
     "ScreeningRuntimeFold",
     "recheck_screening_runtime_readonly",
+    "recheck_screening_runtime_metadata_only",
     "load_screening_runtime",
+    "load_screening_runtime_metadata_only",
     "load_screening_data_inventory",
     "load_screening_model_inventory",
 ]
