@@ -1106,3 +1106,35 @@ This tranche has not yet run an actual model owner or comparative unit. A metada
 runtime gate is still required because the ordinary screening runtime loader reads completed
 Phase 2 result payloads during inventory validation. Until that gate and exact-head CI pass,
 even one bounded owner preparation remains forbidden.
+
+### Phase 2 post-selection result identity for outcome-free preparation
+
+A separate trusted administrative pass revalidated the already completed Phase 2 development
+result namespace against the selection lock. The pass read the 9,120 prior result files only to
+recompute their frozen identity digest; it did not emit or inspect comparative outcome values,
+aggregate anew, change selection, train a model, or open final-family data. Its canonical
+self-hash is `01857e98a83cfac522026f9fa010773f3a70e37677e8285bcf989fa9773414af`, and its
+namespace digest exactly matches the pre-existing selection-lock value
+`0e1d67b5362ac97a8506f7c419a5927c3b785a7a42b07365dc6076e27d5ab0b9`. The artifact
+contains six folds, 9,120 unit filenames, zero attempt files, payload SHA-256 commitments, and
+filesystem identities, but no success metrics or learner inputs.
+
+The 4,064,889-byte canonical JSON is retained as a
+[development-only GitHub prerelease asset](https://github.com/NeilFoxAgency/levelup-bench/releases/tag/m6-phase2-result-identity-v1)
+with file SHA-256 `537039da0e4d3bf1442f3bc6ffe2e513b2d2ffe4f010f3426cc1c63c2448b730`.
+It is host/filesystem-specific: its inode and timestamp checks are intended for reuse of the
+original local raw root, not to pretend an extracted archive has the same identities. A separate
+metadata-only runtime loader may consume these exact frozen bytes and check current file
+identities without opening result payloads. The historical full validator remains available
+for independent result audits. This new authority does not unlock training or comparative
+execution until the metadata loader and driver pass exact-head CI and clean local preflight.
+
+The first post-CI, non-comparative model-preparation smoke is fixed before any new outcome:
+use the `plain` held-out development fold, replicate `0`, and training tuple
+`lr0p003-e120`, with one owner from each B2/S/P/L condition. The exact owner IDs in condition
+order are `01e67eaa98ae84cc9244269a2a554b6a5fb80b5f3110bedfbcc99d8984eafebc`,
+`db25b0e73ce5ecd0aac1c49e052c36924f1627389b7b96d1a1a20079d7cac312`,
+`86225e788237f77776cfb82259c01ff785a2b58885853dd13c4d98956b2bf98a`, and
+`56ac4fad5b295318f396a05d55fe0327b939b1c5e815cd1f01ad0bfaaf4aba9f`.
+This checks data/model/store parity and resume only; it is not a selected tuple, held-out search,
+comparative outcome, or permission to change the frozen hyperparameter grid.
