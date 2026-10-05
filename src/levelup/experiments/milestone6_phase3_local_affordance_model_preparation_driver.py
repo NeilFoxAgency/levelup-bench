@@ -128,6 +128,25 @@ def _repository(path: str | Path, label: str) -> Path:
     return result
 
 
+def _safe_directory(path: str | Path, label: str) -> Path:
+    """Resolve a raw-data root while rejecting symlinks in its path chain."""
+    lexical = Path(os.path.abspath(path))
+    for candidate in (lexical, *lexical.parents):
+        try:
+            observed = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if stat.S_ISLNK(observed.st_mode):
+            _fail(f"{label} or an ancestor is a symlink")
+    try:
+        resolved = lexical.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        _fail(f"{label} is unavailable", exc)
+    if not resolved.is_dir():
+        _fail(f"{label} is not a directory")
+    return resolved
+
+
 def _read_regular(path: Path) -> bytes:
     """Read one regular file with no-follow on its pinned parent descriptor."""
     try:
@@ -160,7 +179,8 @@ def _assert_output_root(
     output_root: str | Path,
     *,
     authority: Path,
-    raw_root: Path,
+    screening_raw_root: Path,
+    raw_probe_root: Path,
     runtime: ScreeningRuntime | None,
 ) -> Path:
     output = Path(os.path.abspath(output_root))
@@ -179,7 +199,10 @@ def _assert_output_root(
         _fail("model output root must be the dedicated canonical owner store")
     if not resolved.parent.is_dir():
         _fail("dedicated model-store parent must already exist")
-    forbidden = [raw_root.resolve(strict=True)]
+    forbidden = [
+        screening_raw_root.resolve(strict=True),
+        raw_probe_root.resolve(strict=True),
+    ]
     if runtime is not None:
         forbidden.extend(fold.store.run_dir.resolve(strict=True) for fold in runtime.folds)
     for root in forbidden:
@@ -249,11 +272,12 @@ def _validated_evidence_lock(authority: Path, runtime: ScreeningRuntime, snapsho
 def run_local_affordance_model_preparation(
     manifest_path: str | Path,
     manifest_bytes_sha256: str,
-    raw_root: str | Path,
+    screening_raw_root: str | Path,
     screening_repository: str | Path,
     authority_repository: str | Path,
     output_root: str | Path,
     *,
+    raw_probe_root: str | Path,
     result_snapshot_path: str | Path,
     owner_id: str,
     validate_only: bool = False,
@@ -273,7 +297,10 @@ def run_local_affordance_model_preparation(
 
     screening = _repository(screening_repository, "screening")
     authority = _repository(authority_repository, "current authority")
-    raw = Path(os.path.abspath(raw_root))
+    screening_raw = _safe_directory(screening_raw_root, "Phase 2 screening raw root")
+    probe_raw = _safe_directory(raw_probe_root, "Phase 3 raw-probe root")
+    if screening_raw == probe_raw:
+        _fail("Phase 2 screening and Phase 3 raw-probe roots must be distinct")
     if screening == authority:
         _fail("screening publication and current authority must be separate repositories")
     if authority != _SOURCE_ROOT.resolve(strict=True):
@@ -298,7 +325,7 @@ def run_local_affordance_model_preparation(
     try:
         snapshot = require_local_affordance_preparation_snapshot(
             capture_local_affordance_preparation_readiness(
-                repository=authority, raw_root=raw
+                repository=authority, raw_root=probe_raw
             )
         )
         if snapshot.git_commit_sha != authority_commit:
@@ -318,11 +345,15 @@ def run_local_affordance_model_preparation(
             _fail("selected owner is absent from the frozen development plan")
         owner = matches[0]
         store_root = _assert_output_root(
-            output_root, authority=authority, raw_root=raw, runtime=None
+            output_root,
+            authority=authority,
+            screening_raw_root=screening_raw,
+            raw_probe_root=probe_raw,
+            runtime=None,
         )
         runtime = load_screening_runtime_metadata_only(
             canonical_manifest,
-            raw,
+            screening_raw,
             screening,
             manifest_bytes_sha256=manifest_bytes_sha256,
             result_snapshot_bytes=result_snapshot_bytes,
@@ -333,7 +364,8 @@ def run_local_affordance_model_preparation(
         store_root = _assert_output_root(
             store_root,
             authority=authority,
-            raw_root=raw,
+            screening_raw_root=screening_raw,
+            raw_probe_root=probe_raw,
             runtime=runtime,
         )
         evidence_lock = _validated_evidence_lock(authority, runtime, snapshot)

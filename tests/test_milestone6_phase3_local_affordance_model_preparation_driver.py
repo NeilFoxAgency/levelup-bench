@@ -35,8 +35,10 @@ def _setup_driver(tmp_path, monkeypatch, *, validate_only=False):
     manifest_path.parent.mkdir(parents=True)
     manifest_bytes = b"canonical phase2 publication fixture\n"
     manifest_path.write_bytes(manifest_bytes)
-    raw_root = tmp_path / "raw"
-    raw_root.mkdir()
+    screening_raw_root = tmp_path / "screening-raw"
+    screening_raw_root.mkdir()
+    raw_probe_root = tmp_path / "raw-probe"
+    raw_probe_root.mkdir()
     output_relative = Path("tests")
     monkeypatch.setattr(driver, "MODEL_STORE_RELATIVE_PATH", output_relative)
     snapshot_bytes = b"canonical administrative result identity fixture"
@@ -74,7 +76,11 @@ def _setup_driver(tmp_path, monkeypatch, *, validate_only=False):
         activation=activation,
     )
     monkeypatch.setattr(driver, "_git_state", lambda repo: ("a" * 40, False))
-    monkeypatch.setattr(driver, "capture_local_affordance_preparation_readiness", lambda **kwargs: snapshot)
+    monkeypatch.setattr(
+        driver,
+        "capture_local_affordance_preparation_readiness",
+        lambda **kwargs: calls.append(("readiness", kwargs.get("raw_root"))) or snapshot,
+    )
     monkeypatch.setattr(driver, "require_local_affordance_preparation_snapshot", lambda value: value)
 
     def read_snapshot(path):
@@ -83,6 +89,7 @@ def _setup_driver(tmp_path, monkeypatch, *, validate_only=False):
         return snapshot_bytes
 
     def load_metadata_runtime(*args, **kwargs):
+        assert Path(args[1]) == screening_raw_root
         assert kwargs["result_snapshot_bytes"] == snapshot_bytes
         assert kwargs["selection_lock_sha256"] == driver.SELECTION_LOCK_SHA256
         calls.append("metadata-load")
@@ -156,10 +163,11 @@ def _setup_driver(tmp_path, monkeypatch, *, validate_only=False):
     kwargs = {
         "manifest_path": manifest_path,
         "manifest_bytes_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-        "raw_root": raw_root,
+        "screening_raw_root": screening_raw_root,
         "screening_repository": screening,
         "authority_repository": driver._SOURCE_ROOT,
         "output_root": driver._SOURCE_ROOT / output_relative,
+        "raw_probe_root": raw_probe_root,
         "result_snapshot_path": driver._SOURCE_ROOT
         / "experiments/phase2-result-namespace-identity.json",
         "owner_id": owner.owner_id,
@@ -179,6 +187,7 @@ def test_one_owner_driver_uses_only_selected_training_bundle_and_stores_once(tmp
     assert result["full_matrix_authorized"] is False
     assert result["comparative_units_run"] is False
     assert "snapshot-read" in calls
+    assert ("readiness", kwargs["raw_probe_root"]) in calls
     assert "metadata-load" in calls
     assert calls.count("metadata-recheck") == 2
     assert sum(isinstance(call, tuple) and call[0] == "train" for call in calls) == 1
@@ -320,12 +329,71 @@ def test_forged_owner_is_rejected_before_runtime_or_training(tmp_path, monkeypat
 
 def test_noncanonical_or_final_output_path_is_rejected_before_runtime(tmp_path, monkeypatch):
     kwargs, calls, _owner = _setup_driver(tmp_path, monkeypatch)
-    kwargs["output_root"] = kwargs["raw_root"] / "final-family-output"
+    kwargs["output_root"] = kwargs["screening_raw_root"] / "final-family-output"
 
     with pytest.raises(driver.LocalAffordanceModelPreparationDriverError, match="canonical"):
         driver.run_local_affordance_model_preparation(**kwargs)
 
     assert not any(call in {"metadata-load", "serialize"} for call in calls)
+
+
+def test_screening_and_probe_roots_must_be_distinct_before_any_runtime_work(tmp_path, monkeypatch):
+    kwargs, calls, _owner = _setup_driver(tmp_path, monkeypatch)
+    kwargs["raw_probe_root"] = kwargs["screening_raw_root"]
+
+    with pytest.raises(driver.LocalAffordanceModelPreparationDriverError, match="must be distinct"):
+        driver.run_local_affordance_model_preparation(**kwargs)
+
+    assert "snapshot-read" not in calls
+    assert "metadata-load" not in calls
+    assert not any(
+        isinstance(call, tuple) and call[0] == "readiness"
+        for call in calls
+    )
+
+
+def test_output_root_rejects_both_raw_roots_and_all_screening_children(tmp_path, monkeypatch):
+    kwargs, _calls, _owner = _setup_driver(tmp_path, monkeypatch)
+    output = kwargs["output_root"]
+    authority = driver._SOURCE_ROOT
+    screening_raw = kwargs["screening_raw_root"]
+    probe_raw = kwargs["raw_probe_root"]
+
+    with pytest.raises(driver.LocalAffordanceModelPreparationDriverError, match="overlaps"):
+        driver._assert_output_root(
+            output,
+            authority=authority,
+            screening_raw_root=output,
+            raw_probe_root=probe_raw,
+            runtime=None,
+        )
+    with pytest.raises(driver.LocalAffordanceModelPreparationDriverError, match="overlaps"):
+        driver._assert_output_root(
+            output,
+            authority=authority,
+            screening_raw_root=screening_raw,
+            raw_probe_root=output,
+            runtime=None,
+        )
+
+    child_dirs = tuple(tmp_path / f"screening-child-{index}" for index in range(6))
+    for child in child_dirs:
+        child.mkdir()
+    runtime = SimpleNamespace(
+        folds=tuple(
+            SimpleNamespace(store=SimpleNamespace(run_dir=child))
+            for child in child_dirs[:5]
+        )
+        + (SimpleNamespace(store=SimpleNamespace(run_dir=output)),)
+    )
+    with pytest.raises(driver.LocalAffordanceModelPreparationDriverError, match="overlaps"):
+        driver._assert_output_root(
+            output,
+            authority=authority,
+            screening_raw_root=screening_raw,
+            raw_probe_root=probe_raw,
+            runtime=runtime,
+        )
 
 
 def test_symlinked_output_root_is_rejected_before_runtime(tmp_path, monkeypatch):
